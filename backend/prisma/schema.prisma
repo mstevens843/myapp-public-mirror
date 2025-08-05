@@ -1,0 +1,447 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String     @id @default(uuid()) // User's unique ID
+  activeWalletId   Int?                                // FK to one of the user's wallets
+  type             String     @default("telegram")
+  userId           String     @unique                // Renamed externalId to userId
+  username         String?    @unique                // Added username field
+  hashedPassword   String?
+  email            String?    @unique
+  createdAt        DateTime   @default(now())
+  wallets          Wallet[]   @relation("UserWallets") // Relation to multiple wallets
+  telegramPreferences TelegramPreference[]
+  userPreferences   UserPreference[]
+  dcaOrders         DcaOrder[]
+  limitOrders       LimitOrder[]
+  tpSlRules         TpSlRule[]
+  scheduledStrategies ScheduledStrategy[]
+  RefreshToken      RefreshToken[]
+  // Payments
+  subscriptionStatus String   @default("inactive") // e.g. active, canceled
+  stripeCustomerId   String?  @unique              // Stripe customer ID
+  stripeSubscriptionId String?                     // Stripe subscription ID
+  plan               String   @default("free")     // free / basic / pro
+  usage              Int      @default(0)          // current month’s usage in compute units
+  usageResetAt       DateTime @default(now())      // when usage resets (monthly)
+  credits            Decimal   @default(0.00)
+  // accounts
+    isDeleted          Boolean   @default(false)
+  deletedAt          DateTime?
+  lastPasswordChangeAt DateTime?
+  accountStatus      String    @default("active")
+  agreedToTermsAt     DateTime? // When user accepted Terms/Privacy
+  // 2fa authentication
+  is2FAEnabled      Boolean   @default(false)
+  twoFactorSecret   String?
+   recoveryCodes    String[] 
+     resetToken     String?
+  resetExpires   DateTime?
+    passwordResetToken    String? 
+  passwordResetExpires  DateTime?
+  // porfolio relationship
+    portfolioTrackers PortfolioTracker[]
+  netWorthSnapshots NetWorthSnapshot[]
+  netWorthHistories NetWorthHistory[]
+  // Web 3 Auth System 
+  // type                 String   @default("web")
+  phantomPublicKey     String? @unique
+  vaultPublicKey       String?
+  vaultPrivateKeyEnc   String?
+  // trades  Trade[] @relation("UserTrades") 
+  savedConfigs SavedConfigs[] 
+}
+
+
+
+model Wallet {
+  id         Int      @id @default(autoincrement())
+  label      String
+  publicKey  String   @unique
+  privateKey String
+  createdAt  DateTime @default(now())
+  userId     String
+  user       User     @relation("UserWallets", fields: [userId], references: [id]) // Relates with userId
+  trades        Trade[]          @relation("WalletTrades")
+  closed        ClosedTrade[]
+  refreshTokens RefreshToken[]
+  tpSlRules     TpSlRule[]  
+  limitOrders LimitOrder[]
+  dcaOrders   DcaOrder[]
+  scheduledStrategies ScheduledStrategy[] 
+  @@unique([userId, label])  
+}
+
+
+model Trade {
+  id              Int       @id @default(autoincrement())
+  mint            String
+  tokenName       String?
+  entryPrice      Float?
+  entryPriceUSD   Float?
+  inAmount        BigInt
+  outAmount       BigInt
+  closedOutAmount BigInt
+  exitPrice       Float?
+  exitPriceUSD    Float?
+  strategy        String
+  walletLabel     String?
+  txHash          String?   @unique
+  unit            String
+  slippage        Float?
+  decimals        Int?
+  usdValue        Float?
+  type            String
+  side            String
+  botId           String
+  triggerType     String?
+  exitedAt        DateTime?
+  timestamp       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt @default(now())
+  inputMint       String?  
+  outputMint      String? 
+  // userId          String?
+  // user   User? @relation("UserTrades", fields: [userId], references: [id])
+  walletId Int
+  wallet   Wallet           @relation("WalletTrades", fields: [walletId], references: [id])
+  config   SavedConfigs[] @relation("TradeConfig")
+  mevMode        String?
+  priorityFee   Int?  
+  briberyAmount  Int?   
+  mevShared     Boolean  @default(false)
+  source          String? 
+}
+
+model ClosedTrade {
+  id              Int      @id @default(autoincrement())
+  mint            String
+  tokenName       String?
+  entryPrice      Float?
+  entryPriceUSD   Float?
+  inAmount        BigInt
+  outAmount       BigInt
+  closedOutAmount BigInt
+  exitPrice       Float?
+  exitPriceUSD    Float?
+  strategy        String
+  walletLabel     String?
+  txHash          String?  @unique
+  unit            String
+  slippage        Float?
+  decimals        Int?
+  usdValue        Float?
+  type            String
+  side            String
+  botId           String
+  triggerType     String?
+  exitedAt        DateTime
+  timestamp       DateTime @default(now())
+  walletId Int
+  wallet   Wallet @relation(fields: [walletId], references: [id])
+}
+
+model SavedConfigs {
+  id           Int      @id @default(autoincrement())
+  strategyName String
+  /* --- preset metadata --- */
+  isSaved      Boolean  @default(false)
+  savedAt      DateTime?
+  name         String?
+  colorTag     String?
+  /* Core shared */
+  amountToSpend       Float?
+  snipeAmount         Float?
+  slippage            Float?
+  interval            Int?
+  maxTrades           Int?
+  tokenFeed           String?
+  inputMint           String?
+  sectors             Json?
+  trade               Trade[]  @relation("TradeConfig")
+  dryRun              Boolean  @default(true)
+  /* Thresholds & windows */
+  entryThreshold        Float?
+  volumeThreshold       Float?
+  priceWindow           Int?
+  volumeWindow          Int?
+  minTokenAgeMinutes    Int?
+  maxTokenAgeMinutes    Int?
+  dipThreshold          Float?
+  recoveryWindow        Int?
+  breakoutThreshold     Float?
+  trendWindow           Int?
+  delayMs               Int?
+  minVolumeRequired     Float?
+  slippageMaxPct        Float?
+  feeEscalationLamports Float?
+  panicDumpPct          Float?
+  priceChangeWindow     Int?
+  rotationInterval      Int?
+  minMomentum           Float?
+  positionSize          Float?
+  cooldown              Int?
+  maxDailyVolume        Float?
+  maxRotations          Int?
+  maxRebalances         Int?
+  rebalanceThreshold    Float?
+  rebalanceInterval     Int?
+  targetAllocations     String?
+  maxTradesPerCycle     Int?
+  maxDailyTrades        Int?
+  minSolBalance         Float?
+  volumeSpikeMultiplier Float?
+  minLiquidity          Float?
+  minMarketCap          Float?
+  maxMarketCap          Float?
+  skipSafety            Boolean?
+  /* TP / SL & auto-sell */
+  takeProfit         Float?
+  tpPercent          Float?
+  stopLoss           Float?
+  slPercent          Float?
+  autoSell           Json?
+  /* MEV / Fees snapshot */
+  mevMode            String?
+  priorityFee        Int?
+  priorityFeeLamports Int?
+  briberyAmount      Int?
+  maxSlippage        Float?
+  defaultMaxSlippage Float?
+  /* Scheduler extras */
+  // buyMode            String?
+  limitConfigs       Json?
+  /* Stealth / multi-target */
+  tokenMint          String?
+/* ARRAY defaults are allowed on PostgreSQL – Prisma ≥ 6.0 */
+monitoredTokens   String[] @default([])
+tokens            String[] @default([])
+outputMints       String[] @default([])
+limitPrices       Float[]  @default([])
+  /* Catch-all for future flags */
+  extras             Json?
+  userId   String
+  user     User     @relation(fields: [userId], references: [id])
+}
+
+
+
+
+model StrategyRunStatus {
+  id          String   @id @default(uuid())
+  botId       String   @unique
+  userId      String
+  mode        String
+  configId    Int?     // FK to StrategyConfig
+  pid         Int?
+  startedAt   DateTime @default(now())
+  pausedAt    DateTime?
+  stoppedAt   DateTime?
+  isPaused    Boolean  @default(false)
+  lastTickAt  DateTime?
+  status      String   @default("running")  // running / paused / stopped / completed
+  config      Json?
+  @@index([userId])
+}
+
+model PortfolioTracker {
+  id            Int      @id @default(autoincrement())
+  startTs       BigInt
+  lastMonthlyTs BigInt
+  createdAt     DateTime @default(now())
+  userId String
+  user   User @relation(fields: [userId], references: [id])
+}
+
+model NetWorthSnapshot {
+  id            Int      @id @default(autoincrement())
+  ts            BigInt
+  netWorth      Float
+  sol           Float
+  usdc          Float
+  openPositions Int
+  createdAt     DateTime @default(now())
+  userId String
+  user   User @relation(fields: [userId], references: [id])
+}
+
+model NetWorthHistory {
+  id        Int      @id @default(autoincrement())
+  ts        BigInt
+  date      String
+  minute    String
+  value     Float
+  createdAt DateTime @default(now())
+  userId String
+  user   User @relation(fields: [userId], references: [id])
+   @@unique([userId, date], name: "userId_date")
+   
+}
+
+
+model LimitOrder {
+  id          String    @id @default(uuid())
+  type        String    @default("limit")
+  token       String
+  mint        String
+  price       Float
+  targetPrice Float
+  side        String
+  amount      Float
+  force       Boolean   @default(false)
+  walletLabel String
+  walletId    Int
+  wallet      Wallet    @relation(fields: [walletId], references: [id])
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  status      String    @default("open")
+  tx          String?   // ✅ NEW transaction hash column
+  createdAt   DateTime  @default(now())
+  executedAt  DateTime? // execution timestamp (if executed)
+  @@index([mint])
+  @@index([userId])
+  @@index([walletLabel])
+  @@index([status])
+  @@index([walletId])
+}
+
+
+model DcaOrder {
+  id            String    @id @default(uuid())
+  type          String    @default("dca")
+  side          String
+  mint          String
+  tokenMint     String
+  amount        Float
+  unit          String
+  numBuys       Int
+  totalBuys     Int
+  frequency     Float
+  freqHours     Float
+  stopAbove     Float?
+  stopBelow     Float?
+  walletLabel   String?
+  walletId      Int      // ✅ NEW FK
+  wallet        Wallet   @relation(fields: [walletId], references: [id])
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  force         Boolean   @default(false)
+  amountPerBuy  Float
+  completedBuys Int       @default(0)
+  executedCount Int       @default(0)
+  missedCount   Int       @default(0)
+  needsFunding  Boolean   @default(false)
+  status        String    @default("active")
+  tx            String?
+  createdAt     DateTime  @default(now())
+  lastBuyAt     DateTime?
+  filledAt      DateTime?
+  @@index([mint])
+  @@index([userId])
+  @@index([walletLabel])
+  @@index([status])
+}
+
+model TpSlRule {
+  id          String   @id @default(uuid())
+  mint        String
+  walletId    Int
+  userId      String
+  strategy    String
+  tp          Float?
+  sl          Float?
+  tpPercent   Float?
+  slPercent   Float?
+  sellPct     Int?   
+  entryPrice  Float?
+  enabled     Boolean  @default(true)
+  status      String   @default("active")
+  force       Boolean  @default(false)
+  failCount   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt 
+  user   User   @relation(fields: [userId], references: [id])
+  wallet Wallet @relation(fields: [walletId], references: [id])
+  @@index([mint])
+  @@index([userId])
+  @@index([strategy])
+// @@unique([userId, walletId, mint, strategy], name: "userId_walletId_mint_strategy")
+}
+
+model TelegramPreference {
+  id        String   @id @default(uuid())
+  userId    String
+  chatId String? @unique 
+  enabled   Boolean  @default(true)
+  types     String[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id])
+  @@unique([userId])
+  @@index([chatId])
+}
+
+model UserPreference {
+  id                 String   @id @default(uuid())
+  userId             String   @unique
+  context            String   @default("default")
+  degenMode          Boolean  @default(false)
+  confirmBeforeTrade Boolean  @default(true)
+  alertsEnabled      Boolean  @default(true)
+  slippage           Float    @default(1.0)
+  defaultMaxSlippage        Float    @default(2.0)    
+  mevMode     String   @default("fast")     
+  defaultPriorityFee        Int      @default(0)       
+  briberyAmount      Int      @default(0)         
+  autoBuyEnabled     Boolean  @default(false)
+  autoBuyAmount      Float    @default(0.0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  user User @relation(fields: [userId], references: [id])
+  @@unique([userId, context])
+}
+
+
+model ScheduledStrategy {
+  id          String   @id @default(uuid())
+   sortId      Int      @unique @default(autoincrement())
+  name        String? 
+  mode        String
+  config      Json
+  launchISO   DateTime
+  buyMode     String   @default("interval")
+  targetToken String?
+  limit       Json?
+  /* ─── FK’s ─── */
+  walletId    Int
+  wallet      Wallet   @relation(fields: [walletId], references: [id])
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  status      String   @default("pending")
+  startedAt   DateTime?                   
+  finishedAt  DateTime?                   
+  /* ─── meta ─── */
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  /* ─── indexes ─── */
+  @@index([launchISO])
+  @@index([walletId])
+  @@index([userId])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String
+  userId    String
+  createdAt DateTime @default(now())
+  user     User    @relation(fields: [userId], references: [id])
+  Wallet   Wallet? @relation(fields: [walletId], references: [id])
+  walletId Int?
+  @@index([token])
+}

@@ -1,0 +1,23 @@
+.watchlist td::-webkit-scrollbar {
+    height: 6px;
+  }
+  
+  .watchlist td::-webkit-scrollbar-thumb {
+    background-color: #444;
+    border-radius: 3px;
+  }
+
+  /* Sticky token column on horizontal scroll */
+td:first-child {
+  position: sticky;
+  left: 0;
+  background-color: #18181b;
+  z-index: 1;
+}
+
+.token-row {
+  padding-top: 2rem;  /* 20px */
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid #3f3f46; /* same as border-zinc-800 */
+  border-top: 
+}

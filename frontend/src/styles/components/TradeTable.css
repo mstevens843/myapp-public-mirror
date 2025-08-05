@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Table container wrapper */
+.trade-table-container {
+  @apply bg-zinc-900 p-5 rounded-lg mb-6 shadow-md border border-zinc-700 text-white;
+}
+
+.trade-table-container h3 {
+  @apply text-xl font-semibold mb-4;
+}
+
+/* No trades fallback message */
+.no-trades {
+  @apply text-zinc-400 mt-2 italic;
+}
+
+/* Actual table */
+.trade-table {
+  @apply w-full border-collapse mt-2 text-sm;
+}
+
+/* Table headers */
+.trade-table th {
+  @apply bg-zinc-800 text-cyan-300 font-semibold px-3 py-2 text-center border-b border-zinc-700;
+}
+
+/* Table cells */
+.trade-table td {
+  @apply px-3 py-2 text-center border-b border-zinc-800;
+}
+
+/* Status colors */
+.status-ok {
+  @apply text-emerald-400 font-bold;
+}
+
+.status-fail {
+  @apply text-red-400 font-bold;
+}
+
+.green {
+  color: #22a22b; /* dark green text (optional) */
+}
+
+.red {
+  text-decoration: #ffe6e6; /* light red background */
+  color: #b91010; /* dark red text (optional) */
+}
+
+
+.filter-controls {
+  display: flex;
+  align-items: center;
+  margin-bottom: 1rem;
+  gap: 1.5rem;
+  color: white;
+}
+
+.filter-controls select {
+  margin-left: 8px;
+  background: #111;
+  color: white;
+  border: 1px solid #444;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+th.sortable {
+  position: relative;
+  cursor: pointer;
+}
+th.sortable::after {
+  content: "↕";
+  font-size: 0.75rem;
+  opacity: 0.4;
+  margin-left: 6px;
+}
+th.sortable.active::after {
+  content: "↑"; /* or ↓ depending on state */
+  opacity: 0.8;
+}
+
+.trade-table tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.03); /* subtle glow */
+}

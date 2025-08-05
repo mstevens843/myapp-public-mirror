@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Wrapper */
+.start-stop-controls {
+  @apply flex items-center justify-start gap-4 mb-4;
+}
+
+/* Start Button */
+.start-btn {
+  @apply px-5 py-2 text-white font-semibold rounded-md bg-emerald-500 hover:bg-emerald-600 disabled:bg-zinc-500 disabled:cursor-not-allowed transition duration-200;
+}
+
+/* Stop Button */
+.stop-btn {
+  @apply px-5 py-2 text-white font-semibold rounded-md bg-red-500 hover:bg-red-600 disabled:bg-zinc-500 disabled:cursor-not-allowed transition duration-200;
+}
+
+.tooltip-wrapper {
+    position: relative;
+  }
+  
+  .hover-tooltip {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    bottom: 125%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #333;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    transition: opacity 0.2s ease-in-out;
+    z-index: 10;
+  }
+  
+  .start-btn:hover .hover-tooltip {
+    visibility: visible;
+    opacity: 1;
+  }
+  

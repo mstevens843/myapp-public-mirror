@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Console wrapper */
+.logs-console {
+  @apply bg-zinc-900 p-5 rounded-lg mb-6 shadow-md border border-zinc-700 text-white;
+}
+
+.logs-console h3 {
+  @apply text-xl font-semibold mb-4;
+}
+
+/* Log stream container */
+.logs-output {
+  @apply bg-black text-green-400 text-sm font-mono p-3 rounded-md max-h-64 overflow-y-auto border border-zinc-800;
+}
+
+/* Individual log line */
+.log-line {
+  @apply py-0.5 border-b border-zinc-800 last:border-none;
+}
+
+/* Clear logs button container */
+.clear-logs-button {
+  @apply mt-4;
+}
+
+.clear-logs-button button {
+  @apply bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md font-semibold;
+}
