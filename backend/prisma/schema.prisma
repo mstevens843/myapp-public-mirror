@@ -57,6 +57,8 @@ model User {
   vaultPrivateKeyEnc   String?
   // trades  Trade[] @relation("UserTrades") 
   savedConfigs SavedConfigs[] 
+    requireArmToTrade  Boolean  @default(false)  // user-level switch (optional; can also put in UserPreference)
+  armDefaultMinutes  Int      @default(240)    // optional: default 4h
 }
 
 
@@ -65,18 +67,41 @@ model Wallet {
   id         Int      @id @default(autoincrement())
   label      String
   publicKey  String   @unique
-  privateKey String
+
+  // 🔻 DEPRECATE this ASAP (stop writing plaintext to it)
+  privateKey String   // make optional later, then drop after migration
+
+  // 🔐 NEW: envelope-encrypted blob (Argon2id→AES-GCM object)
+  encrypted  Json?    // stores {v,alg,kdf,{iv1,tag1,pkCipher},{iv2,tag2,dekCipher},aad}
+
+  isProtected Boolean @default(false) // true when using envelope+Arm
+  encryptionVersion Int @default(1)   // future-proofing
+
   createdAt  DateTime @default(now())
   userId     String
-  user       User     @relation("UserWallets", fields: [userId], references: [id]) // Relates with userId
+  user       User     @relation("UserWallets", fields: [userId], references: [id])
+
   trades        Trade[]          @relation("WalletTrades")
   closed        ClosedTrade[]
   refreshTokens RefreshToken[]
-  tpSlRules     TpSlRule[]  
-  limitOrders LimitOrder[]
-  dcaOrders   DcaOrder[]
-  scheduledStrategies ScheduledStrategy[] 
-  @@unique([userId, label])  
+  tpSlRules     TpSlRule[]
+  limitOrders   LimitOrder[]
+  dcaOrders     DcaOrder[]
+  scheduledStrategies ScheduledStrategy[]
+
+  @@unique([userId, label])
+}
+
+
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  event     String             // "ARM", "EXTEND", "DISARM", "SIGN"
+  meta      Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
 }
 
 

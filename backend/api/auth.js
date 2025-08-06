@@ -23,6 +23,18 @@ const { Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
 
 const connection = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
 
+// -----------------------------------------------------------------------------
+// Determine whether to emit verbose logs. In production we disable console.log
+// entirely to prevent accidental leakage of secrets such as private keys,
+// tokens or user identifiers into logs. During development (NODE_ENV !==
+// 'production'), logs behave normally.
+const DEBUG = process.env.NODE_ENV !== 'production';
+if (!DEBUG) {
+  // Disable logging in production. Use a proper logging framework instead of
+  // console.log when sensitive data must be recorded.
+  console.log = () => {};
+}
+
 
 async function loadUserWallets() {
   const loadedWallets = await loadWalletsFromDb({

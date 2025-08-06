@@ -161,15 +161,23 @@ console.log("📤 manualBuy sending:", body);
     body: JSON.stringify(body),
   });
 
-  const data = await res.json();
+const data = await res.json();
 
-  if (res.status === 403 && data.error?.includes("not tradable")) {
-    throw new Error("not-tradable");
-  }
+if (res.status === 401 && data?.needsArm) {
+  // let your UI open the Arm modal with this info
+  const err = new Error("needs-arm");
+  err.code = "NEEDS_ARM";
+  err.walletId = data.walletId;
+  throw err;
+}
 
-  if (!res.ok) {
-    throw new Error(data.error || "Manual buy failed");
-  }
+if (res.status === 403 && data?.error?.includes("not tradable")) {
+  throw new Error("not-tradable");
+}
+
+if (!res.ok) {
+  throw new Error(data?.error || "Manual buy failed");
+}
 
   return data.result;
 }
@@ -194,7 +202,16 @@ export async function manualSell(percent, mint, opts = {}) {
   });
 
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Manual sell failed");
+
+  // 👇 Arm-to-Trade: trigger modal
+  if (res.status === 401 && data?.needsArm) {
+    const err = new Error("needs-arm");
+    err.code = "NEEDS_ARM";
+    err.walletId = data.walletId;
+    throw err;
+  }
+
+  if (!res.ok) throw new Error(data?.error || "Manual sell failed");
   return data.result;
 }
 
@@ -210,7 +227,6 @@ export async function manualSellAmount(amountInTokens, mint, opts = {}) {
     strategy = "manual",
   } = opts;
 
-
   const body = { amount: amountInTokens, mint, walletLabel, walletId, slippage, force, strategy };
   if (chatId) body.chatId = chatId;
 
@@ -220,9 +236,19 @@ export async function manualSellAmount(amountInTokens, mint, opts = {}) {
   });
 
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Manual sell failed");
+
+  // 👇 Arm-to-Trade: trigger modal
+  if (res.status === 401 && data?.needsArm) {
+    const err = new Error("needs-arm");
+    err.code = "NEEDS_ARM";
+    err.walletId = data.walletId;
+    throw err;
+  }
+
+  if (!res.ok) throw new Error(data?.error || "Manual sell failed");
   return data.result;
 }
+
 
 
 

@@ -18,6 +18,8 @@ const { decrypt }                      = require("../middleware/auth/encryption"
 const { getUserPreferencesByUserId } = require("./userPrefs"); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const API_BASE = process.env.API_BASE; 
+const { getDEK } = require("../core/crypto/sessionKeyCache");
+const { decryptPrivateKeyWithDEK } = require("../core/crypto/envelopeCrypto");
 // ------------------------------------------------------------------
 // restore missing log-file constant (dashboard still reads this file)
 const { closePositionFIFO } = require("./utils/analytics/fifoReducer")
@@ -50,16 +52,50 @@ function fmt(x, d = 4) {
 }
 
 
-async function loadWalletKeypair(walletId) {
+// async function loadWalletKeypair(walletId) {
+//   const row = await prisma.wallet.findUnique({
+//     where  : { id: walletId },
+//     select : { privateKey: true }
+//   });
+//   if (!row) throw new Error("Wallet not found in DB.");
+
+//   const secret = decrypt(row.privateKey);        // <- your AES helper
+//   const kp     = Keypair.fromSecretKey(bs58.decode(secret.trim()));
+//   return kp;
+// }
+// REPLACE with Arm-aware loader (envelope + in-memory DEK; legacy fallback)
+async function loadWalletKeypairArmAware(userId, walletId) {
   const row = await prisma.wallet.findUnique({
-    where  : { id: walletId },
-    select : { privateKey: true }
+    where: { id: walletId },
+    select: { encrypted: true, isProtected: true, privateKey: true },
   });
   if (!row) throw new Error("Wallet not found in DB.");
 
-  const secret = decrypt(row.privateKey);        // <- your AES helper
-  const kp     = Keypair.fromSecretKey(bs58.decode(secret.trim()));
-  return kp;
+  const aad = `user:${userId}:wallet:${walletId}`; // DO compute AAD from context
+
+  // Envelope path (preferred)
+  if (row.encrypted && row.encrypted.v === 1) {
+    const dek = getDEK(userId, walletId);
+    if (!dek) {
+      const err = new Error("Automation not armed");
+      err.status = 401;               // let API layer map to 401
+      err.code = "AUTOMATION_NOT_ARMED";
+      throw err;
+    }
+    const pkBuf = decryptPrivateKeyWithDEK(row.encrypted, dek, aad);
+    try {
+      return Keypair.fromSecretKey(new Uint8Array(pkBuf));
+    } finally { pkBuf.fill(0); }
+  }
+
+  // Legacy fallback (string -> base58)
+  if (row.privateKey) {
+    // IMPORTANT: pass AAD here too
+    const secret = decrypt(row.privateKey, { aad });
+    return Keypair.fromSecretKey(bs58.decode(secret.trim()));
+  }
+
+  throw new Error("Wallet has no usable key material");
 }
 
 // let prefs = null;
@@ -92,8 +128,14 @@ async function performManualBuy(opts) {
   console.log("💾 performManualBuy received TP/SL:", { tp, sl, tpPercent, slPercent });
 
   /* ── wallet & prefs ────────────────────────────────────────────────────────── */
-  const wallet = await loadWalletKeypair(walletId);
-  const prefs  = await getUserPreferencesByUserId(userId, context);
+  let wallet;
+  try {
+    wallet = await loadWalletKeypairArmAware(userId, walletId);
+  } catch (e) {
+    if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
+    throw e;
+  }  
+const prefs  = await getUserPreferencesByUserId(userId, context);
   /* slippage: explicit > saved slippage > saved max‑slippage > fallback arg */
   const slippageToUse =
     prefs?.slippage ??
@@ -391,7 +433,13 @@ async function performManualSell(opts) {
   }
 
   /* ── REAL sell continues below ──────────────────── */
-  const wallet   = await loadWalletKeypair(walletId);
+  let wallet;
+try {
+  wallet = await loadWalletKeypairArmAware(userId, walletId);
+} catch (e) {
+  if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
+  throw e;
+}
   const decimals = await getMintDecimals(mint);
   if (percent > 1) percent /= 100;
 
@@ -567,7 +615,13 @@ async function performManualSellByAmount(opts) {
 
    const skipAlert = triggerType === "tp" || triggerType === "sl";
 
-  const wallet   = await loadWalletKeypair(walletId);
+let wallet;
+try {
+  wallet = await loadWalletKeypairArmAware(userId, walletId);
+} catch (e) {
+  if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
+  throw e;
+}
   const decimals = await getMintDecimals(mint);
   let   rawAmount = BigInt(Math.floor(uiAmount * 10 ** decimals));
   if (rawAmount <= 0n) throw new Error("Amount too low.");

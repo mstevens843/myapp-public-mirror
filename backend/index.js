@@ -34,6 +34,14 @@ const { injectBroadcast } = require("./services/strategies/logging/strategyLogge
 require("./loadEnv");
 const { startBackgroundJobs } = require("./services/backgroundJobs");
 
+// -----------------------------------------------------------------------------
+// Additional security modules. These help harden the server against common
+// vulnerabilities by adding sane HTTP headers and limiting request rates.
+// Helmet sets various headers like X‑Frame‑Options, X‑Content‑Type‑Options, etc.
+// Rate limiting mitigates brute force attacks and DoS by capping request volume.
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+
 // If a mode is passed via CLI, run strategy directly.
 const modeFromCLI = process.argv[2];
 
@@ -86,6 +94,29 @@ if (modeFromCLI) {
 
 
   const app = express();
+
+  // ---------------------------------------------------------------------------
+  // Server hardening: remove X-Powered-By header and apply security middleware.
+  app.disable('x-powered-by');
+
+  // Apply Helmet to set a broad set of security-related HTTP headers. We disable
+  // the built-in CSP here to avoid conflicts with dynamic scripts in the frontend.
+  app.use(helmet({
+    contentSecurityPolicy: false,
+  }));
+
+  // Apply a global rate limiter to protect against abuse. The maximum number of
+  // requests per window can be tuned via RATE_LIMIT_MAX_REQUESTS env var. We skip
+  // Stripe webhooks to avoid interfering with third-party callbacks.
+  const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '300', 10),
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: (req) => req.originalUrl === '/api/payment/webhook',
+  });
+  app.use(globalLimiter);
+
   const PORT = process.env.PORT || 5001;
 
   // const { loadWalletsFromLabels } = require("./services/utils/wallet/walletManager");

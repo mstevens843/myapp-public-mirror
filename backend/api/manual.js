@@ -16,7 +16,17 @@ const { v4: uuid } = require("uuid");
  * 
  * 
  */
-
+// add right after your existing requires/imports
+function isArmError(e) {
+  return e?.status === 401 || e?.code === "AUTOMATION_NOT_ARMED" || /Automation not armed/i.test(e?.message || "");
+}
+function sendArm401(res, walletId) {
+  return res.status(401).json({
+    error: "Automation not armed",
+    needsArm: true,
+    walletId,
+  });
+}
 
 async function getWallet(userId, walletLabel) {
   // ↪️  If caller omitted walletLabel → fall back to activeWalletId
@@ -132,23 +142,27 @@ if (
     return res.status(400).json({ error: "tpPercent/slPercent required when tp/sl set." });
   }
 
-  try {
-    // ⬇️ Perform the buy first
-    const result = await performManualBuy({
-      amountInSOL,
-      amountInUSDC,
-      mint,
-      userId: req.user.id,
-      walletId: wallet.id,
-      walletLabel,
-      slippage,
-      strategy,
-       context,
-      tp,
-      sl,
-      tpPercent,
-      slPercent
-    });
+let result;
+try {
+  result = await performManualBuy({
+    amountInSOL,
+    amountInUSDC,
+    mint,
+    userId: req.user.id,
+    walletId: wallet.id,
+    walletLabel,
+    slippage,
+    strategy,
+    context,
+    tp,
+    sl,
+    tpPercent,
+    slPercent
+  });
+} catch (e) {
+  if (isArmError(e)) return sendArm401(res, wallet.id);
+  throw e;
+}
 
     // ✅ Always create a NEW TP/SL rule even if same mint+strategy+wallet
     if (tp != null || sl != null) {
@@ -241,16 +255,22 @@ router.post("/sell", requireAuth, async (req, res) => {
 
     /* ───────────── 1. Amount-based sell ───────────── */
     if (amount && +amount > 0) {
-      const result = await performManualSellByAmount({
-        amount,
-        mint,
-        strategy,
-        userId    : req.user.id,
-        walletId  : wallet.id,
-        walletLabel,
-        slippage,
-          context, 
-      });
+let result;
+try {
+  result = await performManualSellByAmount({
+    amount,
+    mint,
+    strategy,
+    userId    : req.user.id,
+    walletId  : wallet.id,
+    walletLabel,
+    slippage,
+    context,
+  });
+} catch (e) {
+  if (isArmError(e)) return sendArm401(res, wallet.id);
+  throw e;
+}
       return res.json({ success: true, result });
     }
 
@@ -269,17 +289,23 @@ router.post("/sell", requireAuth, async (req, res) => {
       });
     }
 
-    const result = await performManualSell({
-      percent,
-      mint,
-      strategy,
-      userId    : req.user.id,
-      walletId  : wallet.id,
-      walletLabel,
-      slippage,
-      triggerType,
-        context, 
-    });
+let result;
+try {
+  result = await performManualSell({
+    percent,
+    mint,
+    strategy,
+    userId    : req.user.id,
+    walletId  : wallet.id,
+    walletLabel,
+    slippage,
+    triggerType,
+    context, 
+  });
+} catch (e) {
+  if (isArmError(e)) return sendArm401(res, wallet.id);
+  throw e;
+}
 
     return res.json({ success: true, result });
   } catch (err) {

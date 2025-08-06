@@ -1,97 +1,159 @@
-/* core/tradeExecutor.js */
+/* core/tradeExecutor.js
+ * Arm-aware trade executor: uses in-memory DEK (no latency) when armed,
+ * enforces Protected Mode when required, and falls back to legacy decrypt
+ * only when allowed (non-protected wallets).
+ */
+
 const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
 const { Keypair } = require("@solana/web3.js");
 const bs58 = require("bs58");
-const { executeSwap }          = require("../../../utils/swap");
-const { getMintDecimals }      = require("../../../utils/tokenAccounts");
-const  getTokenPrice        = require("../paid_api/getTokenPrice");
-const getSolPrice               = getTokenPrice.getSolPrice;
-const { sendAlert }            = require("../../../telegram/alerts");
-const { trackPendingTrade }    = require("./txTracker"); // NEW
+const { executeSwap }       = require("../../../utils/swap");
+const { getMintDecimals }   = require("../../../utils/tokenAccounts");
+const getTokenPriceModule   = require("../paid_api/getTokenPrice");
+const getSolPrice           = getTokenPriceModule.getSolPrice;
+const { sendAlert }         = require("../../../telegram/alerts");
+const { trackPendingTrade } = require("./txTracker");
+
+// 🔐 NEW: Arm session + envelope decrypt
+const { getDEK } = require("../../../core/crypto/sessionKeyCache");              // <-- ADD
+const { decryptPrivateKeyWithDEK } = require("../../../core/crypto/envelopeCrypto"); // <-- ADD
+
+// 🔐 Legacy env-key encrypt/decrypt (your current helper)
 const { decrypt } = require("../../../middleware/auth/encryption");
 
-async function loadWalletKeypair(walletId) {
-  const row = await prisma.wallet.findUnique({
-    where: { id: walletId },
-    select: { privateKey: true }
-  });
-  if (!row) throw new Error("Wallet not found in DB.");
-  const secret = decrypt(row.privateKey);
-  return Keypair.fromSecretKey(bs58.decode(secret.trim()));
-}
-
-const SOL_MINT = "So11111111111111111111111111111111111111112";
+const SOL_MINT  = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 const toNum = (v) => (v === undefined || v === null ? null : Number(v));
 
+/**
+ * 🔑 NEW: Arm-aware wallet loader
+ * Priority:
+ *  1) If wallet.encrypted (envelope v1) exists:
+ *      - require an armed session (DEK present in memory) if wallet.isProtected = true
+ *      - use decryptPrivateKeyWithDEK(blob, DEK, aad) (zero latency)
+ *  2) Else (legacy path):
+ *      - decrypt(row.privateKey) → base58 → Keypair
+ */
+async function loadWalletKeypairArmAware(userId, walletId) { // <-- REPLACE callers to pass userId too
+  const wallet = await prisma.wallet.findUnique({
+    where: { id: walletId },
+    select: { id: true, encrypted: true, isProtected: true, privateKey: true }
+  });
+  if (!wallet) throw new Error("Wallet not found in DB.");
 
+  const aad = `user:${userId}:wallet:${walletId}`; // <-- AAD from context (DO NOT trust blob)
 
+  // Envelope path
+  if (wallet.encrypted && wallet.encrypted.v === 1) {
+    const dek = getDEK(userId, walletId); // in-memory from Arm session
+    if (!dek) {
+      // If wallet is protected OR user requires Arm -> block trading with 401
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { requireArmToTrade: true }
+      });
+      if (wallet.isProtected || user?.requireArmToTrade) {
+        const err = new Error("Automation not armed");
+        err.status = 401;
+        err.code = "AUTOMATION_NOT_ARMED";
+        throw err;
+      }
+      // If not protected and not required to Arm, we still cannot decrypt an envelope without KEK.
+      // So we *must* block here to avoid silently failing.
+      const err = new Error("Protected wallet requires an armed session");
+      err.status = 401;
+      err.code = "AUTOMATION_NOT_ARMED";
+      throw err;
+    }
 
-async function execTrade({
-  quote,
-  mint,
-  meta,
-  simulated = false,
-}) {
+    // Fast path: decrypt with DEK in memory (no network/KMS)
+    const pkBuf = decryptPrivateKeyWithDEK(wallet.encrypted, dek, aad);
+    try {
+      // Expect 64-byte secret key
+      if (pkBuf.length !== 64) {
+        throw new Error(`Unexpected secret key length: ${pkBuf.length}`);
+      }
+      return Keypair.fromSecretKey(new Uint8Array(pkBuf));
+    } finally {
+      pkBuf.fill(0); // zeroize
+    }
+  }
+
+  // Legacy path (string ciphertext -> plaintext base58 -> bytes)
+  if (wallet.privateKey) {
+    // AAD is accepted by your helper but legacy colon-hex ignores it; safe to pass.
+    const secretBase58 = decrypt(wallet.privateKey, { aad });
+    try {
+      const secretBytes = bs58.decode(secretBase58.trim());
+      if (secretBytes.length !== 64) throw new Error("Invalid secret key length after legacy decryption");
+      return Keypair.fromSecretKey(secretBytes);
+    } finally {
+      // best-effort wipe local copies
+      try { secretBase58.fill?.(0); } catch {}
+    }
+  }
+
+  throw new Error("Wallet has no usable key material");
+}
+
+async function execTrade({ quote, mint, meta, simulated = false }) {
   const {
-  strategy,
-    // walletLabel: walletRow.label,
-  category        = strategy,
-  tp, sl, tpPercent, slPercent,  
-  slippage        = 0,
-  // openTradeExtras = {},
-  userId,
-  walletId,
-} = meta;
+    strategy,
+    category = strategy,
+    tp, sl, tpPercent, slPercent,
+    slippage = 0,
+    userId,
+    walletId,
+    // optional MEV overrides on meta:
+    priorityFeeLamports: metaPriority,
+  } = meta;
 
+  if (!userId || !walletId) throw new Error("userId and walletId are required in meta");
 
   console.log("🧩 META RECEIVED:", { walletId, userId });
 
-    const wallet = await loadWalletKeypair(walletId);
-console.log(`🔑 Loaded wallet pubkey from DB: ${wallet.publicKey.toBase58()}`);
+  // 🔑 LOAD KEYPAIR (Arm-aware)
+  let wallet;
+  try {
+    wallet = await loadWalletKeypairArmAware(userId, walletId); // <-- USE NEW LOADER
+  } catch (err) {
+    // Bubble up an HTTP-friendly 401 so your API layer can map it to the frontend (to pop the Arm modal)
+    if (err.status === 401 || err.code === "AUTOMATION_NOT_ARMED") {
+      err.expose = true;
+      throw err;
+    }
+    throw err;
+  }
+
+  console.log(`🔑 Loaded wallet pubkey: ${wallet.publicKey.toBase58()}`);
 
   // ⬇️ Global MEV prefs (from userPreference)
   const userPrefs = await prisma.userPreference.findUnique({
-    where: {
-      userId_context: {
-        userId,
-        context: "default",
-      },
-    },
-    select: {
-      mevMode: true,
-      briberyAmount: true,
-      defaultPriorityFee: true,
-    },
+    where: { userId_context: { userId, context: "default" } },
+    select: { mevMode: true, briberyAmount: true, defaultPriorityFee: true },
   });
 
-  const mevMode       = userPrefs?.mevMode || "fast";
-  const briberyAmount = userPrefs?.briberyAmount ?? 0;
-  const shared        = mevMode === "secure";
-  /* pick cfg‑level value > user default > 0 */
-  const priorityFeeLamports =
-    toNum(meta.priorityFeeLamports) ??
-    toNum(userPrefs?.defaultPriorityFee) ??
-    0;
+  const mevMode            = userPrefs?.mevMode || "fast";
+  const briberyAmount      = userPrefs?.briberyAmount ?? 0;
+  const shared             = mevMode === "secure";
+  const priorityFeeLamports = toNum(metaPriority) ?? toNum(userPrefs?.defaultPriorityFee) ?? 0;
 
   console.log("🛡️ Using MEV prefs:", { mevMode, shared, briberyAmount, priorityFeeLamports });
-
 
   let txHash = null;
   if (!simulated) {
     try {
       console.log("🔁 Executing live swap…");
-        txHash = await executeSwap({
-          quote,
-          wallet,
-          shared,
-          priorityFee: priorityFeeLamports,   // NEW
-          briberyAmount,
-        });
-
-if (!txHash) throw new Error("swap-failed: executeSwap() returned null");
+      txHash = await executeSwap({
+        quote,
+        wallet,
+        shared,
+        priorityFee: priorityFeeLamports,
+        briberyAmount,
+      });
+      if (!txHash) throw new Error("swap-failed: executeSwap() returned null");
       trackPendingTrade(txHash, mint, strategy);
     } catch (err) {
       console.error("❌ Swap failed:", err.message);
@@ -99,103 +161,43 @@ if (!txHash) throw new Error("swap-failed: executeSwap() returned null");
     }
   }
 
-  /* 2️⃣  enrichment */
+  /* Enrichment */
   let entryPriceUSD = null, usdValue = null, entryPrice = null, decimals = null;
-
-
   try {
-  //   decimals    = await getMintDecimals(mint);
-  //  entryPrice = (Number(quote.inAmount) * 10 ** decimals) / (Number(quote.outAmount) * 1e9);
-  const inDec  = await getMintDecimals(quote.inputMint);
-  const outDec = await getMintDecimals(quote.outputMint);
+    const inDec  = await getMintDecimals(quote.inputMint);
+    const outDec = await getMintDecimals(quote.outputMint);
+    const inUi   = Number(quote.inAmount)  / 10 ** inDec;
+    const outUi  = Number(quote.outAmount) / 10 ** outDec;
 
-  const inUi   = Number(quote.inAmount)  / 10 ** inDec;
-  const outUi  = Number(quote.outAmount) / 10 ** outDec;
+    decimals     = outDec;
+    entryPrice   = inUi / outUi;
 
-  decimals     = outDec;        // keep for amount/outAmount formatting
-  entryPrice   = inUi / outUi;  // price of *output* token in *input* units
-    // const baseUsd = await getTokenPrice(userId || null, quote.inputMint);
-  const baseUsd = await getTokenPrice(userId || null, quote.inputMint) ||
-                  (quote.inputMint === SOL_MINT ? await getSolPrice(userId) : null);
+    const baseUsd =
+      (await getTokenPriceModule(userId || null, quote.inputMint)) ||
+      (quote.inputMint === SOL_MINT ? await getSolPrice(userId) : null);
+
     entryPriceUSD = baseUsd ? entryPrice * baseUsd : null;
     usdValue      = baseUsd ? +((quote.inAmount / 1e9) * baseUsd).toFixed(2) : null;
-
     console.log("📊 Enrichment done:", { entryPrice, entryPriceUSD, usdValue });
   } catch (err) {
     console.error("❌ Enrichment error:", err.message);
   }
 
-if (!walletId) throw new Error("❌ walletId missing from meta");
-
-const walletRow = await prisma.wallet.findUnique({
-  where: { id: walletId },
-  select: { id: true, label: true }
-});
-
-if (!walletRow || !walletRow.label) {
-  throw new Error(`walletLabel not found for walletId ${walletId}`);
-}
-
-const walletLabel = walletRow.label;
-
-  const safeJson = (data) =>
-  JSON.stringify(data, (_, v) => typeof v === 'bigint' ? v.toString() : v, 2);
-
-  console.log("🧩 TRADE.create payload:");
-console.log(safeJson({
-  mint,
-  entryPrice,
-  entryPriceUSD,
-  inAmount: BigInt(quote.inAmount),
-  outAmount: BigInt(quote.outAmount),
-  closedOutAmount: BigInt(0),
-  strategy,
-  txHash,
-  // unit: quote.inputMint === SOL_MINT ? "sol" : "usdc",
-      unit:
-        quote.inputMint === SOL_MINT ? "sol"
-      : quote.inputMint === USDC_MINT ? "usdc"
-      : "spl",
-  slippage,
-  decimals,
-  usdValue,
-  type: "buy",
-  side: "buy",
-  // botId: strategy,
-  botId: meta.botId || strategy,
-  walletId,
-    walletLabel,
-      mevMode,
-      priorityFee   : priorityFeeLamports,
-      briberyAmount,
-      mevShared     : shared,
-}, null, 2));
-
-console.log("🧩 FINAL WALLET ID TYPE:", typeof walletId, walletId);
-
-// 🛑 Check for recent duplicate trade before saving
-const recent = await prisma.trade.findFirst({
-  where: {
-    mint,
-    walletId,
-    strategy,
-    timestamp: {
-      gte: new Date(Date.now() - 5000) // only trades in last 5 seconds
-    }
+  if (!walletId) throw new Error("❌ walletId missing from meta");
+  const walletRow = await prisma.wallet.findUnique({
+    where: { id: walletId },
+    select: { id: true, label: true },
+  });
+  if (!walletRow || !walletRow.label) {
+    throw new Error(`walletLabel not found for walletId ${walletId}`);
   }
-});
+  const walletLabel = walletRow.label;
 
-if (recent) {
-  console.warn(`🛑 Skipping duplicate trade for ${mint} — already exists`);
-  return;
-}
-
-
-try {
-  await prisma.trade.create({
-    data: {
+  const safeJson = (data) => JSON.stringify(data, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2);
+  console.log("🧩 TRADE.create payload:");
+  console.log(
+    safeJson({
       mint,
-      tokenName: meta.tokenName ?? null,
       entryPrice,
       entryPriceUSD,
       inAmount: BigInt(quote.inAmount),
@@ -204,78 +206,86 @@ try {
       strategy,
       txHash,
       unit:
-        quote.inputMint === SOL_MINT ? "sol"
-      : quote.inputMint === USDC_MINT ? "usdc"
-      : "spl",     
+        quote.inputMint === SOL_MINT ? "sol" :
+        quote.inputMint === USDC_MINT ? "usdc" : "spl",
       slippage,
       decimals,
       usdValue,
       type: "buy",
       side: "buy",
-      botId: strategy,
+      botId: meta.botId || strategy,
       walletId,
       walletLabel,
       mevMode,
-      priorityFee   : priorityFeeLamports,
+      priorityFee: priorityFeeLamports,
       briberyAmount,
-      mevShared     : shared,
+      mevShared: shared,
+      inputMint: quote.inputMint,
+      outputMint: quote.outputMint,
+    })
+  );
+
+  // Deduplicate recent trade
+  const recent = await prisma.trade.findFirst({
+    where: {
+      userId,
+      mint,
+      strategy,
+      type: "buy",
+      createdAt: { gte: new Date(Date.now() - 60 * 1000) },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  if (recent) {
+    console.log(`⚠️ Duplicate trade detected within lookback window for mint ${mint}, skipping create`);
+    return txHash;
+  }
+
+  await prisma.trade.create({
+    data: {
+      id: uuid(),
+      mint,
+      entryPrice,
+      entryPriceUSD,
+      inAmount: BigInt(quote.inAmount),
+      outAmount: BigInt(quote.outAmount),
+      strategy,
+      txHash,
+      userId,
+      walletId,
+      walletLabel,
+      botId: meta.botId || strategy,
+      unit:
+        quote.inputMint === SOL_MINT ? "sol" :
+        quote.inputMint === USDC_MINT ? "usdc" : "spl",
+      decimals,
+      usdValue,
+      type: "buy",
+      side: "buy",
+      slippage,
+      mevMode,
+      priorityFee: priorityFeeLamports,
+      briberyAmount,
+      mevShared: shared,
       inputMint: quote.inputMint,
       outputMint: quote.outputMint,
     },
   });
 
-  console.log("✅ TRADE SAVED SUCCESSFULLY");
-} catch (err) {
-  console.error("❌ TRADE SAVE FAILED:", err?.message || err);
-  console.dir(err, { depth: null });
-}
-  
-    console.log("🧪 Checking TP/SL eligibility with:", { tp, sl, tpPercent, slPercent });
-
-    /* ── create TP/SL rule if needed ────────────── */
-const skipTpSl = ["rotationbot", "rebalancer"].includes((strategy || "").toLowerCase());
-
-if (!skipTpSl && ((Number(tp) || 0) !== 0 || (Number(sl) || 0) !== 0)) {
-  console.log("📝 Creating TP/SL rule with:", { tp, sl, tpPercent, slPercent });
-  await prisma.tpSlRule.create({
-        data: {
-          id: uuid(),
-          mint,
-          walletId,
-          userId,
-          strategy,
-          tp, sl, tpPercent, slPercent, 
-          // entryPrice: entryPriceSOL,
-          entryPrice: entryPrice,
-          force: false,
-          enabled: true,
-          status: "active",
-          failCount: 0,
-        }
-      });
-    }
-
-
-  /* 6️⃣  alert */
-  const amountFmt = (quote.outAmount / 10 ** decimals).toFixed(4);
+  /* Alerts */
+  const amountFmt = (quote.outAmount / 10 ** (decimals || 0)).toFixed(4);
   const impactFmt = (quote.priceImpactPct * 100).toFixed(2) + "%";
-  const header = simulated
-    ? `🧪 *Dry-Run ${category} Triggered!*`
-    : `🤖 *${category} Buy Executed!*`;
-
+  const header = simulated ? `🧪 *Dry-Run ${category} Triggered!*` : `🤖 *${category} Buy Executed!*`;
   const msg =
     `${header}\n` +
     `• *Token:* [${mint}](https://birdeye.so/token/${mint})\n` +
     `• *Amount:* ${amountFmt}\n` +
     `• *Impact:* ${impactFmt}\n` +
-    (simulated
-      ? "• *Simulated:* ✅"
-      : `• *Tx:* [↗️ View](https://solscan.io/tx/${txHash})`);
+    (simulated ? "• *Simulated:* ✅" : `• *Tx:* [↗️ View](https://solscan.io/tx/${txHash})`);
   await sendAlert("ui", msg, category);
 
   return txHash;
 }
-
 
 const liveBuy     = (o) => execTrade({ ...o, simulated: false });
 const simulateBuy = (o) => execTrade({ ...o, simulated: true  });

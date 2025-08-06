@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { toast } from "sonner";
-import { Info, CheckCircle } from "lucide-react";
+import { Info, CheckCircle, Shield, Timer, Lock, Unlock, Power } from "lucide-react";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { getTelegramChatId } from "@/utils/telegramApi";
@@ -16,6 +16,20 @@ import { getSubscriptionStatus } from "@/utils/payments";
 import { enable2FA, disable2FA, verify2FA } from "../../utils/2fa";
 import { useUser } from "@/contexts/UserProvider";
 import { supabase } from "@/lib/supabase";
+
+// 🔐 Encrypted Wallet Session helpers
+import {
+  getArmStatus,
+  armEncryptedWallet,
+  extendEncryptedWallet,
+  disarmEncryptedWallet,
+  setRequireArmToTrade,
+  formatCountdown,
+} from "@/utils/encryptedWalletSession";
+import { useLocation } from "react-router-dom";
+
+const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
+
 const MyAccountTab = () => {
   /* ───────── State ───────── */
   const [profile, setProfile] = useState(null);
@@ -39,13 +53,26 @@ const MyAccountTab = () => {
 
   const [showPhantom, setShowPhantom] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
-const [newPassword, setNewPassword] = useState("");
-const [confirmPassword, setConfirmPassword] = useState("");
-const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+
+  // 🔐 Protected Mode + Arm modal state
+  const [requireArm, setRequireArm] = useState(false);
+  const [armStatus, setArmStatus] = useState({ armed: false, msLeft: 0 });
+  const [warned, setWarned] = useState(false); // pre-expiry toast guard
+
+  const [armModalOpen, setArmModalOpen] = useState(false);
+  const [armPassphrase, setArmPassphrase] = useState("");
+  const [armDuration, setArmDuration] = useState(240); // minutes: 4h default
+  const [armMigrateLegacy, setArmMigrateLegacy] = useState(false);
+  const [armBusy, setArmBusy] = useState(false);
+  const [extendBusy, setExtendBusy] = useState(false);
+  const [disarmBusy, setDisarmBusy] = useState(false);
 
   /* ───────── Helpers ───────── */
-const { type, phantomPublicKey } = useUser();
-const isWeb3 = type === "web3";
+  const { type, phantomPublicKey } = useUser();
+  const isWeb3 = type === "web3";
 
   /* ───────── Focus token field when QR shows ───────── */
   useEffect(() => {
@@ -57,13 +84,7 @@ const isWeb3 = type === "web3";
     (async () => {
       setLoading(true);
 
-      const [
-        profileData,
-        subStatus,
-        chatId,
-        allWallets,
-        activeW,
-      ] = await Promise.all([
+      const [profileData, subStatus, chatId, allWallets, activeW] = await Promise.all([
         getProfile(),
         getSubscriptionStatus(),
         getTelegramChatId(),
@@ -72,19 +93,19 @@ const isWeb3 = type === "web3";
       ]);
 
       // Fix email/username swap for web users
-if (type !== "web3") {
-  if (!profileData.email && profileData.username?.includes("@")) {
-    profileData.email = profileData.username;
-    profileData.username = "";
-  }
-} else {
-  profileData.email = null;
-  profileData.username = null;
-}
-
+      if (type !== "web3") {
+        if (!profileData.email && profileData.username?.includes("@")) {
+          profileData.email = profileData.username;
+          profileData.username = "";
+        }
+      } else {
+        profileData.email = null;
+        profileData.username = null;
+      }
 
       setProfile(profileData || null);
       setIs2FAEnabled(profileData?.is2FAEnabled || false);
+      setRequireArm(!!profileData?.requireArmToTrade);
 
       if (subStatus) {
         setPlan(subStatus.plan || "free");
@@ -104,55 +125,107 @@ if (type !== "web3") {
     })();
   }, []);
 
+  // 🔁 Poll Arm status for the active wallet (every 20s)
+  useEffect(() => {
+    let timer;
+    async function poll() {
+      try {
+        if (activeWallet?.id) {
+          const s = await getArmStatus(activeWallet.id);
+          setArmStatus({ armed: !!s.armed, msLeft: s.msLeft || 0 });
+          if (!s.armed) setWarned(false);
+        }
+      } catch {
+        setArmStatus((prev) => ({ ...prev, armed: false, msLeft: 0 }));
+        setWarned(false);
+      } finally {
+        timer = setTimeout(poll, 20000);
+      }
+    }
+    if (activeWallet?.id) poll();
+    return () => timer && clearTimeout(timer);
+  }, [activeWallet?.id]);
+
+  // ⏱️ Local 1-second countdown between polls + pre-expiry toast at T-15m
+  useEffect(() => {
+    if (!armStatus.armed || armStatus.msLeft <= 0) return;
+    const tick = setInterval(() => {
+      setArmStatus((prev) => {
+        const next = Math.max(0, (prev.msLeft || 0) - 1000);
+        return { ...prev, msLeft: next };
+      });
+    }, 1000);
+    return () => clearInterval(tick);
+  }, [armStatus.armed]);
+
+  useEffect(() => {
+    if (!armStatus.armed) return;
+    if (!warned && armStatus.msLeft > 0 && armStatus.msLeft <= PRE_EXPIRY_MS) {
+      setWarned(true);
+      toast.message("⏳ Session ends in ~15 minutes", {
+        description: "Extend now to keep automation armed.",
+        action: {
+          label: "Extend +2h",
+          onClick: () => handleExtend(120),
+        },
+      });
+    }
+  }, [armStatus.armed, armStatus.msLeft, warned]);
+
+
+  const location = useLocation();
+useEffect(() => {
+  if (location.state?.openArm) setArmModalOpen(true);
+}, [location.state]);
+
   /* ───────── Profile actions ───────── */
   const handleSaveProfile = async () => {
     if (await updateProfile(profile)) toast.success("Profile updated.");
     else toast.error("Failed to update profile.");
   };
 
-// ───────── handler ─────────
-// ───────── handler ─────────
-const handleChangePassword = async () => {
-  if (!currentPassword || !newPassword || !confirmPassword)
-    return toast.error("Fill out every password field.");
-  
-  if (newPassword !== confirmPassword)
-    return toast.error("New passwords do not match.");
+  const handleChangePassword = async () => {
+    if (!currentPassword || !newPassword || !confirmPassword)
+      return toast.error("Fill out every password field.");
 
-  try {
-    const {
-      data: { user },
-      error: userErr,
-    } = await supabase.auth.getUser();
+    if (newPassword !== confirmPassword)
+      return toast.error("New passwords do not match.");
 
-    if (userErr || !user) {
-      console.error("Supabase getUser error:", userErr);
-      return toast.error("Failed to verify user session.");
+    try {
+      const {
+        data: { user },
+        error: userErr,
+      } = await supabase.auth.getUser();
+
+      if (userErr || !user) {
+        console.error("Supabase getUser error:", userErr);
+        return toast.error("Failed to verify user session.");
+      }
+
+      const userType = user.user_metadata?.type || "web";
+
+      if (userType !== "web") {
+        return toast.error("Password changes are only supported for Web accounts.");
+      }
+
+      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+
+      if (updateError) {
+        console.error("Supabase password update failed:", updateError.message);
+        return toast.error("Failed to update password.");
+      }
+
+      toast.success("Password changed.");
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setShowPasswordForm(false);
+    } catch (err) {
+      console.error("Password change unexpected error:", err);
+      toast.error("An unexpected error occurred.");
     }
+  };
 
-    const userType = user.user_metadata?.type || "web";
-
-    if (userType !== "web") {
-      return toast.error("Password changes are only supported for Web accounts.");
-    }
-
-    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
-
-    if (updateError) {
-      console.error("Supabase password update failed:", updateError.message);
-      return toast.error("Failed to update password.");
-    }
-
-    toast.success("Password changed.");
-    setCurrentPassword("");
-    setNewPassword("");
-    setConfirmPassword("");
-    setShowPasswordForm(false);
-  } catch (err) {
-    console.error("Password change unexpected error:", err);
-    toast.error("An unexpected error occurred.");
-  }
-}
   const handleDeleteAccount = async () => {
     if (await deleteAccount()) {
       toast.success("Account deleted. Logging out…");
@@ -197,12 +270,89 @@ const handleChangePassword = async () => {
     } else toast.error("Failed to disable 2FA.");
   };
 
+  /* ───────── Protected Mode actions ───────── */
+  const handleToggleProtectedMode = async () => {
+    try {
+      const next = !requireArm;
+      await setRequireArmToTrade(next);
+      setRequireArm(next);
+      toast.success(next ? "Protected Mode enabled." : "Protected Mode disabled.");
+    } catch (e) {
+      toast.error(e.message || "Failed to update security setting.");
+    }
+  };
+
+  const handleOpenArm = () => {
+    if (!activeWallet?.id) return toast.error("No active wallet selected.");
+    if (!is2FAEnabled) {
+      return toast.error("Enable 2FA first to arm trading.");
+    }
+    setArmModalOpen(true);
+  };
+
+  const handleArm = async () => {
+    if (!armPassphrase) return toast.error("Enter your wallet passphrase.");
+    setArmBusy(true);
+    try {
+      const res = await armEncryptedWallet({
+        walletId: activeWallet.id,
+        passphrase: armPassphrase,
+        code: twoFAToken,
+        ttlMinutes: armDuration,
+        migrateLegacy: armMigrateLegacy,
+      });
+      setArmStatus({ armed: true, msLeft: armDuration * 60 * 1000 });
+      setWarned(false);
+      setArmModalOpen(false);
+      setArmPassphrase("");
+      setTwoFAToken("");
+      toast.success(`Automation armed for ${res.armedForMinutes} minutes.`);
+    } catch (e) {
+      toast.error(e.message || "Failed to arm.");
+    } finally {
+      setArmBusy(false);
+    }
+  };
+
+  const handleExtend = async (minutes = 120) => {
+    if (!activeWallet?.id) return;
+    setExtendBusy(true);
+    try {
+      await extendEncryptedWallet({
+        walletId: activeWallet.id,
+        code: twoFAToken || undefined,
+        ttlMinutes: minutes,
+      });
+      setArmStatus((prev) => ({ armed: true, msLeft: Math.max(prev.msLeft, 0) + minutes * 60 * 1000 }));
+      toast.success(`Session extended ${minutes} minutes.`);
+    } catch (e) {
+      toast.error(e.message || "Failed to extend.");
+    } finally {
+      setExtendBusy(false);
+    }
+  };
+
+  const handleDisarm = async () => {
+    if (!activeWallet?.id) return;
+    setDisarmBusy(true);
+    try {
+      await disarmEncryptedWallet({ walletId: activeWallet.id, code: twoFAToken || undefined });
+      setArmStatus({ armed: false, msLeft: 0 });
+      setWarned(false);
+      toast.success("Automation disarmed.");
+    } catch (e) {
+      toast.error(e.message || "Failed to disarm.");
+    } finally {
+      setDisarmBusy(false);
+    }
+  };
+
   /* ───────── Early returns ───────── */
-  if (loading)  return <div className="p-6 text-white">Loading profile…</div>;
+  if (loading) return <div className="p-6 text-white">Loading profile…</div>;
   if (!profile) return <div className="p-6 text-red-400">Profile not found.</div>;
 
   /* ─────────── UI ─────────── */
-return (
+  return (
     <div className="container mx-auto p-6 bg-black text-white">
       {/* Banner */}
       <div className="bg-emerald-600 text-black p-4 rounded-lg mb-6 flex items-center gap-3">
@@ -211,6 +361,37 @@ return (
           <strong>Account Settings:</strong> Manage personal info and preferences here.
         </span>
       </div>
+
+      {/* 🔐 Armed banner (sticky-ish) */}
+      {armStatus.armed && (
+        <div className="bg-emerald-700/50 border border-emerald-600 rounded-lg p-3 mb-6 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Shield size={18} />
+            <span className="text-sm">
+              <strong>Automation Armed</strong> — {formatCountdown(armStatus.msLeft)} remaining.
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              className="border-emerald-500 text-emerald-300"
+              disabled={extendBusy}
+              onClick={() => handleExtend(120)}
+            >
+              <Timer className="mr-1" size={16} />
+              Extend +2h
+            </Button>
+            <Button
+              className="bg-red-600 text-white"
+              disabled={disarmBusy}
+              onClick={handleDisarm}
+            >
+              <Lock className="mr-1" size={16} />
+              Disarm
+            </Button>
+          </div>
+        </div>
+      )}
 
       <h2 className="text-2xl font-bold mb-4">My Account</h2>
 
@@ -222,7 +403,7 @@ return (
             {/* Web users: email + username */}
             {!isWeb3 && (
               <>
-                <label>Email (read‑only)</label>
+                <label>Email (read-only)</label>
                 <input
                   type="email"
                   value={profile.email || ""}
@@ -248,10 +429,8 @@ return (
                 <label>Phantom Wallet</label>
                 <div className="flex justify-between items-center bg-zinc-900 border border-zinc-700 p-2 rounded font-mono text-xs text-emerald-400">
                   <span className="truncate">
-                  {showPhantom
-                    ? phantomPublicKey
-                    : "●●●●●●●●●●●●●●●●●●●"}
-=                  </span>
+                    {showPhantom ? phantomPublicKey : "●●●●●●●●●●●●●●●●●●●"}
+                  </span>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => setShowPhantom(!showPhantom)}
@@ -261,7 +440,7 @@ return (
                     </button>
                     <button
                       onClick={() => {
-                      navigator.clipboard.writeText(phantomPublicKey);
+                        navigator.clipboard.writeText(phantomPublicKey);
                         toast.success("Phantom pubkey copied");
                       }}
                       className="text-zinc-400 hover:text-white"
@@ -272,64 +451,64 @@ return (
                 </div>
               </>
             )}
-        
-        {!isWeb3 && (
-          <Button
-            onClick={handleSaveProfile}
-            className="mt-2 bg-emerald-600 text-white"
-          >
-            Save Profile
-          </Button>
-        )}            
-      </div>
+
+            {!isWeb3 && (
+              <Button
+                onClick={handleSaveProfile}
+                className="mt-2 bg-emerald-600 text-white"
+              >
+                Save Profile
+              </Button>
+            )}
+          </div>
         </div>
 
         {/* ───────── Change Password (web only) ───────── */}
-{!isWeb3 && (
-  <div className="bg-zinc-800 p-4 rounded-lg">
-    <div className="flex items-center justify-between">
-      <h3 className="text-lg font-semibold">Change Password</h3>
-      <button
-        onClick={() => setShowPasswordForm((prev) => !prev)}
-        className="text-sm text-emerald-400 hover:underline"
-      >
-        {showPasswordForm ? "Hide" : "Update"}
-      </button>
-    </div>
+        {!isWeb3 && (
+          <div className="bg-zinc-800 p-4 rounded-lg">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold">Change Password</h3>
+              <button
+                onClick={() => setShowPasswordForm((prev) => !prev)}
+                className="text-sm text-emerald-400 hover:underline"
+              >
+                {showPasswordForm ? "Hide" : "Update"}
+              </button>
+            </div>
 
-    {showPasswordForm && (
-      <div className="mt-4 space-y-3">
-        <input
-          type="password"
-          placeholder="Current Password"
-          value={currentPassword}
-          onChange={(e) => setCurrentPassword(e.target.value)}
-          className="w-full p-2 rounded text-black"
-        />
-        <input
-          type="password"
-          placeholder="New Password"
-          value={newPassword}
-          onChange={(e) => setNewPassword(e.target.value)}
-          className="w-full p-2 rounded text-black"
-        />
-        <input
-          type="password"
-          placeholder="Confirm New Password"
-          value={confirmPassword}
-          onChange={(e) => setConfirmPassword(e.target.value)}
-          className="w-full p-2 rounded text-black"
-        />
-          <Button
-            onClick={handleChangePassword}
-            className="bg-emerald-600 text-white"
-          >
-            Change Password
-          </Button>
-      </div>
-    )}
-  </div>
-)}
+            {showPasswordForm && (
+              <div className="mt-4 space-y-3">
+                <input
+                  type="password"
+                  placeholder="Current Password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  className="w-full p-2 rounded text-black"
+                />
+                <input
+                  type="password"
+                  placeholder="New Password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  className="w-full p-2 rounded text-black"
+                />
+                <input
+                  type="password"
+                  placeholder="Confirm New Password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full p-2 rounded text-black"
+                />
+                <Button
+                  onClick={handleChangePassword}
+                  className="bg-emerald-600 text-white"
+                >
+                  Change Password
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ───── Wallets ───── */}
         <div className="bg-zinc-800 p-4 rounded-lg">
@@ -348,6 +527,133 @@ return (
             Manage Wallets →
           </a>
         </div>
+
+        {/* 🔐 Wallet Protection (Protected Mode) */}
+        <div className="bg-zinc-800 p-4 rounded-lg">
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <Shield size={18} />
+            Wallet Protection
+          </h3>
+          <p className="text-sm text-zinc-400 mt-1">
+            <strong>Protected Mode</strong> requires a one-time unlock (2FA + passphrase)
+            so your bot can trade for a limited time. We never store your passphrase.
+          </p>
+
+          <div className="mt-3 flex items-center justify-between">
+            <div className="text-sm">
+              Bot Access Control:
+              <div className="mt-1">
+                <span className="inline-flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={requireArm}
+                    onChange={handleToggleProtectedMode}
+                  />
+                  <span>
+                    {requireArm
+                      ? "Require Arm-to-Trade (more secure)"
+                      : "Always allow bot to run (default)"}
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {!armStatus.armed ? (
+                <Button
+                  className="bg-emerald-600 text-white"
+                  onClick={handleOpenArm}
+                >
+                  <Unlock className="mr-1" size={16} />
+                  Arm Now
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  className="border-emerald-500 text-emerald-300"
+                  onClick={() => handleExtend(120)}
+                  disabled={extendBusy}
+                >
+                  <Timer className="mr-1" size={16} />
+                  Extend +2h
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Arm Modal */}
+        <Dialog open={armModalOpen} onOpenChange={setArmModalOpen}>
+          <DialogContent>
+            <h3 className="text-xl font-bold mb-2">Start Secure Session</h3>
+            <p className="text-sm text-zinc-400 mb-4">
+              Enter your passphrase {is2FAEnabled ? "and 2FA code " : ""}to enable
+              trading for the selected duration. This session auto-expires.
+            </p>
+
+            <div className="space-y-3">
+              <label className="text-sm">Active Wallet</label>
+              <div className="w-full p-2 rounded bg-zinc-900 border border-zinc-700 text-emerald-400 text-xs font-mono">
+                {activeWallet?.label || `ID#${activeWallet?.id || "—"}`}
+              </div>
+
+              <label className="text-sm">Passphrase</label>
+              <input
+                type="password"
+                placeholder="Wallet passphrase"
+                value={armPassphrase}
+                onChange={(e) => setArmPassphrase(e.target.value)}
+                className="w-full p-2 rounded text-black"
+              />
+
+              {is2FAEnabled && (
+                <>
+                  <label className="text-sm">2FA Code</label>
+                  <input
+                    type="text"
+                    placeholder="123456"
+                    value={twoFAToken}
+                    onChange={(e) => setTwoFAToken(e.target.value)}
+                    className="w-full p-2 rounded text-black"
+                  />
+                </>
+              )}
+
+              <label className="text-sm">Duration</label>
+              <select
+                className="w-full p-2 rounded text-black"
+                value={armDuration}
+                onChange={(e) => setArmDuration(Number(e.target.value))}
+              >
+                <option value={120}>2 hours</option>
+                <option value={240}>4 hours (default)</option>
+                <option value={480}>8 hours</option>
+              </select>
+
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={armMigrateLegacy}
+                  onChange={(e) => setArmMigrateLegacy(e.target.checked)}
+                />
+                Upgrade legacy wallet encryption during this arm
+              </label>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="ghost" onClick={() => setArmModalOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-emerald-600 text-white"
+                  onClick={handleArm}
+                  disabled={armBusy}
+                >
+                  {armBusy ? "Arming…" : "Arm"}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
 
         {/* ───── Subscription ───── */}
         <div className="bg-zinc-800 p-4 rounded-lg">
@@ -387,10 +693,10 @@ return (
           </a>
         </div>
 
-        {/* ───── Two‑Factor Auth ───── */}
+        {/* ───── Two-Factor Auth ───── */}
         <div className="bg-zinc-800 p-4 rounded-lg">
           <h3 className="text-lg font-semibold flex items-center gap-2">
-            🔒 Two‑Factor Authentication
+            🔒 Two-Factor Authentication
           </h3>
 
           {is2FAEnabled ? (
@@ -412,7 +718,7 @@ return (
                 <DialogContent>
                   <h3 className="text-lg text-white mb-2">Confirm Disable 2FA</h3>
                   <p className="text-sm text-gray-400 mb-4">
-                    Are you sure you want to disable two‑factor authentication?
+                    Are you sure you want to disable two-factor authentication?
                   </p>
                   <div className="flex justify-end gap-2">
                     <Button variant="ghost" onClick={() => setDisableDialogOpen(false)}>
@@ -461,7 +767,7 @@ return (
                     2FA Enabled!
                   </h3>
                   <p className="text-zinc-400 mb-6 text-center max-w-xs">
-                    Your two‑factor authentication is now active.
+                    Your two-factor authentication is now active.
                   </p>
                   <Button
                     onClick={() => {
@@ -476,9 +782,9 @@ return (
                 </div>
               ) : (
                 <>
-                  <h3 className="text-xl font-bold mb-3">Setup Two‑Factor Auth</h3>
+                  <h3 className="text-xl font-bold mb-3">Setup Two-Factor Auth</h3>
                   <p className="text-sm text-zinc-400 mb-4">
-                    Scan this QR in Google Authenticator and enter the 6‑digit code
+                    Scan this QR in Google Authenticator and enter the 6-digit code
                     below.
                   </p>
                   <img src={qrCodeUrl} alt="2FA QR" className="mb-4 rounded shadow" />
@@ -580,8 +886,59 @@ return (
           </Dialog>
         </div>
       </div>
+
+      {/* 🔘 Floating Arm Status Chip */}
+      <ArmStatusChip
+        armed={armStatus.armed}
+        msLeft={armStatus.msLeft}
+        onExtend={() => handleExtend(120)}
+        onDisarm={handleDisarm}
+        onArm={handleOpenArm}
+        busy={extendBusy || disarmBusy}
+      />
     </div>
   );
 };
 
 export default MyAccountTab;
+
+/* ==========================================================
+   Small, floating status chip for quick extend / disarm
+   ========================================================== */
+function ArmStatusChip({ armed, msLeft, onExtend, onDisarm, onArm, busy }) {
+  return (
+    <div className="fixed bottom-6 right-6 z-[9998]">
+      {!armed ? (
+        <button
+          onClick={onArm}
+          className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-lg hover:bg-emerald-700"
+          title="Arm-to-Trade"
+        >
+          <Power size={16} />
+          Arm
+        </button>
+      ) : (
+        <div className="flex items-center gap-2 rounded-full bg-emerald-700/90 px-3 py-2 text-sm text-white shadow-lg">
+          <Timer size={16} />
+          <span className="font-mono">{formatCountdown(msLeft)}</span>
+          <button
+            onClick={onExtend}
+            disabled={busy}
+            className="rounded-full bg-white/10 px-2 py-1 text-xs hover:bg-white/20 disabled:opacity-50"
+            title="Extend +2h"
+          >
+            +2h
+          </button>
+          <button
+            onClick={onDisarm}
+            disabled={busy}
+            className="rounded-full bg-red-600 px-2 py-1 text-xs hover:bg-red-700 disabled:opacity-50"
+            title="Disarm"
+          >
+            Disarm
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

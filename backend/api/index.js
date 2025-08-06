@@ -18,7 +18,7 @@ const accountsRoute = require("./accounts");
 const schedulerRoutes = require("./schedulerRoutes");
 const internalRouter = require("./internalJobs"); // 👈 add require here
 const requireAuth = require("../middleware/requireAuth");
-
+const encryptedWalletSessionRouter = require("./encryptedWalletSession")
 console.log("✅ API router loaded.");
 
 // 🔍 Global log to see every hit on /api
@@ -79,6 +79,8 @@ console.log("✅ /payment router loaded");
 router.use("/account", accountsRoute);
 console.log("✅ /account router loaded");
 router.use("/internalJobs", internalRouter);
+router.use("/encrypted-wallet-session", encryptedWalletSessionRouter);
+
 console.log("✅ /internalJobs router loaded");
 
 module.exports = router;

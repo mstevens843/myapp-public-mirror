@@ -12,13 +12,27 @@ import {
   Settings as SettingsIcon,
   BarChart3,
   Bot,
+  Timer,
 } from "lucide-react";
 import logo from "@/assets/solpulse-logo.png";
 import AccountMenu from "@/components/Dashboard/Account/AccountMenu";
 
+/* 🔐 Global Arm chip helpers */
+import { toast } from "sonner";
+import {
+  getArmStatus,
+  extendEncryptedWallet,
+  disarmEncryptedWallet,
+  formatCountdown,
+} from "@/utils/encryptedWalletSession";
+import { useUser } from "@/contexts/UserProvider";
+
+const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
+
 export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { activeWalletId } = useUser(); // ← get active wallet from your existing context
 
   const [activeTab, setActiveTab] = useState(() => {
     return localStorage.getItem("activeTab") || "app";
@@ -33,6 +47,11 @@ export default function Layout() {
       return false;
     }
   });
+
+  const [armStatus, setArmStatus] = useState({ armed: false, msLeft: 0 });
+  const [warned, setWarned] = useState(false);
+  const [extendBusy, setExtendBusy] = useState(false);
+  const [disarmBusy, setDisarmBusy] = useState(false);
 
   const running = runningBots.length > 0;
 
@@ -55,6 +74,98 @@ export default function Layout() {
     if (storedTab) setActiveTab(storedTab);
   }, []);
 
+  /* 🔁 Poll arm status every 20s */
+  useEffect(() => {
+    let timer;
+    async function poll() {
+      try {
+        if (activeWalletId) {
+          const s = await getArmStatus(activeWalletId);
+          setArmStatus({ armed: !!s.armed, msLeft: s.msLeft || 0 });
+          if (!s.armed) setWarned(false);
+        }
+      } catch {
+        setArmStatus({ armed: false, msLeft: 0 });
+        setWarned(false);
+      } finally {
+        timer = setTimeout(poll, 20000);
+      }
+    }
+    if (activeWalletId) poll();
+    return () => timer && clearTimeout(timer);
+  }, [activeWalletId]);
+
+  /* ⏱️ Local 1s countdown between polls */
+  useEffect(() => {
+    if (!armStatus.armed || armStatus.msLeft <= 0) return;
+    const id = setInterval(() => {
+      setArmStatus((prev) => {
+        const next = Math.max(0, (prev.msLeft || 0) - 1000);
+        return { ...prev, msLeft: next };
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [armStatus.armed]);
+
+  /* ⏳ Pre-expiry toast at T-15m */
+  useEffect(() => {
+    if (!armStatus.armed) return;
+    if (!warned && armStatus.msLeft > 0 && armStatus.msLeft <= PRE_EXPIRY_MS) {
+      setWarned(true);
+      toast.message("⏳ Session ends in ~15 minutes", {
+        description: "Extend now to keep automation armed.",
+        action: {
+          label: "Extend +2h",
+          onClick: () => handleExtend(120),
+        },
+      });
+    }
+  }, [armStatus.armed, armStatus.msLeft, warned]);
+
+  /* 🔘 Global handlers */
+  const handleExtend = async (minutes = 120) => {
+    if (!activeWalletId) return;
+    setExtendBusy(true);
+    try {
+      await extendEncryptedWallet({
+        walletId: activeWalletId,
+        ttlMinutes: minutes,
+      });
+      setArmStatus((prev) => ({
+        armed: true,
+        msLeft: Math.max(prev.msLeft, 0) + minutes * 60 * 1000,
+      }));
+      toast.success(`Session extended ${minutes} minutes.`);
+    } catch (e) {
+      toast.error(e.message || "Failed to extend.");
+    } finally {
+      setExtendBusy(false);
+    }
+  };
+
+  const handleDisarm = async () => {
+    if (!activeWalletId) return;
+    setDisarmBusy(true);
+    try {
+      await disarmEncryptedWallet({ walletId: activeWalletId });
+      setArmStatus({ armed: false, msLeft: 0 });
+      setWarned(false);
+      toast.success("Automation disarmed.");
+    } catch (e) {
+      toast.error(e.message || "Failed to disarm.");
+    } finally {
+      setDisarmBusy(false);
+    }
+  };
+
+  const handleArm = () => {
+    // Route to Account tab so the user can open the Arm modal there
+    setActiveTab("account");
+    navigate(`/account`);
+    toast.info("Open the Arm modal to start a secure session.");
+    // (If you want auto-open: pass state or a query param and check in MyAccountTab)
+    navigate('/account', { state: { openArm: true } });
+  };
 
   const tabs = [
     { name: "app", label: "Auto Bot", icon: <Bot size={18} className="text-emerald-400" /> },
@@ -128,6 +239,43 @@ export default function Layout() {
         {/* Page Content */}
         <Outlet />
       </div>
+
+      {/* 🔘 Global Floating Arm Chip */}
+      {activeWalletId ? (
+        <div className="fixed bottom-6 right-6 z-[9998]">
+          {!armStatus.armed ? (
+            <button
+              onClick={handleArm}
+              className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-lg hover:bg-emerald-700"
+              title="Arm-to-Trade"
+            >
+              <Timer size={16} />
+              Arm
+            </button>
+          ) : (
+            <div className="flex items-center gap-2 rounded-full bg-emerald-700/90 px-3 py-2 text-sm text-white shadow-lg">
+              <Timer size={16} />
+              <span className="font-mono">{formatCountdown(armStatus.msLeft)}</span>
+              <button
+                onClick={() => handleExtend(120)}
+                disabled={extendBusy}
+                className="rounded-full bg-white/10 px-2 py-1 text-xs hover:bg-white/20 disabled:opacity-50"
+                title="Extend +2h"
+              >
+                +2h
+              </button>
+              <button
+                onClick={handleDisarm}
+                disabled={disarmBusy}
+                className="rounded-full bg-red-600 px-2 py-1 text-xs hover:bg-red-700 disabled:opacity-50"
+                title="Disarm"
+              >
+                Disarm
+              </button>
+            </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

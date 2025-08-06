@@ -22,10 +22,10 @@ import ConfirmEmail from "./components/Auth/ConfirmEmail";
 import Layout from "./Layout";
 import EmailConfirmed from "./components/Auth/EmailConfirmed";
 import { SupabaseSessionProvider } from "./contexts/SupbaseSessionContext";
-import { PrefsProvider } from "./contexts/prefsContext";
-import { UserProvider } from "./contexts/UserProvider";  // ✅ NEW CONTEXT
+import { PrefsProvider } from "./contexts/prefsContext";         // 🔁 FIXED CASING
+import { UserProvider } from "./contexts/UserProvider";          // ✅ your updated context
 import { UserPrefsProvider } from "@/contexts/UserPrefsContext";
-import HistoryPanel from "./components/Tables_Charts/HistoryPanel"; 
+import HistoryPanelRoute from "./components/Tables_Charts/HistoryPanel"; // (unused here?)
 import "./styles/dashboard.css";
 import "./styles/tailwind.css";
 import { Toaster } from "sonner";
@@ -33,7 +33,7 @@ import TermsOfService from "./components/AuthWallet/TermsOfService";
 import PrivacyPolicy from "./components/AuthWallet/PrivacyPolicy";
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
 import { PhantomWalletAdapter } from "@solana/wallet-adapter-wallets";
-import { WalletModalProvider } from "@solana/wallet-adapter-react-ui"; // if you want the modal
+import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import ChartPanelRoute from "./components/Tables_Charts/ChartPanelRoute";
 
@@ -41,7 +41,7 @@ function AuthHandler() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
       if (event === "SIGNED_IN" && localStorage.getItem("awaitingEmailConfirmation")) {
         console.log("✅ Supabase SIGNED_IN via email link");
         localStorage.removeItem("awaitingEmailConfirmation");
@@ -54,15 +54,14 @@ function AuthHandler() {
 
   return null;
 }
-const endpoint = import.meta.env.VITE_SOLANA_RPC_URL;
 
+const endpoint = import.meta.env.VITE_SOLANA_RPC_URL;
 if (!endpoint || !endpoint.startsWith("http")) {
   throw new Error("❌ Invalid SOLANA RPC URL: " + endpoint);
 }
 
-const wallets = [
-  new PhantomWalletAdapter()
-];
+const wallets = [ new PhantomWalletAdapter() ];
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <ConnectionProvider endpoint={endpoint}>
@@ -95,7 +94,6 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                         <Route path="/portfolio" element={<ChartPanelRoute />} />
                         <Route path="/metrics" element={<ChartPanelRoute />} />
                         <Route path="/trades" element={<ChartPanelRoute />} />
-
                       </Route>
 
                       <Route path="/terms" element={<TermsOfService />} />
