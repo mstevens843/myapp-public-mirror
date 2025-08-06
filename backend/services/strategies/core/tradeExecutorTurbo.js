@@ -28,7 +28,7 @@ const { trackPendingTrade } = require("./txTracker");
 const { getDEK } = require("../../../../core/crypto/sessionKeyCache");
 const {
   decryptPrivateKeyWithDEK,
-} = require("../../../crypto/envelopeCrypto");
+} = require("../../../armEncryption/envelopeCrypto");
 const { decrypt } = require("../../../../middleware/auth/encryption");
 
 // 👻  Ghost utilities

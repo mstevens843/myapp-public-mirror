@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+const readline = require('readline/promises');
+const prisma   = require('../backend/prisma/prisma');
+const { generateDEK, wrapDEK, encryptPrivateKey } = require('../backend/utils/encryption/armEncryption');
+const { decryptPrivateKey } = require('../backend/core/crypto/envelopeCrypto');
+
+(async () => {
+  const [, , userId] = process.argv;
+  if (!userId) {
+    console.error('Usage: node upgradeWalletsToProtected.js <userId>');
+    process.exit(1);
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const passphrase = await rl.question('Enter new wallet passphrase: ', { hideEchoBack: true });
+  rl.close();
+  const wallets = await prisma.wallet.findMany({ where: { userId } });
+  for (const w of wallets) {
+    const legacyAad = `user:${userId}:wallet:${w.id}`;
+    const currentPk = decryptPrivateKey(w, Buffer.from(process.env.SERVER_SECRET, 'utf8'), legacyAad);
+    const dek = generateDEK();
+    const pkEnc = encryptPrivateKey(currentPk, dek, legacyAad);
+    const dekWrapped = await wrapDEK(dek, passphrase);
+    dek.fill(0);
+    currentPk.fill(0);
+    await prisma.wallet.update({ where: { id: w.id }, data: { ...pkEnc, ...dekWrapped, isProtected: true } });
+    console.log(`Upgraded wallet ${w.id}`);
+  }
+  console.log('All wallets upgraded to Protected Mode');
+})();
