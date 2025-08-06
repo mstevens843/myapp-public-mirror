@@ -1,11 +1,14 @@
-/* backend/services/strategies/sniper.js
- *
- * Simplified sniper strategy extended with turbo mode and automatic risk
- * management. This file is based off the original sniper strategy in the
- * repository but only includes the pieces necessary to demonstrate how
- * turbo mode and auto‑tuning are integrated. For a full view of the
- * original strategy logic (token feed handling, safety checks, etc.)
- * consult the upstream repository.
+/* backend/services/strategies/sniper.js  – Turbo-ready
+ * ------------------------------------------------------------------
+ *  • Keeps swap path ultra-fast (executeSwapTurbo)
+ *  • Adds back advanced flags from legacy Sniper:
+ *        – ghostMode / coverWalletId
+ *        – autoRug
+ *        – prewarmAccounts
+ *        – multiBuy 1-3 parallel routes
+ *  • Flags are optional; nothing runs unless enabled
+ *  • All post-swap work (ghost forward, rug-exit, TP/SL, alerts) is
+ *    handled inside turboTradeExecutor, so we just pass the meta flags.
  */
 
 const fs = require("fs");
@@ -30,156 +33,136 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote }         = require("./core/quoteHelper");
-// Import the trade executor. In this simplified integration the same
-// executor is used for live and simulated runs. In a full build the
-// executor exposes separate liveBuy and simulateBuy functions.
-const execTrade = require("./core/tradeExecutor");
+const execTrade                = require("./core/tradeExecutorTurbo"); // <-- use turbo executor
 const { passes, explainFilterFail }               = require("./core/passes");
-const { createSummary, tradeExecuted }        = require("./core/alerts");
+const { createSummary }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
 
+/* Ghost utils + quote for multi-buy */
+const { prewarmTokenAccount }  = require("../../utils/ghost");
+const { Connection }           = require("@solana/web3.js");
+const { getSwapQuote }         = require("../../utils/swap");
+
 /* misc utils */
 const { getWalletBalance,  isAboveMinBalance, } = require("../utils");
-const { sendAlert }            = require("../../telegram/alerts");
-
-/* import our new risk manager */
-const { autoTuneRisk }         = require("../../utils/riskManager");
 
 /* constants */
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SOL_MINT  = "So11111111111111111111111111111111111111112";
 
-module.exports = async function sniperStrategy(botCfg = {}) {
-  console.log(" sniperStrategy loaded", botCfg);
+module.exports = async function turboSniperStrategy(botCfg = {}) {
   const limitBirdeye = pLimit(2);
   const botId = botCfg.botId || "manual";
   const log   = strategyLog("sniper", botId, botCfg);
 
-  /* ── derive base config values ── */
+  /* ── config ───────────────────────────────────────── */
   const BASE_MINT        = botCfg.buyWithUSDC ? USDC_MINT : (botCfg.inputMint || SOL_MINT);
   const LIMIT_USD        = +botCfg.targetPriceUSD || null;
-  // snipeAmount and amountToSpend are in SOL or USDC units; convert to lamports
-  let SNIPE_LAMPORTS   = (+botCfg.snipeAmount || +botCfg.amountToSpend || 0) *
-                          (BASE_MINT === USDC_MINT ? 1e6 : 1e9);
-  const ENTRY_THRESHOLD  = (+botCfg.entryThreshold >= 1 ? +botCfg.entryThreshold / 100 : +botCfg.entryThreshold) || 0.03;
+  let   SNIPE_LAMPORTS   = (+botCfg.snipeAmount || +botCfg.amountToSpend || 0) *
+                           (BASE_MINT === USDC_MINT ? 1e6 : 1e9);
+  const ENTRY_THRESHOLD  = (+botCfg.entryThreshold >= 1
+                              ? +botCfg.entryThreshold / 100
+                              : +botCfg.entryThreshold) || 0.03;
   const VOLUME_THRESHOLD = +botCfg.volumeThreshold || 50_000;
   const SLIPPAGE         = +botCfg.slippage        || 1.0;
   const MAX_SLIPPAGE     = +botCfg.maxSlippage     || 0.15;
   const INTERVAL_MS      = Math.round((+botCfg.interval || 30) * 1_000);
-  let TAKE_PROFIT      = +botCfg.takeProfit      || 0;
-  let STOP_LOSS        = +botCfg.stopLoss        || 0;
+  const TAKE_PROFIT      = +botCfg.takeProfit      || 0;
+  const STOP_LOSS        = +botCfg.stopLoss        || 0;
   const MAX_DAILY_SOL    = +botCfg.maxDailyVolume  || 9999;
   const MAX_OPEN_TRADES  = +botCfg.maxOpenTrades   || 9999;
   const MAX_TRADES       = +botCfg.maxTrades       || 9999;
   const HALT_ON_FAILS    = +botCfg.haltOnFailures  || 3;
-  const MIN_BALANCE_SOL = 0.05;
+  const MIN_BALANCE_SOL  = 0.05;
   const MAX_TOKEN_AGE_MIN= botCfg.maxTokenAgeMinutes != null ? +botCfg.maxTokenAgeMinutes : null;
   const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null ? +botCfg.minTokenAgeMinutes : null;
   const MIN_MARKET_CAP   = botCfg.minMarketCap != null ? +botCfg.minMarketCap : null;
   const MAX_MARKET_CAP   = botCfg.maxMarketCap != null ? +botCfg.maxMarketCap : null;
   const DRY_RUN          = botCfg.dryRun === true;
-  // Use a unified execBuy function. In the simplified implementation we
-  // delegate both simulated and live trades to execTrade. A full
-  // implementation would choose between simulateBuy and liveBuy.
-  const execBuy = async ({ quote, mint, meta }) => {
-    return await execTrade({ quote, mint, meta, simulated: DRY_RUN });
-  };
-  let COOLDOWN_MS    = botCfg.cooldown != null ? +botCfg.cooldown * 1000 : 60_000;
-  const DELAY_MS     = +botCfg.delayBeforeBuyMs || 0;
-  const PRIORITY_FEE = +botCfg.priorityFeeLamports || 0;
-  const SAFETY_DISABLED = botCfg.disableSafety === true || (botCfg.safetyChecks && Object.values(botCfg.safetyChecks).every(v => v === false));
 
-  /* ── new flags for turbo and auto risk ── */
-  const TURBO_MODE       = botCfg.turboMode === true;
-  const AUTO_RISK        = botCfg.autoRiskManage === true;
-  const PRIVATE_RPC_URL  = botCfg.privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL;
+  /* turbo + perf flags */
+  const PRIORITY_FEE   = +botCfg.priorityFeeLamports || 0;
+  const TURBO_MODE     = true;                         // always true here
+  const PRIVATE_RPC_URL= botCfg.privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL;
 
-  /* ── apply auto risk adjustments at startup ── */
-  if (AUTO_RISK) {
-    try {
-      const adj = await autoTuneRisk(botCfg, BASE_MINT);
-      if (adj && typeof adj === 'object') {
-        if (adj.amountLamports) {
-          SNIPE_LAMPORTS = adj.amountLamports;
-        }
-        if (adj.cooldownMs) {
-          COOLDOWN_MS = adj.cooldownMs;
-        }
-        if (adj.takeProfit != null) {
-          TAKE_PROFIT = adj.takeProfit;
-        }
-        if (adj.stopLoss != null) {
-          STOP_LOSS = adj.stopLoss;
-        }
-        log("info", `[AUTO RISK] factor=${(adj.riskFactor || 1).toFixed(2)}, ROI=${((adj.avgRoi || 0)*100).toFixed(2)}%, volatility=${((adj.volatility || 0)*100).toFixed(2)}%`);
-      }
-    } catch (err) {
-      log("warn", `Auto risk tuning failed: ${err.message}`);
-    }
-  }
+  /* advanced flags (restored) */
+  const GHOST_MODE       = botCfg.ghostMode === true;
+  const COVER_WALLET_ID  = botCfg.coverWalletId || null;
+  const AUTO_RUG         = botCfg.autoRug === true;
+  const PREWARM_ACCS     = botCfg.prewarmAccounts === true;
+  const MULTI_BUY        = botCfg.multiBuy === true;
+  const MULTI_BUY_COUNT  = Math.max(1, parseInt(botCfg.multiBuyCount || 0));
+  const DELAY_MS         = +botCfg.delayBeforeBuyMs || 0;
 
-  /* initialise cooldown and other state */
+  /* cooldown & summary */
+  const COOLDOWN_MS  = (+botCfg.cooldown || 60) * 1000;
   const cd        = createCooldown(COOLDOWN_MS);
-  const summary   = createSummary("Sniper",  log, botCfg.userId);
-  let   todaySol  = 0;
-  let   trades    = 0;
-  let   fails     = 0;
+  const summary   = createSummary("Sniper-Turbo", log, botCfg.userId);
 
-  /* start background confirmation loop */
-  log("info", ` Loading single wallet from DB (walletId: ${botCfg.walletId})`);
+  let todaySol = 0, trades = 0, fails = 0;
+
   await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
-  initTxWatcher("Sniper");
+  initTxWatcher("Sniper-Turbo");
 
-  /* ── simplified tick ── */
+  /* ── TICK ────────────────────────────────────────── */
   async function tick() {
     if (trades >= MAX_TRADES) return;
-    log("loop", `\n Sniper Tick @ ${new Date().toLocaleTimeString()}`);
     lastTickTimestamps[botId] = Date.now();
-    log("info", `[CONFIG] DELAY_MS: ${DELAY_MS}, PRIORITY_FEE: ${PRIORITY_FEE}, MAX_SLIPPAGE: ${MAX_SLIPPAGE}`);
 
     try {
-      // Basic trade guard checks
       guards.assertTradeCap(trades, MAX_TRADES);
       guards.assertOpenTradeCap("sniper", botId, MAX_OPEN_TRADES);
       await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
       if (!(await wm.ensureMinBalance(MIN_BALANCE_SOL, getWalletBalance, isAboveMinBalance))) {
-        log("warn", "Balance below min – skipping");
         return;
       }
 
-      // Placeholder: In the full implementation this would resolve which
-      // token to buy (based on feeds, filters, etc.). For brevity we skip
-      // those details and assume `mint` and `overview` are provided.
-      const mint = botCfg.mint;
-      if (!mint) {
-        log("warn", "No target mint specified in simplified demo config");
-        return;
+      /* token feed resolution (kept minimal for perf) */
+      const mint = botCfg.mint || (await resolveTokenFeed("sniper", botCfg))[0];
+      if (!mint) return;
+
+      /* filters / passes */
+      const res = await limitBirdeye(() =>
+        passes(mint, {
+          entryThreshold     : ENTRY_THRESHOLD,
+          volumeThresholdUSD : VOLUME_THRESHOLD,
+          pumpWindow         : botCfg.priceWindow  || "5m",
+          volumeWindow       : botCfg.volumeWindow || "1h",
+          limitUsd           : LIMIT_USD,
+          minMarketCap       : MIN_MARKET_CAP,
+          maxMarketCap       : MAX_MARKET_CAP,
+          dipThreshold       : null,
+          volumeSpikeMult    : null,
+          fetchOverview      : (m) =>
+            getTokenShortTermChange(null, m, "5m", "1h"),
+        })
+      );
+      if (!res?.ok) return;
+
+      /* safety check */
+      if (!(botCfg.disableSafety === true)) {
+        const safeRes = await isSafeToBuyDetailed(mint, botCfg.safetyChecks || {});
+        if (logSafetyResults(mint, safeRes, log, "sniper-turbo")) return;
       }
 
-      // Fetch a safe quote
-      log("info", "Getting swap quote…");
-      const result = await getSafeQuote({
+      guards.assertDailyLimit(SNIPE_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
+
+      /* quote helper */
+      const quoteRes = await getSafeQuote({
         inputMint    : BASE_MINT,
         outputMint   : mint,
         amount       : SNIPE_LAMPORTS,
         slippage     : SLIPPAGE,
         maxImpactPct : MAX_SLIPPAGE,
       });
-      if (!result.ok) {
-        log("warn", `❌ Quote failed: ${result.reason} — ${result.message}`);
-        return;
-      }
-      const quote = result.quote;
-      if (PRIORITY_FEE > 0) {
-        quote.prioritizationFeeLamports = PRIORITY_FEE;
-        log("info", `Adding priority fee of ${PRIORITY_FEE} lamports`);
-      }
-      quote.priceImpactPct = Number(quote.priceImpactPct);
-      log("info", `Quote received – impact ${(quote.priceImpactPct * 100).toFixed(2)}%`);
+      if (!quoteRes.ok) return;
+      const baseQuote = quoteRes.quote;
 
-      // Build meta with turbo fields
-      const meta = {
+      if (PRIORITY_FEE > 0) baseQuote.prioritizationFeeLamports = PRIORITY_FEE;
+
+      /* meta for executor */
+      const baseMeta = {
         strategy        : "Sniper",
         walletId        : botCfg.walletId,
         userId          : botCfg.userId,
@@ -194,58 +177,90 @@ module.exports = async function sniperStrategy(botCfg = {}) {
         turboMode       : TURBO_MODE,
         privateRpcUrl   : PRIVATE_RPC_URL,
         skipPreflight   : TURBO_MODE,
+        ghostMode       : GHOST_MODE,
+        coverWalletId   : COVER_WALLET_ID,
+        autoRug         : AUTO_RUG,
+        prewarmAccounts : PREWARM_ACCS,
       };
 
-      let txHash;
-      try {
-        log("info", "[ BUY ATTEMPT] Sniping token…");
-        txHash = await execBuy({ quote, mint, meta });
-      } catch (err) {
-        log("error", "❌ execBuy failed:");
-        log("error", err?.message || String(err));
-        fails++;
-        return;
+      /* optional delay before buy */
+      if (DELAY_MS > 0) await new Promise(r => setTimeout(r, DELAY_MS));
+
+      /* optional pre-warm */
+      if (PREWARM_ACCS) {
+        try {
+          const conn = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
+          const currentWallet = wm.current();
+          await prewarmTokenAccount(conn, baseQuote.outputMint, currentWallet);
+        } catch (_) {/* ignore */}
       }
-      const buyMsg  = DRY_RUN
-        ? `[ BOUGHT SUCCESS] ${mint}`
-        : `[ BOUGHT SUCCESS] ${mint} Tx: https://solscan.io/tx/${txHash}`;
-      log("info", buyMsg);
-      todaySol += SNIPE_LAMPORTS / 1e9;
-      trades++;
-      summary.inc("buys");
-      cd.hit(mint);
+
+      /* Multi-buy logic (max 3) */
+      let txHash;
+      if (MULTI_BUY && MULTI_BUY_COUNT > 1) {
+        const attempt = Math.min(MULTI_BUY_COUNT, 3);
+        const slips = Array.from({ length: attempt }).map((_, i) =>
+          +(SLIPPAGE + (i / (attempt - 1 || 1)) * (MAX_SLIPPAGE - SLIPPAGE)).toFixed(4)
+        );
+        const tasks = slips.map(async (s) => {
+          try {
+            const q = await getSwapQuote({
+              inputMint : baseQuote.inputMint,
+              outputMint: baseQuote.outputMint,
+              amount    : baseQuote.inAmount,
+              slippage  : s,
+            });
+            if (q) {
+              return await execTrade({
+                quote: { ...q, prioritizationFeeLamports: PRIORITY_FEE },
+                mint,
+                meta : { ...baseMeta, slippage: s },
+                simulated: DRY_RUN,
+              });
+            }
+          } catch { return null; }
+          return null;
+        });
+        for (const p of tasks) {
+          const sig = await p;
+          if (sig) { txHash = sig; break; }
+        }
+      } else {
+        txHash = await execTrade({
+          quote: baseQuote,
+          mint,
+          meta : baseMeta,
+          simulated: DRY_RUN,
+        });
+      }
+
+      if (txHash) {
+        trades++; todaySol += SNIPE_LAMPORTS / 1e9;
+        cd.hit(mint);
+      }
       if (trades >= MAX_TRADES) {
-        log("info", " Trade cap reached – sniper shutting down");
-        await summary.printAndAlert("Sniper");
-        log("summary", "✅ Sniper completed (max-trades reached)");
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
-        process.exit(0);
       }
     } catch (err) {
-      if (/insufficient.*lamports|insufficient.*balance/i.test(err.message)) {
-        log("error", " Not enough SOL – sniper shutting down");
-        await summary.printAndAlert("Sniper halted: insufficient SOL");
-        if (runningProcesses[botId]) runningProcesses[botId].finished = true;
-        clearInterval(loopHandle);
-        return;
-      }
       fails++;
       if (fails >= HALT_ON_FAILS) {
-        log("error", " Error limit hit — sniper shutting down");
-        await summary.printAndAlert("Sniper halted on errors");
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
-        return;
       }
-      summary.inc("errors");
-      log("error", err?.message || String(err));
     }
   }
 
-  // start the loop
-  const loopHandle = runLoop(tick, INTERVAL_MS, {
-    label: "sniper",
-    botId,
-  });
+  /* scheduler */
+  const loopHandle = runLoop(tick, INTERVAL_MS, { label: "sniper-turbo", botId });
 };
+
+/* CLI helper */
+if (require.main === module) {
+  const fp = process.argv[2];
+  if (!fp || !fs.existsSync(fp)) {
+    console.error("Pass config JSON path");
+    process.exit(1);
+  }
+  module.exports(JSON.parse(fs.readFileSync(fp, "utf8")));
+}
