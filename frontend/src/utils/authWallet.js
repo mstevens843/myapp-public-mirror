@@ -1,4 +1,6 @@
-const BASE = import.meta.env.VITE_API_BASE_URL;
+// Use an empty string if no API base is configured.  An undefined value
+// would result in "undefined/api/..." when template literals are used.
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 import { supabase } from "@/lib/supabase";
 import Cookies from "js-cookie"
 import { authFetch } from "./authFetch";

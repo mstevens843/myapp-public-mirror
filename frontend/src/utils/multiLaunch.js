@@ -1,4 +1,6 @@
-const BASE = import.meta.env.VITE_API_BASE_URL;
+// Default to an empty string when VITE_API_BASE_URL is undefined.  This
+// ensures relative paths are used instead of "undefined/...".
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 export async function authFetch(url, options = {}) {
   const token = localStorage.getItem("accessToken") || sessionStorage.getItem("accessToken");
   // Auto add Authorization

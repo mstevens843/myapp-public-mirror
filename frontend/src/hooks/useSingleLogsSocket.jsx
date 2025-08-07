@@ -4,7 +4,25 @@ import { toast } from "react-toastify";
 import { triggerBuyAnimation } from "@/utils/tradeFlash";
 
 // Convert base URL to WebSocket URL (ws://...)
-const WS_URL = import.meta.env.VITE_API_BASE_URL.replace("http", "ws");
+// Derive a WebSocket origin from the configured API base or fallback to
+// the current location.  If VITE_API_BASE_URL is undefined the
+// replace() call on undefined would throw, so we guard against that and
+// compute a sensible default.  When a specific WS base is provided via
+// VITE_WS_BASE_URL you can still override this in ws.js.
+let WS_URL;
+{
+  const apiBase = import.meta.env.VITE_API_BASE_URL;
+  if (apiBase) {
+    try {
+      const url = new URL(apiBase, window.location.origin);
+      WS_URL = url.origin.replace(/^http/, "ws");
+    } catch {
+      WS_URL = apiBase.replace(/^http/, "ws");
+    }
+  } else {
+    WS_URL = window.location.origin.replace(/^http/, "ws");
+  }
+}
 
 let socket; // singleton instance
 

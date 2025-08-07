@@ -373,7 +373,7 @@ const STRATEGY_OPTIONS = [
   { value: "rebalancer",     label: "⚖️ Rebalancer" },
   { value: "rotationBot",    label: "🔁 Rotation Bot" },
    { value: "stealthBot",    label: "🥷 Stealth Bot" },
-  { value: "turboSniper",    label: "💨 Turbo Sniper" },
+  { value: "turboSniper",    label: "🏎️ Turbo Sniper" },
 ];
 
 

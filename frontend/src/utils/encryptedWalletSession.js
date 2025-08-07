@@ -1,5 +1,7 @@
 // src/utils/encryptedWalletSession.js
-const BASE = import.meta.env.VITE_API_BASE_URL;
+// Default to empty string when VITE_API_BASE_URL is not defined.  Leaving
+// this undefined will produce literal "undefined/..." URLs at runtime.
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 import { supabase } from "@/lib/supabase";
 import Cookies from "js-cookie";
 import { authFetch } from "./authFetch";

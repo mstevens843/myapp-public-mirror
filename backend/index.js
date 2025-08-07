@@ -124,11 +124,38 @@ if (modeFromCLI) {
 
   let currentModeProcess = null; // Track current running strategy (if spawned via API)
 
-// ✅ Allow frontend to send credentials (cookies) on cross-origin requests
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-  credentials: true
-}));
+  // ✅ Allow frontend to send credentials (cookies) on cross‑origin requests.
+  // In practice CORS errors often occur when the expected FRONTEND_URL is not
+  // defined or the client is served from an unexpected origin (e.g. using a
+  // different port during development).  To make CORS behaviour more
+  // predictable we derive an allow‑list from either CORS_ALLOWED_ORIGINS
+  // (comma‑separated) or FRONTEND_URL.  If neither are set we simply allow
+  // any origin.  This prevents sudden “CORS policy” failures if env vars are
+  // missing or misconfigured.  The callback signature follows the express‑cors
+  // docs: callback(err, allow).  Requests without an Origin header (e.g.
+  // server‑to‑server or curl) are always allowed.
+  const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+
+  app.use(
+    cors({
+      origin: (origin, callback) => {
+        // allow requests with no origin like mobile apps or curl
+        if (!origin) return callback(null, true);
+        // no allow list configured → allow all origins
+        if (allowedOrigins.length === 0) return callback(null, true);
+        // check against allow list
+        if (allowedOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+        // otherwise reject
+        return callback(new Error("Not allowed by CORS"));
+      },
+      credentials: true,
+    })
+  );
 
 // ✅ Required to read cookies like access_token from incoming requests
 app.use(cookieParser());

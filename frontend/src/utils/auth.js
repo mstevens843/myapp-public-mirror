@@ -1,4 +1,6 @@
-const BASE = import.meta.env.VITE_API_BASE_URL;
+// Fallback to empty string when no API base is configured.  Without this
+// default a literal "undefined" string would be prefixed to endpoints.
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 import { supabase } from "@/lib/supabase";
 import Cookies from "js-cookie"
 import { authFetch } from "./authFetch";
@@ -532,10 +534,14 @@ export async function fetchTokensByWallet(walletId) {
 
 export async function fetchPortfolio(walletId) {
   const token = localStorage.getItem("accessToken");
-  const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/wallets/portfolio?walletId=${walletId}`, {
+  // Use configured API base or fall back to relative path.  Without this guard
+  // `import.meta.env.VITE_API_BASE_URL` may be undefined and produce
+  // "undefined/..." URLs at runtime.
+  const base = import.meta.env.VITE_API_BASE_URL || "";
+  const res = await fetch(`${base}/api/wallets/portfolio?walletId=${walletId}`, {
     headers: {
-      Authorization: `Bearer ${token}`
-    }
+      Authorization: `Bearer ${token}`,
+    },
   });
   if (!res.ok) throw new Error(`Failed to fetch portfolio: ${res.status}`);
   return res.json();

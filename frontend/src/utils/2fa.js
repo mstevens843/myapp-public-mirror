@@ -1,4 +1,6 @@
-const BASE = import.meta.env.VITE_API_BASE_URL;
+// Fallback to empty string so requests resolve relative to the current
+// origin if no API base URL is configured.
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 import { toast } from "sonner";
 
 /**

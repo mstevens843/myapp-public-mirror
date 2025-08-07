@@ -17,8 +17,14 @@ export async function authFetch(path, options = {}) {
     },
     ...options,
   };
-  const url = `${import.meta.env.VITE_API_BASE_URL}${path}`;
-  const res = await fetch(url, merged);
+  // Compute the API base.  If VITE_API_BASE_URL is undefined (e.g. during
+  // local development when a proxy is used), default to an empty string so
+  // requests resolve relative to the current origin.  Without this guard the
+  // string "undefined" would be prefixed to endpoints and cause CORS/network
+  // errors.
+  const base = import.meta.env.VITE_API_BASE_URL || "";
+  const url  = `${base}${path}`;
+  const res  = await fetch(url, merged);
   if (res.status === 401) {
     let data = null;
     try {
@@ -33,7 +39,9 @@ export async function authFetch(path, options = {}) {
           console.error("[authFetch] onNeedsArm handler error:", e);
         }
       } else {
-        toast.error("Protected Mode is enabled. Please arm your automation in the Account settings before trading.");
+        toast.error(
+          "Protected Mode is enabled. Please arm your automation in the Account settings before trading."
+        );
       }
     }
   }
@@ -97,5 +105,4 @@ export async function authFetch(path, options = {}) {
 
 //   return res;
 // }
-
 
