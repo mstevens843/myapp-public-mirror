@@ -13,6 +13,7 @@ import TrendFollowerConfig from "./TrendFollowerConfig";
 import PaperTraderConfig   from "./PaperTraderConfig";
 import SniperConfig        from "./SniperConfig";
 import StealthBotConfig from "./StealthBotConfig";
+import TurboSniperConfig from "./TurboSniperConfig";
 import LimitEntryBlock  from "./LimitEntryBlock";
 import AdvancedSection  from "../ui/AdvancedSection";
 import AdvancedFields from "../ui/AdvancedFields";
@@ -191,6 +192,26 @@ case "rotationBot":
           {entryBlock}
         </TrendFollowerConfig>
       );
+
+    /* ───────────────────── turboSniper ─ */
+    case "turboSniper": {
+      const defaultTurboCfg = {
+        entryThreshold : 3,
+        volumeThreshold: 50_000,
+        priceWindow    : "1h",
+        volumeWindow   : "24h",
+        ...config,
+      };
+      return (
+        <TurboSniperConfig
+          config={defaultTurboCfg}
+          setConfig={setConfig}
+          disabled={disabled}
+        >
+          {entryBlock /* always true for TurboSniper */}
+        </TurboSniperConfig>
+      );
+    }
 
       case "stealthBot":
   return (

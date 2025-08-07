@@ -30,6 +30,11 @@ const StrategyRail = ({
     { value: "trendFollower", label: "📈 Trend" },
   ];
 
+  // Turbo section (single strategy)
+  const TURBO_OPTIONS = [
+    { value: "turboSniper", label: "💨 Turbo Sniper" },
+  ];
+
   const UTILITY_OPTIONS = [
     { value: "rebalancer", label: "⚖️ Rebalancer" },
     { value: "rotationBot", label: "🔁 Rotation" },
@@ -133,6 +138,8 @@ const handleClick = (opt) => {
     <div className="w-60 md:w-64 flex-shrink-0 bg-gradient-to-br from-zinc-800 via-zinc-900 to-zinc-700 border border-zinc-700 rounded-xl shadow-inner p-3">
       <Group title="Execution" options={EXECUTION_OPTIONS} />
       <Group title="Utility" options={UTILITY_OPTIONS} isUtility />
+      {/* New Turbo section */}
+      <Group title="Turbo" options={TURBO_OPTIONS} />
     </div>
   );
 };

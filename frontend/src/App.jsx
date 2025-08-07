@@ -355,6 +355,55 @@ scheduleLauncher: (cfg, wallets, target, resolved, activeWallet) => {
     autoSell            : undefined,
   };
 },
+
+  /* ───────────────────────── Turbo Sniper ──────────────────────────── */
+  /**
+   * Build config for the Turbo Sniper strategy.  Extends the base Sniper
+   * config with a number of performance and safety toggles.  Many of
+   * these fields are optional – only truthy values will be passed to
+   * the backend.  Numeric fields are converted using safeNum to avoid
+   * NaN propagation.
+   */
+  turboSniper: (cfg, wallets, target, resolved, activeWallet) => {
+    const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
+    return {
+      ...base,
+      entryThreshold    : safeNum(cfg.entryThreshold, 3),
+      volumeThreshold   : safeNum(cfg.volumeThreshold, 50_000),
+      priceWindow       : cfg.priceWindow,
+      volumeWindow      : cfg.volumeWindow,
+      // If a custom list of monitored tokens is provided, omit tokenFeed
+      tokenFeed         : cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
+      minTokenAgeMinutes: cfg.minTokenAgeMinutes,
+      maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
+      minMarketCap      : cfg.minMarketCap,
+      maxMarketCap      : cfg.maxMarketCap,
+      ghostMode         : !!cfg.ghostMode,
+      coverWalletId     : cfg.coverWalletId,
+      multiBuy          : !!cfg.multiBuy,
+      multiBuyCount     : safeNum(cfg.multiBuyCount, 2),
+      prewarmAccounts   : !!cfg.prewarmAccounts,
+      multiRoute        : !!cfg.multiRoute,
+      autoRug           : !!cfg.autoRug,
+      useJitoBundle     : !!cfg.useJitoBundle,
+      jitoTipLamports   : safeNum(cfg.jitoTipLamports),
+      jitoRelayUrl      : cfg.jitoRelayUrl,
+      autoPriorityFee   : !!cfg.autoPriorityFee,
+      rpcEndpoints      : cfg.rpcEndpoints,
+      rpcMaxErrors      : safeNum(cfg.rpcMaxErrors),
+      killSwitch        : !!cfg.killSwitch,
+      killThreshold     : safeNum(cfg.killThreshold),
+      poolDetection     : !!cfg.poolDetection,
+      allowedDexes      : cfg.allowedDexes,
+      excludedDexes     : cfg.excludedDexes,
+      splitTrade        : !!cfg.splitTrade,
+      tpLadder          : cfg.tpLadder,
+      trailingStopPct   : safeNum(cfg.trailingStopPct),
+      turboMode         : !!cfg.turboMode,
+      autoRiskManage    : !!cfg.autoRiskManage,
+      privateRpcUrl     : cfg.privateRpcUrl,
+    };
+  },
 };
 
 // ["autoRestart", "selectedModes", "botConfig", "selectedWallets"].forEach((key) => {
@@ -824,8 +873,17 @@ const startMode = async () => {
 
 
   const singleWalletModes = [
-    "sniper", "scalper", "breakout", "chadMode", "dipBuyer",
-    "delayedSniper", "trendFollower", "rebalancer", "paperTrader", "scheduleLaunch"
+    "sniper",
+    "scalper",
+    "breakout",
+    "chadMode",
+    "dipBuyer",
+    "delayedSniper",
+    "trendFollower",
+    "rebalancer",
+    "paperTrader",
+    "scheduleLaunch",
+    "turboSniper",
   ];
 
   

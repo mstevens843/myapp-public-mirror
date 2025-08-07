@@ -10,5 +10,6 @@ module.exports = {
     paperTrader: require("./paperTrader"),
     dipBuyer: require("./dipBuyer"),
     stealthBot: require("./stealthBot"),
+    turboSniper: require("./turboSniper"),
   };
   

@@ -28,6 +28,12 @@ export const OPTIONAL_FIELDS = [
   "allowedDexes", "excludedDexes", "splitTrade", "tpLadder", "trailingStopPct",
 ];
 
+/* fields required by validator ----------------------------------------
+ * Turbo Sniper shares the same required fields as the base Sniper: the
+ * pump entry % and minimum volume.  Additional turbo toggles are optional.
+ */
+export const REQUIRED_FIELDS = ["entryThreshold", "volumeThreshold"];
+
 const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
   /* sensible defaults (mirror Sniper, plus turbo toggles) */
   const defaults = {
@@ -242,7 +248,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Ghost Mode (forward to cover)
+          Ghost Mode (forward to cover) <StrategyTooltip name="ghostMode" />
         </label>
         {merged.ghostMode && (
           <input
@@ -268,7 +274,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Parallel Multi-Buy
+          Parallel Multi-Buy <StrategyTooltip name="multiBuy" />
         </label>
         {merged.multiBuy && (
           <input
@@ -296,7 +302,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Pre-Warm Accounts
+          Pre-Warm Accounts <StrategyTooltip name="prewarmAccounts" />
         </label>
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -307,7 +313,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Auto Rug Detection
+          Auto Rug Detection <StrategyTooltip name="autoRug" />
         </label>
       </div>
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
@@ -320,7 +326,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Multi-Route Aggregation
+          Multi-Route Aggregation <StrategyTooltip name="multiRoute" />
         </label>
       </div>
 
@@ -335,7 +341,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Use Jito Bundle
+          Use Jito Bundle <StrategyTooltip name="useJitoBundle" />
         </label>
         {merged.useJitoBundle && (
           <div className="flex flex-col gap-2">
@@ -370,14 +376,16 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Auto Priority Fee
+          Auto Priority Fee <StrategyTooltip name="autoPriorityFee" />
         </label>
       </div>
 
       {/* ——— RPC & Kill Switch ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <label className="flex flex-col text-sm font-medium gap-1">
-          RPC Endpoints (comma)
+          <span className="flex items-center gap-1">
+            RPC Endpoints (comma) <StrategyTooltip name="rpcEndpoints" />
+          </span>
           <input
             type="text"
             name="rpcEndpoints"
@@ -389,7 +397,9 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
         <label className="flex flex-col text-sm font-medium gap-1">
-          RPC Max Errors
+          <span className="flex items-center gap-1">
+            RPC Max Errors <StrategyTooltip name="rpcMaxErrors" />
+          </span>
           <input
             type="number"
             name="rpcMaxErrors"
@@ -412,7 +422,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Kill Switch
+          Kill Switch <StrategyTooltip name="killSwitch" />
         </label>
         {merged.killSwitch && (
           <input
@@ -439,14 +449,16 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Pool Detection
+          Pool Detection <StrategyTooltip name="poolDetection" />
         </label>
       </div>
 
       {/* ——— DEX prefs & split ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <label className="flex flex-col text-sm font-medium gap-1">
-          Allowed DEXes
+          <span className="flex items-center gap-1">
+            Allowed DEXes <StrategyTooltip name="allowedDexes" />
+          </span>
           <input
             type="text"
             name="allowedDexes"
@@ -458,7 +470,9 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
         <label className="flex flex-col text-sm font-medium gap-1">
-          Excluded DEXes
+          <span className="flex items-center gap-1">
+            Excluded DEXes <StrategyTooltip name="excludedDexes" />
+          </span>
           <input
             type="text"
             name="excludedDexes"
@@ -480,14 +494,16 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Split Trade (multi-pool)
+          Split Trade (multi-pool) <StrategyTooltip name="splitTrade" />
         </label>
       </div>
 
       {/* ——— TP Ladder & Trailing Stop ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <label className="flex flex-col text-sm font-medium gap-1">
-          TP Ladder (%)
+          <span className="flex items-center gap-1">
+            TP Ladder (%) <StrategyTooltip name="tpLadder" />
+          </span>
           <input
             type="text"
             name="tpLadder"
@@ -499,7 +515,9 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
         <label className="flex flex-col text-sm font-medium gap-1">
-          Trailing Stop (%)
+          <span className="flex items-center gap-1">
+            Trailing Stop (%) <StrategyTooltip name="trailingStopPct" />
+          </span>
           <input
             type="number"
             name="trailingStopPct"

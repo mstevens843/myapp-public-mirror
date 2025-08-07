@@ -275,6 +275,122 @@ function validateSniper(cfg = {}) {
   return errors;
 }
 
+/* ───── Turbo Sniper ─────────────────────────────────────────────── */
+/**
+ * Validate Turbo Sniper configs.  Builds on the base Sniper validator and
+ * enforces bounds on the additional turbo settings (e.g. multi-buy count,
+ * RPC failover, kill switch).  Boolean flags must be boolean when
+ * provided; numeric parameters are coerced and checked for sane ranges.
+ */
+function validateTurboSniper(cfg = {}) {
+  const errors = validateSniper(cfg);
+
+  // boolean toggles
+  [
+    "ghostMode",
+    "multiBuy",
+    "prewarmAccounts",
+    "multiRoute",
+    "autoRug",
+    "useJitoBundle",
+    "autoPriorityFee",
+    "killSwitch",
+    "poolDetection",
+    "splitTrade",
+    "turboMode",
+    "autoRiskManage",
+  ].forEach((k) => {
+    if (cfg[k] !== undefined && typeof cfg[k] !== "boolean") {
+      errors.push(`TurboSniper: ${k} must be boolean`);
+    }
+  });
+
+  // ghost-mode cover wallet requirement
+  if (cfg.ghostMode === true) {
+    if (!cfg.coverWalletId || typeof cfg.coverWalletId !== "string") {
+      errors.push("TurboSniper: coverWalletId required when ghostMode is enabled");
+    }
+  }
+
+  // multi-buy count 1–3
+  if (!isUnset(cfg.multiBuyCount)) {
+    if (
+      !Number.isInteger(toNum(cfg.multiBuyCount)) ||
+      toNum(cfg.multiBuyCount) < 1 ||
+      toNum(cfg.multiBuyCount) > 3
+    ) {
+      errors.push("TurboSniper: multiBuyCount must be an integer between 1 and 3");
+    }
+  }
+
+  // Jito tip lamports ≥ 0
+  if (!isUnset(cfg.jitoTipLamports)) {
+    if (
+      !Number.isInteger(toNum(cfg.jitoTipLamports)) ||
+      toNum(cfg.jitoTipLamports) < 0
+    ) {
+      errors.push("TurboSniper: jitoTipLamports must be an integer ≥ 0");
+    }
+  }
+
+  // rpcMaxErrors ≥ 1
+  if (!isUnset(cfg.rpcMaxErrors)) {
+    if (
+      !Number.isInteger(toNum(cfg.rpcMaxErrors)) ||
+      toNum(cfg.rpcMaxErrors) < 1
+    ) {
+      errors.push("TurboSniper: rpcMaxErrors must be an integer ≥ 1");
+    }
+  }
+
+  // killThreshold ≥ 1
+  if (!isUnset(cfg.killThreshold)) {
+    if (
+      !Number.isInteger(toNum(cfg.killThreshold)) ||
+      toNum(cfg.killThreshold) < 1
+    ) {
+      errors.push("TurboSniper: killThreshold must be an integer ≥ 1");
+    }
+  }
+
+  // trailingStopPct ≥ 0
+  if (!isUnset(cfg.trailingStopPct)) {
+    if (!isNumeric(cfg.trailingStopPct) || toNum(cfg.trailingStopPct) < 0) {
+      errors.push("TurboSniper: trailingStopPct must be ≥ 0");
+    }
+  }
+
+  // allowed/excluded DEXes must be string or array if provided
+  ["allowedDexes", "excludedDexes"].forEach((k) => {
+    if (
+      cfg[k] !== undefined &&
+      !Array.isArray(cfg[k]) &&
+      typeof cfg[k] !== "string"
+    ) {
+      errors.push(`TurboSniper: ${k} must be a comma-separated string or array`);
+    }
+  });
+
+  // tpLadder percentages between 0 and 100
+  if (cfg.tpLadder !== undefined && cfg.tpLadder !== null && cfg.tpLadder !== "") {
+    const parts = Array.isArray(cfg.tpLadder)
+      ? cfg.tpLadder
+      : String(cfg.tpLadder)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+    parts.forEach((p) => {
+      if (!isNumeric(p) || toNum(p) < 0 || toNum(p) > 100) {
+        errors.push(
+          "TurboSniper: tpLadder percentages must be numbers between 0 and 100"
+        );
+      }
+    });
+  }
+
+  return errors;
+}
+
 function validateScalper(cfg = {}) {
   const errors = validateSharedConfig(cfg);
   validateTokenFeed(cfg, "Scalper", errors);
@@ -953,6 +1069,8 @@ const VALIDATORS = {
   stealthBot: validateStealthBot, 
   stealthbot: validateStealthBot,
   schedulelauncher : validateScheduleLauncher,
+  turboSniper: validateTurboSniper,
+  turbosniper: validateTurboSniper,
 };
 
 /* ---------- main entry point ----------------------------------------- */

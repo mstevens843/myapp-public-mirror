@@ -73,6 +73,7 @@ import { REQUIRED_FIELDS as ROTATION_FIELDS }        from "../Strategy_Configs/R
 import { REQUIRED_FIELDS as DELAYED_SNIPER_FIELDS }  from "../Strategy_Configs/DelayedSniperConfig";
 import { REQUIRED_FIELDS as REBALANCER_FIELDS }      from "../Strategy_Configs/RebalancerConfig";
 import { REQUIRED_FIELDS as STEALTH_FIELDS }      from "../Strategy_Configs/StealthBotConfig";
+import { REQUIRED_FIELDS as TURBO_SNIPER_FIELDS }    from "../Strategy_Configs/TurboSniperConfig";
 
 
 
@@ -95,6 +96,7 @@ const TARGETTABLE = [
   "dipBuyer",
   "trendFollower",
   "chadMode",
+  "turboSniper",
 ];
 
 /* Mapping between strategy keys and their human‑readable labels (with emoji).
@@ -112,6 +114,7 @@ const STRAT_LABEL_MAP = {
   rebalancer: "⚖️ Rebalancer",
   stealthBot: "🥷 Stealth",
   scheduleLauncher: "🕒 Schedule",
+  turboSniper: "💨 Turbo Sniper",
 };
 
 
@@ -331,6 +334,7 @@ const REQUIRED_KEYS = {
   dipBuyer:      [...BASE_FIELDS, ...DIP_FIELDS],
   chadMode:      [...BASE_FIELDS, ...CHAD_FIELDS],
   delayedSniper: [...BASE_FIELDS, ...DELAYED_SNIPER_FIELDS],
+  turboSniper: [...BASE_FIELDS, ...TURBO_SNIPER_FIELDS],
  rebalancer:    [ ...REBALANCER_FIELDS, "slippage" ],
   rotationBot:   [ ...ROTATION_FIELDS, "slippage" ,],
   stealthBot:   [ ...STEALTH_FIELDS, "slippage" ,],
@@ -369,6 +373,7 @@ const STRATEGY_OPTIONS = [
   { value: "rebalancer",     label: "⚖️ Rebalancer" },
   { value: "rotationBot",    label: "🔁 Rotation Bot" },
    { value: "stealthBot",    label: "🥷 Stealth Bot" },
+  { value: "turboSniper",    label: "💨 Turbo Sniper" },
 ];
 
 

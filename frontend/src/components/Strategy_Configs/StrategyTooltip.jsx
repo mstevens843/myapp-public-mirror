@@ -149,6 +149,56 @@ feeEscalationLamports: "Adds this many extra lamports on each retry if your tran
     minMomentum:
       "Minimum % pump required over lookback to consider strongest token.\n(e.g. 2 = 2 %).",
     pumpWindow        : "Look-back window (e.g. 6m) used to rank tokens.",
+
+    /* ---------- Turbo Sniper exclusive fields ---------------------------- */
+    ghostMode:
+      "Enable ghost mode to forward purchased tokens to a cover wallet immediately after buying.",
+    coverWalletId:
+      "Identifier of the wallet that will receive tokens when ghost mode is enabled.",
+    multiBuy:
+      "Enable parallel multi‑buy across multiple pools to increase fill chance.",
+    multiBuyCount:
+      "Number of parallel buys to execute when multi‑buy is enabled (1–3).",
+    prewarmAccounts:
+      "Attempt to pre‑initialize token accounts for faster transaction execution.",
+    autoRug:
+      "Automatically exit positions when suspicious or rug‑like activity is detected.",
+    multiRoute:
+      "Aggregate liquidity across multiple swap routes for best execution.",
+    useJitoBundle:
+      "Use a Jito bundle to prioritize your transaction in MEV auctions.",
+    jitoTipLamports:
+      "Tip amount in lamports sent to validators when using Jito bundles.",
+    jitoRelayUrl:
+      "Custom Jito relay endpoint URL.",
+    autoPriorityFee:
+      "Automatically adjust the priority fee based on network congestion.",
+    rpcEndpoints:
+      "Comma‑separated list of RPC endpoints to use for failover and low latency.",
+    rpcMaxErrors:
+      "Maximum number of RPC errors allowed before removing an endpoint from rotation.",
+    killSwitch:
+      "Enable a kill switch to halt the bot after repeated failures.",
+    killThreshold:
+      "Number of consecutive failures required to trigger the kill switch.",
+    poolDetection:
+      "Enable detection of liquidity pools before attempting a trade.",
+    allowedDexes:
+      "Comma‑separated list of DEXes to include when routing trades.",
+    excludedDexes:
+      "Comma‑separated list of DEXes to exclude from routing.",
+    splitTrade:
+      "Split the order across multiple liquidity pools to reduce price impact.",
+    tpLadder:
+      "Comma‑separated percentages for laddered take‑profit exits (e.g. 25,25,50).",
+    trailingStopPct:
+      "Percentage drop from peak price to trigger a trailing stop sell.",
+    turboMode:
+      "Enable turbo execution mode for the fastest possible routing. Automatically enabled when using Turbo Sniper.",
+    autoRiskManage:
+      "Enable automated risk management features such as automatic sell on sharp price movements.",
+    privateRpcUrl:
+      "URL of a private RPC endpoint used for low‑latency trade routing.",
   };
 
   const content = text || lookup[name] || "Tooltip coming soon.";
