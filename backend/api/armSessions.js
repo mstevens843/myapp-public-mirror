@@ -112,11 +112,22 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   // setup-protection for similar logic.
   const pkVal = wallet.privateKey;
   const isLegacyString = typeof blob === "string" && blob.includes(":");
-  const isLegacyPK = !!pkVal && (
+  // Determine whether the privateKey holds a legacy encrypted blob.  Buffers
+  // returned by bs58.encode are considered base58, not legacy.  Only objects
+  // with a ct property or colon-delimited strings are treated as legacy.
+  const isLegacyPK = !!pkVal && !Buffer.isBuffer(pkVal) && (
     (typeof pkVal === "object" && pkVal.ct) ||
     (typeof pkVal === "string" && pkVal.includes(":"))
   );
-  const isBase58PK = !!pkVal && typeof pkVal === "string" && !pkVal.includes(":");
+  // Determine whether the privateKey represents a base58-encoded secret.  We
+  // accept both strings and Buffers here; for Buffers we convert to string.
+  let pkStringForDetect;
+  if (pkVal) {
+    if (Buffer.isBuffer(pkVal)) pkStringForDetect = pkVal.toString();
+    else if (typeof pkVal === "string") pkStringForDetect = pkVal;
+    else pkStringForDetect = null;
+  }
+  const isBase58PK = !!pkStringForDetect && !pkStringForDetect.includes(":");
   const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK;
 
   // Emit verbose debug logs about migration decisions for troubleshooting
@@ -126,8 +137,17 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     isLegacyPK,
     isBase58PK,
     isProtected: wallet.isProtected,
-    pkType: typeof pkVal,
-    pkPreview: pkVal && typeof pkVal === 'string' ? pkVal.slice(0, 10) + '…' : pkVal,
+    pkType: Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal,
+    pkPreview: (() => {
+      if (!pkVal) return pkVal;
+      if (Buffer.isBuffer(pkVal)) {
+        const str = pkVal.toString();
+        return str.slice(0, 10) + '…(' + str.length + ')';
+      }
+      if (typeof pkVal === 'string') return pkVal.slice(0, 10) + '…(' + pkVal.length + ')';
+      if (typeof pkVal === 'object' && pkVal.ct) return '[legacy object]';
+      return '[unknown]';
+    })(),
   });
 
   // ───── 3. Migration path ─────
@@ -146,13 +166,23 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         console.log("🔑 Decrypting legacy blob…");
         pkBuf = legacy.decrypt(blob, { aad });
       } else if (!wallet.isProtected || isBase58PK) {
-        console.log("🔑 Decoding base58 privateKey…", typeof pkVal, pkVal ? pkVal.slice(0, 8) + "…" : pkVal);
-        // decode whichever is available; pkVal must be a string at this point
-        if (!pkVal || typeof pkVal !== 'string') {
+        // Decode a base58-encoded private key.  Accept both Buffers and strings.
+        const raw = (() => {
+          if (!pkVal) return null;
+          if (Buffer.isBuffer(pkVal)) return pkVal.toString();
+          if (typeof pkVal === 'string') return pkVal;
+          return null;
+        })();
+        console.log(
+          "🔑 Decoding base58 privateKey…",
+          Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal,
+          raw ? raw.slice(0, 8) + "…" : raw
+        );
+        if (!raw || typeof raw !== 'string') {
           throw new Error("Unsupported unprotected wallet format");
         }
         try {
-          const decoded = bs58.decode(pkVal.trim());
+          const decoded = bs58.decode(raw.trim());
           if (decoded.length !== 64) throw new Error();
           pkBuf = Buffer.from(decoded);
         } catch {
@@ -418,11 +448,21 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
   // base58 string with no colon is considered an unprotected secret.
   const isLegacyString = typeof blob === "string" && blob.includes(":");
   const pkVal = wallet.privateKey;
-  const isLegacyPK = !!pkVal && (
+  // Determine whether privateKey holds a legacy encrypted blob.  Buffers
+  // returned by bs58.encode are considered base58.  Only objects with a
+  // `ct` property or colon-delimited strings are treated as legacy.
+  const isLegacyPK = !!pkVal && !Buffer.isBuffer(pkVal) && (
     (typeof pkVal === "object" && pkVal.ct) ||
     (typeof pkVal === "string" && pkVal.includes(":"))
   );
-  const isBase58PK = !!pkVal && typeof pkVal === "string" && !pkVal.includes(":");
+  // Determine whether privateKey is a base58 string/Buffer (not containing a colon)
+  let pkStringForDetect;
+  if (pkVal) {
+    if (Buffer.isBuffer(pkVal)) pkStringForDetect = pkVal.toString();
+    else if (typeof pkVal === "string") pkStringForDetect = pkVal;
+    else pkStringForDetect = null;
+  }
+  const isBase58PK = !!pkStringForDetect && !pkStringForDetect.includes(":");
   // Always migrate if wallet is not yet protected or we detect any
   // legacy/base58 secret.  Also honour forceOverwrite to allow replacing
   // existing per‑wallet passphrases when applying to all.
@@ -436,8 +476,17 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     isBase58PK,
     isProtected: wallet.isProtected,
     forceOverwrite,
-    pkType: typeof pkVal,
-    pkPreview: pkVal && typeof pkVal === 'string' ? pkVal.slice(0, 10) + '…' : pkVal,
+    pkType: Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal,
+    pkPreview: (() => {
+      if (!pkVal) return pkVal;
+      if (Buffer.isBuffer(pkVal)) {
+        const s = pkVal.toString();
+        return s.slice(0, 10) + '…(' + s.length + ')';
+      }
+      if (typeof pkVal === 'string') return pkVal.slice(0, 10) + '…(' + pkVal.length + ')';
+      if (typeof pkVal === 'object' && pkVal.ct) return '[legacy object]';
+      return '[unknown]';
+    })(),
   });
 
   if (!needsMigration) {
@@ -459,12 +508,19 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
       // Legacy colon-delimited string stored in wallet.encrypted
       pkBuf = legacy.decrypt(blob, { aad });
     } else if (!wallet.isProtected || isBase58PK) {
-      // Base58 encoded secret stored in wallet.privateKey
-      if (!pkVal || typeof pkVal !== 'string') {
+      // Base58 encoded secret stored in wallet.privateKey.  Accept both strings
+      // and Buffers.  Convert to string prior to decoding.
+      const raw = (() => {
+        if (!pkVal) return null;
+        if (Buffer.isBuffer(pkVal)) return pkVal.toString();
+        if (typeof pkVal === 'string') return pkVal;
+        return null;
+      })();
+      if (!raw || typeof raw !== 'string') {
         throw new Error("Unsupported unprotected wallet format");
       }
       try {
-        const decoded = bs58.decode(pkVal.trim());
+        const decoded = bs58.decode(raw.trim());
         if (decoded.length !== 64) throw new Error();
         pkBuf = Buffer.from(decoded);
       } catch {

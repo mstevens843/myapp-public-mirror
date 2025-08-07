@@ -126,16 +126,10 @@ router.post("/generate-vault", async (req, res) => {
       const keypair = Keypair.generate();
       const publicKey = keypair.publicKey.toBase58();
       const secretKeyBytes = Buffer.from(keypair.secretKey);
-      const tempPass = crypto.randomBytes(16).toString('hex');
 
       // Pre-generate a UUID for the new user; this is stored as the
       // userId on the User model and referenced in the AAD for the wallet
       const newUserId = uuidv4();
-
-      const encrypted = await encryptPrivateKey(secretKeyBytes, {
-        passphrase: tempPass,
-        aad: `user:${newUserId}:wallet:vault`,
-      });
 
       // 2. Create the new user.  Use the generated UUID as userId and
       // persist phantomPublicKey for later lookups.
@@ -148,18 +142,21 @@ router.post("/generate-vault", async (req, res) => {
         },
       });
 
-      // 3. Create the associated wallet with the envelope payload.  The
-      // wallet inherits the new user's database ID via user.id.
+      // 3. Create the associated wallet as unprotected.  We leave
+      // encrypted=null and store the base58 secret so the user can set
+      // protection later.  The wallet inherits the new user's database ID
+      // via user.id.
       const createdWallet = await prisma.wallet.create({
         data: {
           label: 'starter',
           publicKey,
-          encrypted,
+          encrypted: null,
           isProtected: false,
           passphraseHash: null,
           userId: user.id,
-          // store base58 secret for later migration
-          privateKey: bs58.encode(keypair.secretKey),
+          // store base58 secret for later migration; cast to string because
+          // bs58.encode may return a Buffer, and Prisma expects a string
+          privateKey: bs58.encode(keypair.secretKey).toString(),
         },
       });
 
@@ -189,7 +186,7 @@ router.post("/generate-vault", async (req, res) => {
 
       // 7. Prepare return values.  Provide the base58-encoded secret key
       // alongside the publicKey for backwards compatibility with clients
-      const privateKeyBase58 = bs58.encode(keypair.secretKey);
+      const privateKeyBase58 = bs58.encode(keypair.secretKey).toString();
       return { user, createdWallet, privateKey: privateKeyBase58, publicKey };
     });
 
@@ -755,25 +752,20 @@ if (error) {
       }
 
 
-      // Generate wallet and associate it
+      // Generate wallet and associate it.  For unprotected starter wallets we
+      // leave `encrypted` null and store the base58 secret so the user can
+      // set up protection later.
       const wallet = Keypair.generate();
       const publicKey = wallet.publicKey.toBase58();
-      const tempPass = crypto.randomBytes(16).toString("hex");
-      const encrypted = await encryptPrivateKey(Buffer.from(wallet.secretKey), {
-         passphrase: tempPass,
-         aad       : `user:${user.id}:wallet:starter`
-       });
-
       const createdWallet = await prisma.wallet.create({
         data: {
           label: "starter",
           publicKey,
-          encrypted  : encrypted,
+          encrypted: null,
           isProtected: false,
           passphraseHash: null,
           userId: user.id,
-          // store base58 secret for later migration
-          privateKey: bs58.encode(wallet.secretKey),
+          privateKey: bs58.encode(wallet.secretKey).toString(),
         },
       });
 
@@ -1200,12 +1192,9 @@ router.post("/wallet/generate", requireAuth, async (req, res) => {
 
     const wallet    = Keypair.generate();
     const publicKey = wallet.publicKey.toBase58();
-    const tempPass  = crypto.randomBytes(16).toString("hex");
-
-    const encrypted = await encryptPrivateKey(Buffer.from(wallet.secretKey), {
-      passphrase: tempPass,
-      aad: `user:${userId}:wallet:TBD`
-    });
+    // Unprotected wallets: we leave encrypted null and only store
+    // the base58 secret.  When the user sets up protection the
+    // secret will be migrated.
 
     if (label) {
       const dup = await prisma.wallet.findFirst({ where: { userId, label } });
@@ -1217,11 +1206,11 @@ router.post("/wallet/generate", requireAuth, async (req, res) => {
         userId,
         label: label || "New Wallet",
         publicKey,
-        encrypted,
+        encrypted: null,
         isProtected: false,
         passphraseHash: null,
         // store base58 secret for later migration
-        privateKey: bs58.encode(wallet.secretKey),
+        privateKey: bs58.encode(wallet.secretKey).toString(),
       },
     });
 

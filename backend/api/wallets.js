@@ -645,22 +645,21 @@ router.post("/import-wallet", authenticate, async (req, res) => {
     if (await prisma.wallet.findFirst({ where: { userId, label } }))
       return res.status(400).json({ error: "Label already exists." });
 
-    /* 3️⃣  Envelope-encrypt the private key immediately */
-    const tempPass = crypto.randomBytes(16).toString("hex");   // user will set real pass on first arm
-    const envelope = await encryptPrivateKey(Buffer.from(secretKey), {
-      passphrase : tempPass,
-      aad        : `user:${userId}:wallet:TBD`
-    });
-
-    /* 4️⃣  Save ONLY the envelope (JSON) — no plaintext, no legacy string */
+    /* 3️⃣  Save the wallet as unprotected: store only the base58 secret key and
+           leave the envelope empty.  The envelope will be created on
+           first protection setup. */
     const wallet = await prisma.wallet.create({
       data: {
         userId,
         label,
         publicKey,
-        encrypted   : envelope,
+        encrypted   : null,
         isProtected : false,
-        // privateKey left NULL on purpose
+        passphraseHash: null,
+        // Store the base58 secret to allow later migration to pass‑phrase.
+        // Some bs58 implementations return a Buffer; convert to string to
+        // prevent Prisma from persisting a Buffer object in a VARCHAR column.
+        privateKey : bs58.encode(secretKey).toString(),
       },
     });
     console.log("✅ Wallet saved to DB:", wallet.id);

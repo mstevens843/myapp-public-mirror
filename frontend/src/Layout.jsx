@@ -32,7 +32,23 @@ const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { activeWalletId } = useUser(); // ← get active wallet from your existing context
+  // Destructure additional fields from useUser: wallets (with isProtected flags) and
+  // hasGlobalPassphrase so we can determine when to show the Arm chip.
+  const { activeWalletId, wallets = [], hasGlobalPassphrase } = useUser(); // ← get active wallet and wallet list from context
+
+  // Determine whether the active wallet has a passphrase or is protected.  We
+  // combine information from the wallet list and a global passphrase.  Only
+  // if one of these is true should we show the floating Arm chip.  Without
+  // protection there is nothing to arm and the button should be hidden.
+  const activeWalletInfo = wallets?.find((w) => w.id === activeWalletId);
+  // Consider several potential flags: hasPassphrase (boolean), explicit
+  // passphraseHash, or isProtected; any truthy value implies protection.
+  const activeWalletHasPass = !!(
+    activeWalletInfo?.hasPassphrase ||
+    (activeWalletInfo?.passphraseHash !== null && activeWalletInfo?.passphraseHash !== undefined) ||
+    activeWalletInfo?.isProtected
+  );
+  const shouldShowArmChip = activeWalletHasPass || hasGlobalPassphrase;
 
   const [activeTab, setActiveTab] = useState(() => {
     return localStorage.getItem("activeTab") || "app";
@@ -241,7 +257,7 @@ export default function Layout() {
       </div>
 
       {/* 🔘 Global Floating Arm Chip */}
-      {activeWalletId ? (
+      {activeWalletId && shouldShowArmChip ? (
         <div className="fixed bottom-6 right-6 z-[9998]">
           {!armStatus.armed ? (
             <button
