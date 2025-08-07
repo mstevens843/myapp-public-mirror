@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from "react";
+// Pull refreshProfile from UserProvider so switching wallets updates global context
+import { useUser } from "@/contexts/UserProvider";
 import { Button } from "@/components/ui/button";
 import { BadgeCheck, Trash2, KeyRound, Star, Plus, Copy, Send } from "lucide-react";
 import { Dialog, DialogTrigger, DialogContent } from "@/components/ui/dialog";
@@ -25,6 +27,9 @@ const [importDetails, setImportDetails] = useState({ label: "", privateKey: "" }
 const [loading, setLoading] = useState(true);
 const [generateTarget, setGenerateTarget] = useState(false);
 const [generateLabel, setGenerateLabel] = useState("");
+
+  // Access refreshProfile to sync user context when changing active wallet
+  const { refreshProfile } = useUser();
 
 
 useEffect(() => {
@@ -203,6 +208,12 @@ const handleSetActive = async (walletId) => {
   if (data && typeof data.activeWalletId === "number") {
     toast.success("Active wallet updated.");
     setActiveWallet(data.activeWalletId);
+    // Refresh global user profile so Layout and other consumers get updated activeWalletId
+    try {
+      await refreshProfile();
+    } catch (err) {
+      console.error('Failed to refresh profile after setting active wallet:', err);
+    }
   } else {
     toast.error("Failed to set active wallet.");
   }
@@ -215,6 +226,12 @@ const handleImportSubmit = async () => {
   if (result?.wallet) {
     toast.success("Wallet imported successfully!");
     await loadUserWallets(); // reload properly
+    // Refresh global profile so new wallet appears in the sidebar and context
+    try {
+      await refreshProfile();
+    } catch (err) {
+      console.error('Failed to refresh profile after import:', err);
+    }
   } else {
     toast.error("Error importing wallet.");
   }

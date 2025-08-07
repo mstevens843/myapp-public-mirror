@@ -646,7 +646,8 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     return res.status(500).json({ error: err.message || "Wallet protection setup failed" });
   }
 
-  return res.json({ ok: true, walletId, label: wallet.label, migrated });
+  // Use the migrating flag to indicate whether a legacy or base58 key was upgraded.
+  return res.json({ ok: true, walletId, label: wallet.label, migrated: migrating });
 });
 
 

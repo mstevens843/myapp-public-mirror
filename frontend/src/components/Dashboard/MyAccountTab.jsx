@@ -36,7 +36,9 @@ import {
 // pass‑phrases on other wallets). We import the helper which renders a
 // ConfirmModal on demand and returns a promise resolved with the user's
 // choice. See src/hooks/useConfirm.jsx for implementation.
-import { openConfirmModal } from "@/hooks/useConfirm";
+// We no longer rely on the global confirm modal for wallet protection changes.
+// Leaving the import commented out to avoid unused variable warnings.
+// import { openConfirmModal } from "@/hooks/useConfirm";
 import { useLocation } from "react-router-dom";
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
@@ -93,6 +95,12 @@ const MyAccountTab = () => {
   const [armPassphraseConfirm, setArmPassphraseConfirm] = useState("");
   const [forceOverwrite, setForceOverwrite] = useState(false);
 
+  // Remove Protection modal state
+  const [removeModalOpen, setRemoveModalOpen] = useState(false);
+  const [removePassphrase, setRemovePassphrase] = useState("");
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+
   /* ───────── Derived helpers ───────── */
   // Determine whether the currently active wallet has its own pass‑phrase.
   // We attempt to infer this from multiple potential fields on the wallet.
@@ -140,7 +148,10 @@ const MyAccountTab = () => {
         return !!hasCustom;
       }).length;
       if (customCount > 0) {
-        const ok = await openConfirmModal(
+        // Use a simple inline confirm instead of the global confirm modal. This avoids
+        // unmount race conditions in React.  If the user confirms, we set the
+        // apply-to-all flag and allow overwriting existing passphrases.
+        const ok = window.confirm(
           `This will overwrite the pass‑phrase on ${customCount} wallet${customCount > 1 ? 's' : ''}. Proceed?`
         );
         if (ok) {
@@ -159,7 +170,8 @@ const MyAccountTab = () => {
   };
 
   /* ───────── Helpers ───────── */
-  const { type, phantomPublicKey } = useUser();
+  // Destructure refreshProfile from UserProvider so we can sync global context after changes
+  const { type, phantomPublicKey, refreshProfile } = useUser();
   const isWeb3 = type === "web3";
   
 
@@ -611,18 +623,19 @@ useEffect(() => {
    * API to remove protection.  After success the local state is updated to
    * reflect an unprotected wallet and the requireArm flag is cleared.
    */
+  // Handle confirmation of remove protection in modal
   const handleRemoveProtection = async () => {
-    if (!activeWallet?.id) return toast.error("No active wallet selected.");
-    // Confirm intent
-    const ok = await openConfirmModal(
-      "Remove protection from this wallet? This will allow bots to trade without unlocking."
-    );
-    if (!ok) return;
-    const passphrase = window.prompt("Enter current wallet pass‑phrase to remove protection:");
-    if (!passphrase) {
-      toast.error("Pass‑phrase required to remove protection.");
+    if (!activeWallet?.id) {
+      setRemoveError("No active wallet selected.");
       return;
     }
+    const passphrase = removePassphrase;
+    if (!passphrase) {
+      setRemoveError("Pass‑phrase required to remove protection.");
+      return;
+    }
+    setRemoveBusy(true);
+    setRemoveError("");
     try {
       await removeWalletProtection({ walletId: activeWallet.id, passphrase });
       // Reset Protected Mode requirement at user level
@@ -638,8 +651,18 @@ useEffect(() => {
       setWallets(allWallets || []);
       setActiveWallet(activeW || null);
       toast.success("Protection removed.");
+      // Refresh global user context so Layout reflects updated protection state
+      try {
+        await refreshProfile();
+      } catch (err) {
+        console.error('Failed to refresh profile after remove:', err);
+      }
+      setRemoveModalOpen(false);
+      setRemovePassphrase("");
     } catch (e) {
-      toast.error(e.message || "Failed to remove protection.");
+      setRemoveError(e.message || "Failed to remove protection.");
+    } finally {
+      setRemoveBusy(false);
     }
   };
 
@@ -841,17 +864,17 @@ useEffect(() => {
           <div className="mt-3 flex items-center justify-between">
             {/* Left side: show Remove Protection when wallet is protected */}
             <div className="text-sm flex items-center">
-              {activeWalletHasPassphrase || hasGlobalPassphrase ? (
-                <Button
-                  variant="outline"
-                  className="border-red-500 text-red-400 text-xs px-3 py-1"
-                  onClick={handleRemoveProtection}
-                >
-                  Remove Protection
-                </Button>
-              ) : (
-                <span className="text-zinc-500 text-xs">Protection not set</span>
-              )}
+             {activeWalletHasPassphrase || hasGlobalPassphrase ? (
+               <Button
+                 variant="ghost"           
+                 className="text-red-400 bg-red-500/10 text-xs px-2 py-1"
+                 onClick={() => setRemoveModalOpen(true)}
+               >
+                 Remove&nbsp;Protection
+               </Button>
+             ) : (
+               <span className="text-zinc-500 text-xs">Protection&nbsp;not&nbsp;set</span>
+             )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -1038,6 +1061,51 @@ useEffect(() => {
                     : armMode === "firstTime"
                     ? "Set Up Protection"
                     : "Unlock"}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Remove Protection Modal */}
+        <Dialog open={removeModalOpen} onOpenChange={setRemoveModalOpen}>
+          <DialogContent>
+            <h3 className="text-xl font-bold mb-2">Remove Wallet Protection</h3>
+            <p className="text-sm text-zinc-400 mb-4">
+              Enter your current pass‑phrase to permanently remove protection from this wallet. Bots will be able to trade without unlocking once removed.
+            </p>
+            <div className="space-y-3">
+              <label className="text-sm">Active Wallet</label>
+              <div className="w-full p-2 rounded bg-zinc-900 border border-zinc-700 text-emerald-400 text-xs font-mono">
+                {activeWallet?.label || `ID#${activeWallet?.id || "—"}`}
+              </div>
+              <label className="text-sm">Pass‑phrase</label>
+              <input
+                type="password"
+                placeholder="Wallet pass‑phrase"
+                value={removePassphrase}
+                onChange={(e) => setRemovePassphrase(e.target.value)}
+                className="w-full p-2 rounded text-black"
+              />
+              {removeError && (
+                <div className="rounded bg-red-500/20 p-2 text-sm text-red-400">
+                  {removeError}
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="ghost" onClick={() => {
+                  setRemoveModalOpen(false);
+                  setRemovePassphrase("");
+                  setRemoveError("");
+                }}>
+                  Cancel
+                </Button>
+                <Button
+                  className="bg-red-600 text-white"
+                  disabled={removeBusy}
+                  onClick={handleRemoveProtection}
+                >
+                  {removeBusy ? "Removing…" : "Remove Protection"}
                 </Button>
               </div>
             </div>
@@ -1295,65 +1363,8 @@ useEffect(() => {
           </Dialog>
         </div>
       </div>
-
-      {/* 🔘 Floating Arm Status Chip
-          Show only when the current wallet is protected (either has its own
-          passphrase or inherits a global passphrase).  If the wallet is not
-          protected at all, hide the Arm button entirely to avoid confusing
-          users when protection has not yet been set up. */}
-      { (activeWalletHasPassphrase || hasGlobalPassphrase) && (
-        <ArmStatusChip
-          armed={armStatus.armed}
-          msLeft={armStatus.msLeft}
-          onExtend={() => handleExtend(120)}
-          onDisarm={handleDisarm}
-          onArm={handleOpenArm}
-          busy={extendBusy || disarmBusy}
-        />
-      ) }
     </div>
   );
 };
 
 export default MyAccountTab;
-
-/* ==========================================================
-   Small, floating status chip for quick extend / disarm
-   ========================================================== */
-function ArmStatusChip({ armed, msLeft, onExtend, onDisarm, onArm, busy }) {
-  return (
-    <div className="fixed bottom-6 right-6 z-[9998]">
-      {!armed ? (
-        <button
-          onClick={onArm}
-          className="flex items-center gap-2 rounded-full bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-lg hover:bg-emerald-700"
-          title="Arm-to-Trade"
-        >
-          <Power size={16} />
-          Arm
-        </button>
-      ) : (
-        <div className="flex items-center gap-2 rounded-full bg-emerald-700/90 px-3 py-2 text-sm text-white shadow-lg">
-          <Timer size={16} />
-          <span className="font-mono">{formatCountdown(msLeft)}</span>
-          <button
-            onClick={onExtend}
-            disabled={busy}
-            className="rounded-full bg-white/10 px-2 py-1 text-xs hover:bg-white/20 disabled:opacity-50"
-            title="Extend +2h"
-          >
-            +2h
-          </button>
-          <button
-            onClick={onDisarm}
-            disabled={busy}
-            className="rounded-full bg-red-600 px-2 py-1 text-xs hover:bg-red-700 disabled:opacity-50"
-            title="Disarm"
-          >
-            Disarm
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}

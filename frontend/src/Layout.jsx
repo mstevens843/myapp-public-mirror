@@ -258,7 +258,7 @@ export default function Layout() {
 
       {/* 🔘 Global Floating Arm Chip */}
       {activeWalletId && shouldShowArmChip ? (
-        <div className="fixed bottom-6 right-6 z-[9998]">
+        <div className="fixed bottom-6 left-6 z-[9998]">
           {!armStatus.armed ? (
             <button
               onClick={handleArm}
