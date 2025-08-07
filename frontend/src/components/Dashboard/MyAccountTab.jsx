@@ -700,9 +700,12 @@ useEffect(() => {
             <Shield size={18} />
             Wallet Protection
           </h3>
+          {/* Explanation text for wallet protection and arming */}
           <p className="text-sm text-zinc-400 mt-1">
-            <strong>Protected Mode</strong> requires a one-time unlock (2FA + passphrase)
-            so your bot can trade for a limited time. We never store your passphrase.
+            Protect this wallet with a passphrase so bots can’t auto‑trade unless you unlock it.
+          </p>
+          <p className="text-xs text-zinc-500 mt-1">
+            <strong>What is Arming?</strong> Arming unlocks your wallet for bot trading without exposing your private key. You control when the bot is allowed to trade by entering your passphrase and 2FA (if enabled). It lasts a few hours and auto‑locks again when it expires.
           </p>
 
           <div className="mt-3 flex items-center justify-between">
@@ -717,7 +720,7 @@ useEffect(() => {
                   />
                   <span>
                     {requireArm
-                      ? "Require Arm-to-Trade (more secure)"
+                      ? "Require Unlock to Trade (more secure)"
                       : "Always allow bot to run (default)"}
                   </span>
                 </span>
@@ -726,13 +729,23 @@ useEffect(() => {
 
             <div className="flex items-center gap-2">
               {!armStatus.armed ? (
-                <Button
-                  className="bg-emerald-600 text-white"
-                  onClick={handleOpenArm}
-                >
-                  <Unlock className="mr-1" size={16} />
-                  Arm Now
-                </Button>
+                armMode === "firstTime" ? (
+                  <Button
+                    className="bg-emerald-600 text-white"
+                    onClick={handleOpenArm}
+                  >
+                    <Lock className="mr-1" size={16} />
+                    Set Up Protection
+                  </Button>
+                ) : (
+                  <Button
+                    className="bg-emerald-600 text-white"
+                    onClick={handleOpenArm}
+                  >
+                    <Unlock className="mr-1" size={16} />
+                    Arm Now
+                  </Button>
+                )
               ) : (
                 <Button
                   variant="outline"
@@ -752,12 +765,12 @@ useEffect(() => {
         <Dialog open={armModalOpen} onOpenChange={setArmModalOpen}>
           <DialogContent>
             <h3 className="text-xl font-bold mb-2">
-              {armMode === "firstTime" ? "Set Wallet Pass‑phrase" : "Unlock Wallet"}
+              {armMode === "firstTime" ? "Set Up Wallet Protection" : "Unlock Wallet"}
             </h3>
             <p className="text-sm text-zinc-400 mb-4">
               {armMode === "firstTime"
-                ? "Enter a new pass‑phrase for this wallet. You will never see this pass‑phrase again. Store it safely."
-                : `Enter your pass‑phrase${require2faArm && is2FAEnabled ? " and 2FA code" : ""} to enable trading for the selected duration.`}
+                ? "Protect this wallet with a passphrase so bots can’t auto‑trade unless you unlock it. Enter and confirm your passphrase below. This is a one‑time setup for this wallet (or apply it to all wallets)."
+                : `Use your passphrase${require2faArm && is2FAEnabled ? " and 2FA code" : ""} to unlock this wallet for trading.`}
             </p>
             <div className="space-y-3">
               <label className="text-sm">Active Wallet</label>
@@ -831,8 +844,8 @@ useEffect(() => {
                 </>
               )}
 
-              {/* 2FA Code: show for both modes when required */}
-              {require2faArm && is2FAEnabled && (
+              {/* 2FA Code: show only when unlocking and required */}
+              {armMode !== "firstTime" && require2faArm && is2FAEnabled && (
                 <>
                   <label className="text-sm">2FA Code</label>
                   <input
@@ -845,17 +858,21 @@ useEffect(() => {
                 </>
               )}
 
-              {/* Duration selector common to both modes */}
-              <label className="text-sm">Duration</label>
-              <select
-                className="w-full p-2 rounded text-black"
-                value={armDuration}
-                onChange={(e) => setArmDuration(Number(e.target.value))}
-              >
-                <option value={120}>2 hours</option>
-                <option value={240}>4 hours (default)</option>
-                <option value={480}>8 hours</option>
-              </select>
+              {/* Duration selector: only shown when unlocking */}
+              {armMode !== "firstTime" && (
+                <>
+                  <label className="text-sm">Duration</label>
+                  <select
+                    className="w-full p-2 rounded text-black"
+                    value={armDuration}
+                    onChange={(e) => setArmDuration(Number(e.target.value))}
+                  >
+                    <option value={120}>2 hours</option>
+                    <option value={240}>4 hours (default)</option>
+                    <option value={480}>8 hours</option>
+                  </select>
+                </>
+              )}
 
               {/* Legacy migration option (hide on first arm) */}
               {armMode !== "firstTime" && (
@@ -879,9 +896,11 @@ useEffect(() => {
                   disabled={armBusy}
                 >
                   {armBusy
-                    ? "Arming…"
+                    ? armMode === "firstTime"
+                      ? "Saving…"
+                      : "Unlocking…"
                     : armMode === "firstTime"
-                    ? "Set & Arm"
+                    ? "Set Up Protection"
                     : "Unlock"}
                 </Button>
               </div>
