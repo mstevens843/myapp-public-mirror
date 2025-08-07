@@ -17,8 +17,10 @@ const prisma = require("../prisma/prisma");
 const requireAuth = require("../middleware/requireAuth");
 const check2FA = require("../middleware/auth/check2FA"); // user uploaded
 const { arm, extend, disarm, status } = require("../armEncryption/sessionKeyCache");
-const { unwrapDEKWithPassphrase, encryptPrivateKey } = require("../armEncryption/envelopeCrypto");
+const { unwrapDEKWithPassphrase, encryptPrivateKey, decryptPrivateKeyWithDEK } = require("../armEncryption/envelopeCrypto");
 const legacy = require("../middleware/auth/encryption"); // your legacy (iv:tag:cipher) helper
+const bs58 = require("bs58");
+const { encrypt } = require("../middleware/auth/encryption");
 
 // helpers
 function ttlClamp(min, def, max, reqVal) {
@@ -325,6 +327,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
  *   { ok: true, walletId, label, migrated }
  */
 router.post("/setup-protection", requireAuth, async (req, res) => {
+  console.log("🔐 /setup-protection called → req.body:", req.body);
   const {
     walletId,
     passphrase,
@@ -396,16 +399,36 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     // either are considered unsupported.
     let pkBuf;
     if (hasLegacyPK) {
+      // Legacy encrypted private key stored in wallet.privateKey
       pkBuf = legacy.decrypt(wallet.privateKey, { aad });
     } else if (isLegacyString) {
+      // Legacy colon-delimited string stored in wallet.encrypted
       pkBuf = legacy.decrypt(blob, { aad });
     } else if (!wallet.isProtected) {
-      // Unprotected wallets should always have a legacy privateKey or
-      // string for migration.  If not present, we cannot set up
-      // protection because there is no key material to wrap.
-      throw new Error("Unsupported unprotected wallet format");
+      // For unprotected wallets we may have stored the plain base58 secret in
+      // wallet.privateKey.  Detect and decode it.  If it's an object, pass
+      // through the legacy decrypt helper.  Otherwise attempt to decode as
+      // base58.  Throw if no usable key material exists.
+      if (wallet.privateKey) {
+        if (typeof wallet.privateKey === "object" && wallet.privateKey.ct) {
+          pkBuf = legacy.decrypt(wallet.privateKey, { aad });
+        } else if (typeof wallet.privateKey === "string") {
+          try {
+            const decoded = bs58.decode(wallet.privateKey.trim());
+            if (decoded.length !== 64) throw new Error();
+            pkBuf = Buffer.from(decoded);
+          } catch {
+            throw new Error("Unsupported unprotected wallet format");
+          }
+        } else {
+          throw new Error("Unsupported unprotected wallet format");
+        }
+      } else {
+        // No privateKey material
+        throw new Error("Unsupported unprotected wallet format");
+      }
     } else {
-      // Wallet is protected but forceOverwrite implies we may change passphrase;
+      // Wallet is already protected but forceOverwrite implies we may change passphrase;
       // to do this we need to unwrap the key using the existing passphrase.  We
       // cannot perform this without the passphrase from the user, so we
       // decline.  Clients should call /arm to rewrap an existing wallet.
@@ -532,11 +555,21 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
 
 
 router.post("/extend", requireAuth, check2FA, async (req, res) => {
+  // Log incoming request for troubleshooting
+  console.log("🔁 /extend called → body:", req.body);
   const { walletId, ttlMinutes } = req.body || {};
-  if (!walletId) return res.status(400).json({ error: "walletId required" });
+  if (!walletId) {
+    console.warn("⛔ /extend missing walletId");
+    return res.status(400).json({ error: "walletId required" });
+  }
+  // Clamp TTL within allowed bounds and extend the session
   const ttlMin = ttlClamp(30, 120, 720, ttlMinutes);
   const ok = extend(req.user.id, walletId, ttlMin * 60_000);
-  if (!ok) return res.status(400).json({ error: "Not armed" });
+  if (!ok) {
+    console.warn(`⛔ /extend failed → wallet ${walletId} not armed or session expired`);
+    return res.status(400).json({ error: "Not armed" });
+  }
+  console.log(`✅ /extend successful → wallet ${walletId} extended to ${ttlMin} minutes`);
   return res.json({ ok: true, walletId, extendedToMinutes: ttlMin });
 });
 
@@ -546,10 +579,137 @@ router.post("/extend", requireAuth, check2FA, async (req, res) => {
 
 
 router.post("/disarm", requireAuth, check2FA, async (req, res) => {
+  // Log disarm request to help trace issues
+  console.log("🔻 /disarm called → body:", req.body);
   const { walletId } = req.body || {};
-  if (!walletId) return res.status(400).json({ error: "walletId required" });
-  disarm(req.user.id, walletId);
-  return res.json({ ok: true, walletId, disarmed: true });
+  if (!walletId) {
+    console.warn("⛔ /disarm missing walletId");
+    return res.status(400).json({ error: "walletId required" });
+  }
+  try {
+    disarm(req.user.id, walletId);
+    console.log(`✅ Wallet ${walletId} disarmed by user ${req.user.id}`);
+    return res.json({ ok: true, walletId, disarmed: true });
+  } catch (e) {
+    console.error(`❌ Disarm failed for wallet ${walletId}:`, e.message);
+    return res.status(500).json({ error: "Failed to disarm" });
+  }
+});
+
+
+/*
+ * Route: POST /remove-protection
+ *
+ * Remove pass‑phrase protection from an existing wallet.  This operation
+ * requires the caller to provide the current pass‑phrase for the wallet
+ * (or the user’s default pass‑phrase if the wallet uses that).  The server
+ * will verify the pass‑phrase, unwrap the DEK and secret key, then
+ * re‑encrypt the key using the legacy helper and store it in the
+ * `privateKey` field.  The envelope (`encrypted`) and pass‑phrase
+ * metadata are cleared, and `isProtected` is set to false.  Any active
+ * arm session for the wallet is terminated.  After removal the wallet
+ * behaves as an unprotected legacy wallet.
+ */
+router.post("/remove-protection", requireAuth, async (req, res) => {
+  console.log("🔓 /remove-protection called → req.body:", req.body);
+  const { walletId, passphrase } = req.body || {};
+  if (!walletId || passphrase === undefined) {
+    console.warn("⛔ Missing walletId or passphrase on remove-protection");
+    return res.status(400).json({ error: "walletId & passphrase required" });
+  }
+  try {
+    const userId = req.user.id;
+    // Fetch wallet and user
+    const [user, wallet] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { defaultPassphraseHash: true },
+      }),
+      prisma.wallet.findFirst({
+        where: { id: walletId, userId },
+        select: {
+          id: true,
+          encrypted: true,
+          isProtected: true,
+          passphraseHash: true,
+          privateKey: true,
+        },
+      }),
+    ]);
+    if (!wallet) {
+      console.warn("⛔ Wallet not found for remove-protection");
+      return res.status(404).json({ error: "Wallet not found" });
+    }
+    if (!wallet.isProtected) {
+      console.warn("⚠️ Wallet not protected, nothing to remove");
+      return res.status(400).json({ error: "Wallet is not protected" });
+    }
+    // Verify pass‑phrase against per‑wallet or global hash
+    let validPass = false;
+    if (wallet.passphraseHash) {
+      try {
+        validPass = await argon2.verify(wallet.passphraseHash, passphrase);
+      } catch {
+        validPass = false;
+      }
+    }
+    if (!validPass && user.defaultPassphraseHash) {
+      try {
+        validPass = await argon2.verify(user.defaultPassphraseHash, passphrase);
+      } catch {
+        validPass = false;
+      }
+    }
+    if (!validPass) {
+      console.warn("⛔ Invalid passphrase on remove-protection");
+      return res.status(401).json({ error: "Invalid passphrase" });
+    }
+    // Derive secret key from envelope
+    const aad = `user:${userId}:wallet:${walletId}`;
+    let DEK;
+    try {
+      DEK = await unwrapDEKWithPassphrase(wallet.encrypted, passphrase, aad);
+    } catch (err) {
+      console.error("❌ Failed to unwrap DEK on remove-protection:", err.message);
+      return res.status(401).json({ error: "Invalid passphrase" });
+    }
+    let pkBuf;
+    try {
+      pkBuf = decryptPrivateKeyWithDEK(wallet.encrypted, DEK, aad);
+    } catch (err) {
+      console.error("❌ Failed to decrypt private key on remove-protection:", err.message);
+      return res.status(500).json({ error: "Failed to decrypt wallet key" });
+    }
+    // Encode to base58
+    const pkBase58 = bs58.encode(Buffer.from(pkBuf));
+    // Clear sensitive buffers
+    try { pkBuf.fill(0); } catch {}
+    try { DEK.fill(0); } catch {}
+    // Encrypt the base58 secret using legacy helper with AAD
+    const legacyEnc = encrypt(pkBase58, { aad });
+    // Remove any active session
+    try {
+      disarm(userId, walletId);
+    } catch (e) {
+      console.warn("⚠️ Error disarming during remove-protection:", e.message);
+    }
+    // Persist changes: clear envelope & passphrase, set privateKey
+    await prisma.wallet.update({
+      where: { id: walletId },
+      data: {
+        encrypted: null,
+        isProtected: false,
+        passphraseHash: null,
+        passphraseHint: null,
+        privateKey: legacyEnc,
+      },
+    });
+    console.log(`✅ Removed protection for wallet ${walletId}`);
+    return res.json({ ok: true, walletId, removed: true });
+  } catch (err) {
+    console.error("🔥 remove-protection error:", err.stack || err);
+    return res.status(500).json({ error: "Failed to remove protection" });
+  }
 });
 
 
@@ -578,6 +738,8 @@ router.post(
     body("armDefaultMinutes").optional().isInt({ min: 30, max: 720 }),
   ],
   async (req, res) => {
+    // Log incoming toggle request for troubleshooting
+    console.log("⚙️ /require-arm called → body:", req.body);
     const errors = validationResult(req);
     if (!errors.isEmpty())
       return res.status(400).json({ error: "Invalid params", details: errors.array() });

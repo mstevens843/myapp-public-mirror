@@ -154,6 +154,24 @@ export async function setupWalletProtection({
   });
 }
 
+/**
+ * Remove pass‑phrase protection from a wallet.  The caller must supply
+ * the walletId and the current passphrase.  After removal the wallet
+ * reverts to legacy key storage and no longer requires unlocking.
+ *
+ * @param {Object} params
+ * @param {string} params.walletId – the ID of the wallet (required)
+ * @param {string} params.passphrase – current passphrase for the wallet (required)
+ */
+export async function removeWalletProtection({ walletId, passphrase }) {
+  const payload = { walletId, passphrase };
+  return httpJson(`/api/arm-encryption/remove-protection`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 // Protected Mode toggle at user-level (requireArmToTrade)
 export async function setRequireArmToTrade(requireArm) {
   return httpJson(`/api/arm-encryption/require-arm`, {

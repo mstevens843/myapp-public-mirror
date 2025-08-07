@@ -158,6 +158,8 @@ router.post("/generate-vault", async (req, res) => {
           isProtected: false,
           passphraseHash: null,
           userId: user.id,
+          // store base58 secret for later migration
+          privateKey: bs58.encode(keypair.secretKey),
         },
       });
 
@@ -770,6 +772,8 @@ if (error) {
           isProtected: false,
           passphraseHash: null,
           userId: user.id,
+          // store base58 secret for later migration
+          privateKey: bs58.encode(wallet.secretKey),
         },
       });
 
@@ -1216,6 +1220,8 @@ router.post("/wallet/generate", requireAuth, async (req, res) => {
         encrypted,
         isProtected: false,
         passphraseHash: null,
+        // store base58 secret for later migration
+        privateKey: bs58.encode(wallet.secretKey),
       },
     });
 

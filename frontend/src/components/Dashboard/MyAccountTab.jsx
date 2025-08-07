@@ -29,6 +29,7 @@ import {
   setRequireArmToTrade,
   formatCountdown,
   setupWalletProtection,
+  removeWalletProtection,
 } from "@/utils/encryptedWalletSession";
 
 // Confirmation modal for potentially destructive actions (e.g. overwriting
@@ -604,6 +605,44 @@ useEffect(() => {
     }
   };
 
+  /**
+   * Remove pass‑phrase protection from the currently active wallet.  This will
+   * prompt the user for the current pass‑phrase and then call the backend
+   * API to remove protection.  After success the local state is updated to
+   * reflect an unprotected wallet and the requireArm flag is cleared.
+   */
+  const handleRemoveProtection = async () => {
+    if (!activeWallet?.id) return toast.error("No active wallet selected.");
+    // Confirm intent
+    const ok = await openConfirmModal(
+      "Remove protection from this wallet? This will allow bots to trade without unlocking."
+    );
+    if (!ok) return;
+    const passphrase = window.prompt("Enter current wallet pass‑phrase to remove protection:");
+    if (!passphrase) {
+      toast.error("Pass‑phrase required to remove protection.");
+      return;
+    }
+    try {
+      await removeWalletProtection({ walletId: activeWallet.id, passphrase });
+      // Reset Protected Mode requirement at user level
+      try {
+        await setRequireArmToTrade(false);
+      } catch {}
+      setRequireArm(false);
+      // Reload wallet list to update protection flags
+      const [allWallets, activeW] = await Promise.all([
+        loadWallet(),
+        fetchActiveWallet(),
+      ]);
+      setWallets(allWallets || []);
+      setActiveWallet(activeW || null);
+      toast.success("Protection removed.");
+    } catch (e) {
+      toast.error(e.message || "Failed to remove protection.");
+    }
+  };
+
   /* ───────── Early returns ───────── */
   if (loading) return <div className="p-6 text-white">Loading profile…</div>;
   if (!profile) return <div className="p-6 text-red-400">Profile not found.</div>;
@@ -800,22 +839,19 @@ useEffect(() => {
           </p>
 
           <div className="mt-3 flex items-center justify-between">
-            <div className="text-sm">
-              Bot Access Control:
-              <div className="mt-1">
-                <span className="inline-flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={requireArm}
-                    onChange={handleToggleProtectedMode}
-                  />
-                  <span>
-                    {requireArm
-                      ? "Require Unlock to Trade (more secure)"
-                      : "Always allow bot to run (default)"}
-                  </span>
-                </span>
-              </div>
+            {/* Left side: show Remove Protection when wallet is protected */}
+            <div className="text-sm flex items-center">
+              {activeWalletHasPassphrase || hasGlobalPassphrase ? (
+                <Button
+                  variant="outline"
+                  className="border-red-500 text-red-400 text-xs px-3 py-1"
+                  onClick={handleRemoveProtection}
+                >
+                  Remove Protection
+                </Button>
+              ) : (
+                <span className="text-zinc-500 text-xs">Protection not set</span>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
