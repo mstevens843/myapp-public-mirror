@@ -21,6 +21,11 @@ nacl.util = require("tweetnacl-util");
 const { v4: uuidv4 } = require("uuid");
 const { Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
 
+// Envelope encryption helper for generating encrypted wallet blobs
+const { encryptPrivateKey } = require("../armEncryption/envelopeCrypto");
+console.log("✅ encryptPrivateKey loaded →", typeof encryptPrivateKey);
+console.log("🧠 Running auth.js from →", __filename);
+
 const connection = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
 
 // -----------------------------------------------------------------------------
@@ -111,62 +116,62 @@ router.post("/generate-vault", async (req, res) => {
     const now = Date.now();
     const today = new Date(now).toISOString().slice(0, 10);
 
+    // Wrap the entire workflow in a transaction.  We predefine userId so it
+    // can be used for AAD when encrypting the keypair.  Note that
+    // encryptPrivateKey requires an AAD even for unprotected wallets; we
+    // supply one here based on the new userId and the fact that this is a
+    // vault wallet.
     const transaction = await prisma.$transaction(async (prisma) => {
-      // 1. Create Vault Keypair
+      // 1. Create a vault keypair and envelope encrypt it
       const keypair = Keypair.generate();
       const publicKey = keypair.publicKey.toBase58();
-      const tempPass = crypto.randomBytes(16).toString("hex");
-      const encrypted = await encryptPrivateKey(Buffer.from(wallet.secretKey), {
+      const secretKeyBytes = Buffer.from(keypair.secretKey);
+      const tempPass = crypto.randomBytes(16).toString('hex');
+
+      // Pre-generate a UUID for the new user; this is stored as the
+      // userId on the User model and referenced in the AAD for the wallet
+      const newUserId = uuidv4();
+
+      const encrypted = await encryptPrivateKey(secretKeyBytes, {
         passphrase: tempPass,
-         aad       : `user:${userId}:wallet:vault`
-       });
+        aad: `user:${newUserId}:wallet:vault`,
+      });
 
-
-      // 2. Create User
-      const userId = uuidv4();
+      // 2. Create the new user.  Use the generated UUID as userId and
+      // persist phantomPublicKey for later lookups.
       const user = await prisma.user.create({
         data: {
-          userId,
-          type: "web3",
+          userId: newUserId,
+          type: 'web3',
           phantomPublicKey,
           agreedToTermsAt: new Date(),
         },
       });
 
-      // 3. Create Wallet
+      // 3. Create the associated wallet with the envelope payload.  The
+      // wallet inherits the new user's database ID via user.id.
       const createdWallet = await prisma.wallet.create({
         data: {
-          label: "starter",
+          label: 'starter',
           publicKey,
-          encrypted  : encrypted,
+          encrypted,
           isProtected: false,
           passphraseHash: null,
           userId: user.id,
         },
       });
 
-      // 3½. Persist vaultPublicKey on the user
+      // 3½. Persist the vaultPublicKey and set this wallet active on the user
       await prisma.user.update({
         where: { id: user.id },
-        data: { vaultPublicKey: publicKey },
+        data: { vaultPublicKey: publicKey, activeWalletId: createdWallet.id },
       });
 
-      // 4. Set Active Wallet
-      await prisma.user.update({
-        where: { id: user.id },
-        data: { activeWalletId: createdWallet.id },
-      });
+      // 5. Create default preferences
+      await prisma.userPreference.create({ data: { userId: user.id } });
 
-      // 5. Create Preferences
-      await prisma.userPreference.create({
-        data: { userId: user.id },
-      });
-
-      // 6. Seed Portfolio Tables
-      await prisma.portfolioTracker.create({
-        data: { userId: user.id, startTs: now, lastMonthlyTs: now },
-      });
-
+      // 6. Seed portfolio tables
+      await prisma.portfolioTracker.create({ data: { userId: user.id, startTs: now, lastMonthlyTs: now } });
       await prisma.netWorthHistory.create({
         data: {
           userId: user.id,
@@ -176,19 +181,14 @@ router.post("/generate-vault", async (req, res) => {
           minute: new Date(now).toISOString().slice(0, 16),
         },
       });
-
       await prisma.netWorthSnapshot.create({
-        data: {
-          userId: user.id,
-          ts: now,
-          netWorth: 0,
-          sol: 0,
-          usdc: 0,
-          openPositions: 0,
-        },
+        data: { userId: user.id, ts: now, netWorth: 0, sol: 0, usdc: 0, openPositions: 0 },
       });
 
-      return { user, createdWallet, privateKey, publicKey };
+      // 7. Prepare return values.  Provide the base58-encoded secret key
+      // alongside the publicKey for backwards compatibility with clients
+      const privateKeyBase58 = bs58.encode(keypair.secretKey);
+      return { user, createdWallet, privateKey: privateKeyBase58, publicKey };
     });
 
     // Final JWTs
@@ -940,7 +940,7 @@ if (!data.user.email_confirmed_at) {
     res.cookie("access_token", accessToken, {
       httpOnly : true,
       secure   : process.env.NODE_ENV === "production",
-      maxAge   : 1000 * 60 * 60 * 24 * 7,   // 7 days
+      maxAge   : 1000 * 60 * 60 * 24 * 7,   // 7 days
       sameSite : "Lax",
     });
 
@@ -1259,13 +1259,31 @@ router.get("/wallets/export/:walletId", authenticate, check2FA, async (req, res)
       return res.status(404).json({ error: "Wallet not found." });
     }
 
-    console.log("Wallet found, decrypting private key...");  // Log when wallet is found
-    // Decrypt the private key
-    const decryptedPrivateKey = decrypt(wallet.privateKey); // Assuming you have a decrypt method
+    // Determine which key material is available.  Legacy wallets store an
+    // encrypted privateKey string, whereas newer wallets use an envelope in
+    // the `encrypted` field.  We cannot derive the raw secret key from an
+    // envelope without the user entering a passphrase and arming the wallet.
+    if (wallet.privateKey) {
+      console.log("Wallet found, decrypting private key...");
+      try {
+        const decryptedPrivateKey = decrypt(wallet.privateKey);
+        console.log("Successfully decrypted private key.");
+        // Return the decrypted base58 string to the caller
+        return res.json({ privateKey: decryptedPrivateKey.toString() });
+      } catch (err) {
+        console.error("Error decrypting private key:", err);
+        return res.status(500).json({ error: "Failed to decrypt wallet." });
+      }
+    }
 
-    // Send the decrypted private key in response
-    console.log("Successfully decrypted private key.");  // Log successful decryption
-    res.json({ privateKey: decryptedPrivateKey });
+    // If the wallet has an envelope instead of a legacy privateKey, instruct
+    // the user to arm the wallet through the appropriate session API.
+    if (wallet.encrypted) {
+      return res.status(401).json({ error: "Cannot export a protected wallet without an armed session." });
+    }
+
+    // Fallback when neither field is present
+    return res.status(400).json({ error: "Wallet has no exportable key material." });
   } catch (err) {
     console.error("Error while exporting wallet:", err);  // Log error details
     res.status(500).json({ error: "Failed to export wallet." });
@@ -1342,12 +1360,27 @@ router.get("/tokens/by-wallet", authenticate, async (req, res) => {
       return res.status(404).json({ error: "Wallet not found" });
     }
 
-    const decryptedPrivateKey = decrypt(dbWallet.privateKey);
-    const secretKey = bs58.decode(decryptedPrivateKey);
-    const keypair = Keypair.fromSecretKey(secretKey);
-    const owner = keypair.publicKey;
+    // Use legacy privateKey if present.  For envelope‑encrypted wallets we
+    // require an armed session; expose an error if not available.
+    let owner;
+    if (dbWallet.privateKey) {
+      try {
+        const decryptedPrivateKey = decrypt(dbWallet.privateKey);
+        const secretKey = bs58.decode(decryptedPrivateKey.toString().trim());
+        const keypair = Keypair.fromSecretKey(secretKey);
+        owner = keypair.publicKey;
+      } catch (err) {
+        console.error('Error decrypting wallet for token lookup:', err.message);
+        return res.status(500).json({ error: 'Failed to decrypt wallet.' });
+      }
+    } else if (dbWallet.encrypted) {
+      return res.status(401).json({ error: 'Protected or unarmed wallet. Please arm the wallet before fetching tokens.' });
+    } else {
+      return res.status(400).json({ error: 'Wallet has no usable key material.' });
+    }
 
-    console.log(`🔍 Fetching tokens for wallet ${walletId} owner ${owner.toBase58()}`);
+    const ownerPkStr = owner.toBase58();
+    console.log(`🔍 Fetching tokens for wallet ${walletId} owner ${ownerPkStr}`);
 
     const conn = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
 

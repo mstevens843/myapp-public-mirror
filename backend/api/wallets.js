@@ -708,24 +708,39 @@ router.post('/send-sol', async (req, res) => {
       return res.status(404).json({ error: 'Sender wallet not found.' });
     }
 
-    console.log(`🔐 Decrypting private key for wallet ID ${senderWalletId}`);
-    const decryptedPrivateKey = decrypt(senderWallet.privateKey);
+    // 🔐 For legacy wallets with a stored privateKey, decrypt as before.  For
+    // envelopes we cannot derive the secret key here without an armed
+    // session, so we return an informative error instead of throwing.
+    let senderKeypair;
+    if (senderWallet.privateKey) {
+      try {
+        const decryptedPrivateKey = decrypt(senderWallet.privateKey);
+        const secretKey = bs58.decode(decryptedPrivateKey.toString().trim());
+        senderKeypair = Keypair.fromSecretKey(secretKey);
+      } catch (err) {
+        console.error('Failed to decrypt legacy private key:', err.message);
+        return res.status(500).json({ error: 'Failed to decrypt wallet key.' });
+      }
+    } else if (senderWallet.encrypted) {
+      // The wallet is envelope‑encrypted.  Users must arm the wallet first to
+      // obtain a DEK via the Arm session API.  Without that, we cannot send.
+      return res.status(401).json({ error: 'Protected or unarmed wallet. Please arm the wallet before sending.' });
+    } else {
+      return res.status(400).json({ error: 'Wallet has no key material.' });
+    }
 
-    console.log(`📜 Decoding private key`);
-    const secretKey = bs58.decode(decryptedPrivateKey.trim());
-    const senderKeypair = Keypair.fromSecretKey(secretKey);
     console.log(`🪪 Sender pubkey: ${senderKeypair.publicKey.toBase58()}`);
 
-
     console.log(`🌐 Connecting to Solana RPC`);
-    const connection = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
+    const connection = new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
 
     const senderBalanceLamports = await connection.getBalance(senderKeypair.publicKey);
-const amountLamports = Math.floor(amount * 1e9);
+    const amountLamports = Math.floor(amount * 1e9);
 
-if (senderBalanceLamports < amountLamports + 5000) { // 5000 lamports buffer for fees
-  return res.status(400).json({ error: `Insufficient balance. Available: ${(senderBalanceLamports / 1e9).toFixed(4)} SOL` });
-}
+    // Add a buffer for transaction fees
+    if (senderBalanceLamports < amountLamports + 5000) {
+      return res.status(400).json({ error: `Insufficient balance. Available: ${(senderBalanceLamports / 1e9).toFixed(4)} SOL` });
+    }
 
     console.log(`💸 Building transaction`);
     const transaction = new Transaction().add(
