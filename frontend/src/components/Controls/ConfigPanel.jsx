@@ -770,11 +770,15 @@ const handleTpSlChange = (e) => {
 
 
 const handleManualBuy = async (rawAmt) => {
-  if (!config.tokenMint) {
+  // Determine the mint to use for manual buy.  Prefer config.tokenMint
+  // but fall back to config.outputMint to support rotation/chad modes.
+  const mint = config.tokenMint || config.outputMint;
+  if (!mint) {
     toast.error("❌ Enter a token mint first.");
     return;
   }
-  if (config.tokenMint === lastBlockedMint) {
+  // Check if this token has been marked as untradable and block if so
+  if (mint === lastBlockedMint) {
     toast.warn("⛔ This token is blocked due to being untradable. Try another.");
     return;
   }
@@ -782,13 +786,14 @@ const handleManualBuy = async (rawAmt) => {
   const toastId = `cfg-buy-${amt}`;
   toast.loading(`🔫 Buying ${amt} SOL…`, { id: toastId });
   try {
-    const res = await manualBuy(amt, config.tokenMint, {
+    const res = await manualBuy(amt, mint, {
       ...tradeOpts,
       tp: swapOpts.tp,
       sl: swapOpts.sl,
       tpPercent: swapOpts.tpPercent ?? 100,
       slPercent: swapOpts.slPercent ?? 100,
     });
+    // Clear any previously blocked mint since the trade succeeded
     setLastBlockedMint(null);
     toast.success(
       <span>
@@ -811,8 +816,13 @@ const handleManualBuy = async (rawAmt) => {
 
     if (typeof fetchOpenTrades === "function") await fetchOpenTrades();
   } catch (err) {
+    // If automation is not armed, the global handler will prompt the user.
+    // Avoid showing a generic error toast in that case.
+    if (err.code === "NEEDS_ARM") {
+      return;
+    }
     if (err.message === "not-tradable") {
-      setLastBlockedMint(config.tokenMint);
+      setLastBlockedMint(mint);
       toast.error("🚫 This token isn’t tradable on Jupiter.", { id: toastId });
       return;
     }
@@ -849,18 +859,21 @@ const getStrategyHint = (mode) => (
   
 
 const handleManualSell = async (pct) => {
-  if (!config.tokenMint) {
+  // Determine the mint to use for manual sell.  Prefer config.tokenMint
+  // but fall back to config.outputMint to support rotation/chad modes.
+  const mint = config.tokenMint || config.outputMint;
+  if (!mint) {
     toast.error("❌ Enter a token mint first.");
     return;
   }
 
   const toastId = `cfg-sell-${pct}`;
-  toast.loading(`🔁 Selling ${pct}% of ${config.tokenMint.slice(0, 4)}…`, {
+  toast.loading(`🔁 Selling ${pct}% of ${mint.slice(0, 4)}…`, {
     id: toastId,
   });
 
   try {
-    const res = await manualSell(pct, config.tokenMint, tradeOpts);  // ✅ now includes walletId
+    const res = await manualSell(pct, mint, tradeOpts);  // ✅ now includes walletId
     const explorer = `https://explorer.solana.com/tx/${res.tx}?cluster=mainnet-beta`;
 
     toast.success(
@@ -880,6 +893,10 @@ const handleManualSell = async (pct) => {
 
     if (typeof fetchOpenTrades === "function") await fetchOpenTrades(); // 🧼 refresh trades
   } catch (err) {
+    // Ignore NEeDS_ARM errors; the global handler will prompt the user
+    if (err.code === "NEEDS_ARM") {
+      return;
+    }
     toast.error(`❌ Sell failed: ${err.message}`, { id: toastId });
     console.error(err);
   }

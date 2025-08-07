@@ -134,10 +134,24 @@ if (modeFromCLI) {
   // missing or misconfigured.  The callback signature follows the express‑cors
   // docs: callback(err, allow).  Requests without an Origin header (e.g.
   // server‑to‑server or curl) are always allowed.
-  const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
+  let allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean);
+
+  // During local development, many developers run the frontend on port 5173
+  // (the default Vite dev server port) or 5174. To avoid unexpected CORS
+  // failures when these origins are not specified in environment variables,
+  // automatically allow localhost origins commonly used in dev. This does
+  // not affect production deployments when environment variables are
+  // configured correctly.
+  const devOrigins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+  ];
+  allowedOrigins = [...new Set([...allowedOrigins, ...devOrigins])];
 
   app.use(
     cors({

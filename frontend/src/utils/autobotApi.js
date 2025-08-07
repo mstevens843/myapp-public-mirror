@@ -6,13 +6,27 @@ import { authFetch } from "@/utils/authFetch";
 
 export const startStrategy = async (mode, config, autoRestart = false) => {
   console.log("🌐 POST TO BACKEND:", { mode, config, autoRestart });
-  const res = await authFetch("/api/mode/start", {
-    method: "POST",
-    body: JSON.stringify({ mode, config, autoRestart }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Failed to start strategy");
+  let res;
+  try {
+    res = await authFetch("/api/mode/start", {
+      method: "POST",
+      body: JSON.stringify({ mode, config, autoRestart }),
+    });
+  } catch (err) {
+    // Network or CORS-level errors will surface here.  Rethrow with a
+    // user-friendly message so the UI can handle it gracefully.
+    throw new Error(err.message || "Network error while contacting backend");
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch (e) {
+    // If response isn't JSON (e.g. HTML from proxy error), ignore
+  }
+  if (!res.ok) {
+    const errorMsg = data?.error || res.statusText || "Failed to start strategy";
+    throw new Error(errorMsg);
+  }
   return data;
 };
 

@@ -31,6 +31,12 @@ export default function ManualTradeCard({
 
 }) {
   /* ---- local derived helpers ---- */
+  // Determine the currently selected target mint. Support both
+  // `tokenMint` (used by manual/stealth mode) and `outputMint`
+  // (used by rotation/chad/turbo modes). Falling back to
+  // `outputMint` allows users to manually trade any selected token.
+  const targetMint = config.tokenMint || config.outputMint;
+
   // Determine whether the buy/sell buttons should be disabled.  In the
   // original implementation trades were blocked when a safety check
   // failed.  This proved confusing because the safety check is
@@ -39,8 +45,8 @@ export default function ManualTradeCard({
   // selected or the entire panel is globally disabled.  Safety
   // information is still surfaced visually via the glow and toast
   // messages, but it no longer prevents trading.
-  const isBuyDisabled  = disabled || !config.tokenMint;
-  const isSellDisabled = disabled || !config.tokenMint;
+  const isBuyDisabled  = disabled || !targetMint;
+  const isSellDisabled = disabled || !targetMint;
   const [txStatus, setTxStatus] = useState(null); // null | "success" | "error"
   const [missingMint, setMissingMint] = useState(false);
   const mintInputRef = useRef(null);
@@ -55,21 +61,23 @@ export default function ManualTradeCard({
 const [alreadyHolding, setAlreadyHolding] = useState(false);
 
 useEffect(() => {
-  if (!config.tokenMint) {
+  if (!targetMint) {
     setAlreadyHolding(false);
     return;
   }
 
   (async () => {
-    const exists = await checkExistingPosition(config.tokenMint, "manual");
+    const exists = await checkExistingPosition(targetMint, "manual");
     setAlreadyHolding(exists);
   })();
-}, [config.tokenMint]);
+  // We intentionally depend on targetMint here so the effect
+  // re‑runs whenever either config.tokenMint or config.outputMint changes.
+}, [targetMint]);
 
 
 useEffect(() => {
   const fetchPreview = async () => {
-    if (!config.tokenMint || !manualBuyAmount || isNaN(parseFloat(manualBuyAmount))) {
+    if (!targetMint || !manualBuyAmount || isNaN(parseFloat(manualBuyAmount))) {
       setQuotePreview(null);
       return;
     }
@@ -77,7 +85,7 @@ useEffect(() => {
       const lamports = Math.floor(parseFloat(manualBuyAmount) * 1e9); // convert SOL to lamports
       const slippage = swapOpts.slippage || 1;
 
-      const res = await fetch(`/api/quote?inputMint=${SOL_MINT}&outputMint=${config.tokenMint}&amount=${lamports}&slippage=${slippage}`);
+      const res = await fetch(`/api/quote?inputMint=${SOL_MINT}&outputMint=${targetMint}&amount=${lamports}&slippage=${slippage}`);
       const data = await res.json();
 
       if (data.error) throw new Error(data.error);
@@ -91,7 +99,9 @@ useEffect(() => {
     }
   };
   fetchPreview();
-}, [manualBuyAmount, config.tokenMint, swapOpts.slippage]);
+  // Depend on targetMint so preview updates when either config.tokenMint
+  // or config.outputMint changes.
+}, [manualBuyAmount, targetMint, swapOpts.slippage]);
 
 
 
@@ -252,48 +262,52 @@ useEffect(() => {
     Max
   </button>
 </div>
-<button
-  onClick={() => {
-    if (!config.tokenMint) {
-      setMissingMint(true);
-      mintInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      toast.error("⚠️ Enter a token mint address first.");
-      return;
-    }
+    <button
+      onClick={() => {
+        // Validate that a token mint has been selected.  We rely on
+        // targetMint here which falls back to config.outputMint if
+        // config.tokenMint is undefined.  When no mint is provided the
+        // user is prompted to enter one.
+        if (!targetMint) {
+          setMissingMint(true);
+          mintInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+          toast.error("⚠️ Enter a token mint address first.");
+          return;
+        }
 
-    if (alreadyHolding && swapOpts.enableTPSL) {
-      toast.error("🚫 You already hold this token with this strategy. Remove TP/SL to proceed.");
-      return;
-    }
+        if (alreadyHolding && swapOpts.enableTPSL) {
+          toast.error("🚫 You already hold this token with this strategy. Remove TP/SL to proceed.");
+          return;
+        }
 
-    const amt = Number(manualBuyAmount);
+        const amt = Number(manualBuyAmount);
 
-    if (prefs?.confirmBeforeTrade) {
-      setConfirmMeta({
-        tradeType     : "BUY",
-        inputAmount   : amt,
-        tokenSymbol   : quotePreview?.outToken || "???",
-        expectedOutput: quotePreview?.outAmount || null,
-        priceImpact   : quotePreview?.priceImpact ?? null,
-        slippage      : swapOpts.slippage || 1,
-        priorityFee   : swapOpts.priorityFee || 0,
-        takeProfit    : swapOpts.tp ?? swapOpts.takeProfit,
-        stopLoss      : swapOpts.sl ?? swapOpts.stopLoss,
-        config        : { tokenMint: config.tokenMint, outputMint: config.tokenMint, },
-      });
+        if (prefs?.confirmBeforeTrade) {
+          setConfirmMeta({
+            tradeType     : "BUY",
+            inputAmount   : amt,
+            tokenSymbol   : quotePreview?.outToken || "???",
+            expectedOutput: quotePreview?.outAmount || null,
+            priceImpact   : quotePreview?.priceImpact ?? null,
+            slippage      : swapOpts.slippage || 1,
+            priorityFee   : swapOpts.priorityFee || 0,
+            takeProfit    : swapOpts.tp ?? swapOpts.takeProfit,
+            stopLoss      : swapOpts.sl ?? swapOpts.stopLoss,
+            config        : { tokenMint: targetMint, outputMint: targetMint },
+          });
 
-      setShowConfirm(true);
-    } else {
-      handleManualBuy(amt); // 🚀 Skip modal, just buy
-    }
-  }}
-  disabled={isBuyDisabled || !manualBuyAmount}
-  className={`bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-5 w-20 rounded transition-transform hover:scale-105 shadow ${
-    selectedWalletBalance > 0 ? "hover:shadow-green-500/50" : ""
-  } disabled:opacity-50`}
->
-  BUY
-</button>
+          setShowConfirm(true);
+        } else {
+          handleManualBuy(amt); // 🚀 Skip modal, just buy
+        }
+      }}
+      disabled={isBuyDisabled || !manualBuyAmount}
+      className={`bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-5 w-20 rounded transition-transform hover:scale-105 shadow ${
+        selectedWalletBalance > 0 ? "hover:shadow-green-500/50" : ""
+      } disabled:opacity-50`}
+    >
+      BUY
+    </button>
       </div>
 
       {/* SELL section */}
@@ -314,7 +328,8 @@ useEffect(() => {
 
         <button
           onClick={() => {
-            if (!config.tokenMint) {
+            // Validate that a token mint has been selected
+            if (!targetMint) {
               toast.error("⚠️ Enter a token mint address first.");
               return;
             }
@@ -331,10 +346,10 @@ useEffect(() => {
                 tradeType   : "SELL",
                 percent     : pct,
                 tokenSymbol : quotePreview?.outToken || "???",
-                 slippage    : swapOpts.slippage || 1,
+                slippage    : swapOpts.slippage || 1,
                 priorityFee : swapOpts.priorityFee || 0,
-                  /* 👇 include outputMint so ConfirmModal’s manual‑token row triggers */
-                  config      : { tokenMint: config.tokenMint, outputMint: config.tokenMint },
+                /* include outputMint so ConfirmModal’s manual‑token row triggers */
+                config      : { tokenMint: targetMint, outputMint: targetMint },
               });
               setShowConfirm(true);
             } else {
@@ -356,7 +371,7 @@ useEffect(() => {
     {txStatus === "error" && (
       <div className="text-red-400 text-sm mb-2 animate-pulse font-medium">❌ Transaction failed</div>
     )}
-    {config.tokenMint === lastBlockedMint && (
+    {targetMint === lastBlockedMint && (
       <p className="text-xs text-red-400 italic mb-3">🚫 This token isn’t tradable on Jupiter. Try another.</p>
     )}
 

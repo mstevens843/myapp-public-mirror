@@ -40,9 +40,10 @@ import {
 // Leaving the import commented out to avoid unused variable warnings.
 // import { openConfirmModal } from "@/hooks/useConfirm";
 import { useLocation } from "react-router-dom";
-// Inline confirmation modal helper.  Replaces window.confirm with a
-// Radix-based modal for better UX.  See src/hooks/useConfirm.jsx.
-import { openConfirmModal } from "@/hooks/useConfirm";
+// NOTE: We intentionally do not import the openConfirmModal helper here.
+// The “Use for ALL wallets” toggle now uses a simple built‑in confirmation
+// dialog instead of the custom Radix modal to avoid mount/unmount issues.
+
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -135,14 +136,12 @@ const MyAccountTab = () => {
    *
    * @param {boolean} checked - The new state of the checkbox
    */
-  const handleUseForAllToggle = async (checked) => {
+  const handleUseForAllToggle = (checked) => {
+    // When toggling on the “Use for ALL wallets” option, check if any
+    // existing wallets (excluding the currently selected one) already
+    // have a custom pass‑phrase configured. If so, warn the user that
+    // their pass‑phrases will be overwritten and prompt for confirmation.
     if (checked) {
-      // Count wallets (excluding active) that already have a custom pass‑phrase.  When
-      // available we inspect `hasPassphrase` directly; otherwise fall back to
-      // examining a non‑null `passphraseHash`.  Some clients may also expose
-      // an `isProtected` flag which serves the same purpose.  Any truthy
-      // value indicates a wallet is already protected and will be overwritten
-      // if the user chooses to apply the new pass‑phrase to all wallets.
       const customCount = wallets.filter((w) => {
         if (w.id === activeWallet?.id) return false;
         const hasCustom = w.hasPassphrase ||
@@ -150,27 +149,27 @@ const MyAccountTab = () => {
           w.isProtected;
         return !!hasCustom;
       }).length;
+
       if (customCount > 0) {
-        // Use a simple inline confirm instead of the global confirm modal. This avoids
-        // unmount race conditions in React.  If the user confirms, we set the
-        // apply-to-all flag and allow overwriting existing passphrases.
-        // Prompt the user with a modal confirmation rather than the native
-        // window.confirm().  This avoids unmount race conditions and uses
-        // our design system for a consistent look.  See useConfirm.jsx.
-        const ok = await openConfirmModal(
+        // Use the built‑in browser confirm dialog for a quick and
+        // inline confirmation. This avoids the complexity of importing
+        // additional helpers or dealing with React unmount race conditions.
+        const ok = window.confirm(
           `This will overwrite the pass‑phrase on ${customCount} wallet${customCount > 1 ? 's' : ''}. Proceed?`
         );
         if (ok) {
           setArmUseForAll(true);
           setForceOverwrite(true);
         } else {
+          // If the user cancels, revert the toggle and ensure force
+          // overwrite is disabled.
           setArmUseForAll(false);
           setForceOverwrite(false);
         }
         return;
       }
     }
-    // Either toggling off or no custom wallets
+    // Either toggling off or there are no custom wallets to overwrite.
     setArmUseForAll(checked);
     setForceOverwrite(false);
   };
