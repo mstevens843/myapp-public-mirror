@@ -438,7 +438,18 @@ router.get("/me", requireAuth, async (req, res) => {
         plan: true, subscriptionStatus: true,
         usage: true, usageResetAt: true, credits: true,
         activeWalletId: true,
-        wallets: { select:{ id:true, label:true, publicKey:true } },
+        // Expose a minimal view of wallets including protection status.  The
+        // isProtected flag indicates whether a wallet has been encrypted
+        // with a pass‑phrase (local or global).  We do not expose the
+        // passphraseHash itself to the client for security reasons.
+        wallets: {
+          select: {
+            id: true,
+            label: true,
+            publicKey: true,
+            isProtected: true,
+          },
+        },
         userPreferences: {
           select: {
             autoBuyEnabled:true, autoBuyAmount:true, slippage:true

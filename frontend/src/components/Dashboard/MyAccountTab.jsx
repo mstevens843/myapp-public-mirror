@@ -429,7 +429,10 @@ useEffect(() => {
     // When arming we require 2FA only if the user has enabled 2FA and
     // require2faArm is on. Simply enabling 2FA isn't enough; the arm
     // requirement gate is a separate toggle.
-    if (require2faArm && !is2FAEnabled) {
+    // If the user has requested 2FA for arm/unlock and they haven't set up 2FA
+    // yet, block unlocking existing wallets.  However, initial pass‑phrase
+    // setup should not require enabling 2FA.
+    if (armMode !== "firstTime" && require2faArm && !is2FAEnabled) {
       return toast.error("Enable 2FA before you can arm this wallet. Go to the Security tab to set up 2FA.");
     }
     setArmModalOpen(true);
