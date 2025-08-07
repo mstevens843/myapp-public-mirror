@@ -93,11 +93,22 @@ const MyAccountTab = () => {
 
   /* ───────── Derived helpers ───────── */
   // Determine whether the currently active wallet has its own pass‑phrase.
-  // On first arm (walletHasPassphrase = false and no global passphrase), the
-  // UI shows a confirmation field and an option to apply to all. If either
-  // the wallet already has a hash or the user has a global hash we consider
-  // the wallet protected and show unlock mode.
-  const activeWalletHasPassphrase = !!activeWallet?.hasPassphrase;
+  // We attempt to infer this from multiple potential fields on the wallet.
+  // Some API responses expose a boolean `hasPassphrase` flag, while others
+  // surface a `passphraseHash` property.  If either value is truthy we
+  // consider the wallet protected.  We intentionally coalesce to false
+  // when these fields are undefined to avoid incorrectly marking a wallet
+  // as unprotected.  If the user has a global pass‑phrase (hasGlobalPassphrase)
+  // then the wallet is also effectively protected.
+  const activeWalletHasPassphrase = !!(
+    activeWallet?.hasPassphrase ||
+    // Some endpoints expose `passphraseHash` instead of `hasPassphrase`.  A
+    // non‑null/undefined value indicates a wallet-level passphrase.
+    (activeWallet?.passphraseHash !== null && activeWallet?.passphraseHash !== undefined) ||
+    // Fallback: Prisma may expose an `isProtected` flag when a pass‑phrase or
+    // default pass‑phrase is set.  Treat this as protected if true.
+    activeWallet?.isProtected
+  );
   const armMode = (!activeWalletHasPassphrase && !hasGlobalPassphrase) ? "firstTime" : "existing";
 
   /**
@@ -113,9 +124,19 @@ const MyAccountTab = () => {
    */
   const handleUseForAllToggle = async (checked) => {
     if (checked) {
-      // Count wallets (excluding active) that already have a custom hash. We
-      // rely on the sanitized `hasPassphrase` field from /wallets/load.
-      const customCount = wallets.filter((w) => w.id !== activeWallet?.id && w.hasPassphrase).length;
+      // Count wallets (excluding active) that already have a custom pass‑phrase.  When
+      // available we inspect `hasPassphrase` directly; otherwise fall back to
+      // examining a non‑null `passphraseHash`.  Some clients may also expose
+      // an `isProtected` flag which serves the same purpose.  Any truthy
+      // value indicates a wallet is already protected and will be overwritten
+      // if the user chooses to apply the new pass‑phrase to all wallets.
+      const customCount = wallets.filter((w) => {
+        if (w.id === activeWallet?.id) return false;
+        const hasCustom = w.hasPassphrase ||
+          (w.passphraseHash !== null && w.passphraseHash !== undefined) ||
+          w.isProtected;
+        return !!hasCustom;
+      }).length;
       if (customCount > 0) {
         const ok = await openConfirmModal(
           `This will overwrite the pass‑phrase on ${customCount} wallet${customCount > 1 ? 's' : ''}. Proceed?`
@@ -428,8 +449,9 @@ useEffect(() => {
         return toast.error("Pass‑phrases do not match.");
       }
     }
-    // If 2FA is required but no token provided, abort early.
-    if (require2faArm && is2FAEnabled && !twoFAToken) {
+    // If 2FA is required but no token provided, abort early.  Two‑factor
+    // authentication is only enforced when unlocking an existing wallet.
+    if (armMode !== "firstTime" && require2faArm && is2FAEnabled && !twoFAToken) {
       return toast.error("Enter your 2FA code.");
     }
     setArmBusy(true);
@@ -437,7 +459,7 @@ useEffect(() => {
       const res = await armEncryptedWallet({
         walletId: activeWallet.id,
         passphrase: armPassphrase,
-        twoFactorToken: require2faArm && is2FAEnabled ? twoFAToken : undefined,
+        twoFactorToken: armMode !== "firstTime" && require2faArm && is2FAEnabled ? twoFAToken : undefined,
         ttlMinutes: armDuration,
         migrateLegacy: armMigrateLegacy,
         applyToAll: armUseForAll,
@@ -769,7 +791,16 @@ useEffect(() => {
             </h3>
             <p className="text-sm text-zinc-400 mb-4">
               {armMode === "firstTime"
-                ? "Protect this wallet with a passphrase so bots can’t auto‑trade unless you unlock it. Enter and confirm your passphrase below. This is a one‑time setup for this wallet (or apply it to all wallets)."
+                ? (
+                    <>
+                      Protect this wallet with a passphrase so bots can’t auto‑trade unless you unlock it. Enter and confirm your passphrase below. This is a one‑time setup for this wallet (or apply it to all wallets).
+                      {require2faArm && is2FAEnabled && (
+                        <span className="block mt-1 text-amber-400">
+                          You do not need to enter a 2FA code when setting up a wallet passphrase. 2FA is only required when unlocking the wallet later for trading.
+                        </span>
+                      )}
+                    </>
+                  )
                 : `Use your passphrase${require2faArm && is2FAEnabled ? " and 2FA code" : ""} to unlock this wallet for trading.`}
             </p>
             <div className="space-y-3">
