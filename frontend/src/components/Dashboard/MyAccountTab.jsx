@@ -1296,15 +1296,21 @@ useEffect(() => {
         </div>
       </div>
 
-      {/* 🔘 Floating Arm Status Chip */}
-      <ArmStatusChip
-        armed={armStatus.armed}
-        msLeft={armStatus.msLeft}
-        onExtend={() => handleExtend(120)}
-        onDisarm={handleDisarm}
-        onArm={handleOpenArm}
-        busy={extendBusy || disarmBusy}
-      />
+      {/* 🔘 Floating Arm Status Chip
+          Show only when the current wallet is protected (either has its own
+          passphrase or inherits a global passphrase).  If the wallet is not
+          protected at all, hide the Arm button entirely to avoid confusing
+          users when protection has not yet been set up. */}
+      { (activeWalletHasPassphrase || hasGlobalPassphrase) && (
+        <ArmStatusChip
+          armed={armStatus.armed}
+          msLeft={armStatus.msLeft}
+          onExtend={() => handleExtend(120)}
+          onDisarm={handleDisarm}
+          onArm={handleOpenArm}
+          busy={extendBusy || disarmBusy}
+        />
+      ) }
     </div>
   );
 };

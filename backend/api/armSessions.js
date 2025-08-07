@@ -104,26 +104,61 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   let blob = wallet.encrypted;
   let migrating = false;
 
-  // Determine if this wallet is legacy (string) or has a stored legacy
-  // privateKey.  Also treat unprotected wallets as needing migration.
+  // Determine if this wallet uses a legacy encrypted key or holds an
+  // unencrypted base58 secret.  Legacy private keys are either objects with
+  // a `ct` property or strings containing a colon (iv:tag:cipher).  A plain
+  // base58 string is considered an unprotected secret and needs migration
+  // as well.  We compute separate flags to handle each case.  See
+  // setup-protection for similar logic.
+  const pkVal = wallet.privateKey;
   const isLegacyString = typeof blob === "string" && blob.includes(":");
-  const hasLegacyPK   = !!wallet.privateKey;
-  const needsMigration = !wallet.isProtected || isLegacyString || hasLegacyPK;
+  const isLegacyPK = !!pkVal && (
+    (typeof pkVal === "object" && pkVal.ct) ||
+    (typeof pkVal === "string" && pkVal.includes(":"))
+  );
+  const isBase58PK = !!pkVal && typeof pkVal === "string" && !pkVal.includes(":");
+  const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK;
+
+  // Emit verbose debug logs about migration decisions for troubleshooting
+  console.log("🔍 arm debug:", {
+    walletId,
+    isLegacyString,
+    isLegacyPK,
+    isBase58PK,
+    isProtected: wallet.isProtected,
+    pkType: typeof pkVal,
+    pkPreview: pkVal && typeof pkVal === 'string' ? pkVal.slice(0, 10) + '…' : pkVal,
+  });
 
   // ───── 3. Migration path ─────
   if (needsMigration) {
     migrating = true;
     try {
-      // Decrypt the existing private key
+      // Decrypt or decode the existing secret key based on its format.  Base58
+      // strings are decoded directly, while legacy formats use the legacy
+      // decrypt helper.  If the wallet is unprotected but no key material is
+      // present, we cannot proceed.
       let pkBuf;
-      if (hasLegacyPK) {
+      if (isLegacyPK) {
         console.log("🔑 Decrypting legacy privateKey…");
-        pkBuf = legacy.decrypt(wallet.privateKey, { aad });
+        pkBuf = legacy.decrypt(pkVal, { aad });
       } else if (isLegacyString) {
         console.log("🔑 Decrypting legacy blob…");
         pkBuf = legacy.decrypt(blob, { aad });
+      } else if (!wallet.isProtected || isBase58PK) {
+        console.log("🔑 Decoding base58 privateKey…", typeof pkVal, pkVal ? pkVal.slice(0, 8) + "…" : pkVal);
+        // decode whichever is available; pkVal must be a string at this point
+        if (!pkVal || typeof pkVal !== 'string') {
+          throw new Error("Unsupported unprotected wallet format");
+        }
+        try {
+          const decoded = bs58.decode(pkVal.trim());
+          if (decoded.length !== 64) throw new Error();
+          pkBuf = Buffer.from(decoded);
+        } catch {
+          throw new Error("Unsupported unprotected wallet format");
+        }
       } else {
-        // Unprotected envelope with no legacy material cannot be migrated
         throw new Error("Unsupported unprotected wallet format");
       }
 
@@ -377,12 +412,33 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
   let blob = wallet.encrypted;
   let migrating = false;
 
-  // Determine if migration is needed: unprotected or legacy format or legacy key
+  // Determine if migration is needed: unprotected, legacy envelope, legacy
+  // privateKey or plain base58 key.  A legacy private key is either an
+  // object with a `ct` property or a string containing a colon.  A
+  // base58 string with no colon is considered an unprotected secret.
   const isLegacyString = typeof blob === "string" && blob.includes(":");
-  const hasLegacyPK = !!wallet.privateKey;
-  // Always migrate if wallet is not yet protected.  Also honour forceOverwrite
-  // to allow replacing existing per‑wallet passphrases when applying to all.
-  const needsMigration = !wallet.isProtected || isLegacyString || hasLegacyPK || forceOverwrite;
+  const pkVal = wallet.privateKey;
+  const isLegacyPK = !!pkVal && (
+    (typeof pkVal === "object" && pkVal.ct) ||
+    (typeof pkVal === "string" && pkVal.includes(":"))
+  );
+  const isBase58PK = !!pkVal && typeof pkVal === "string" && !pkVal.includes(":");
+  // Always migrate if wallet is not yet protected or we detect any
+  // legacy/base58 secret.  Also honour forceOverwrite to allow replacing
+  // existing per‑wallet passphrases when applying to all.
+  const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK || forceOverwrite;
+
+  // Emit verbose debug logs so we can understand migration decisions.
+  console.log("🔍 setup-protection debug:", {
+    walletId,
+    isLegacyString,
+    isLegacyPK,
+    isBase58PK,
+    isProtected: wallet.isProtected,
+    forceOverwrite,
+    pkType: typeof pkVal,
+    pkPreview: pkVal && typeof pkVal === 'string' ? pkVal.slice(0, 10) + '…' : pkVal,
+  });
 
   if (!needsMigration) {
     // Wallet is already protected and no forceOverwrite flag; nothing to do
@@ -391,40 +447,27 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
 
   migrating = true;
   try {
-    // Decrypt the existing private key if we have legacy material.  For
-    // unprotected wallets with no legacy fields we cannot derive the key and
-    // thus bail out.  In practice wallets should always have either a
-    // legacy privateKey, a legacy encrypted string or be marked as
-    // unprotected envelope with a legacy blob; unprotected wallets without
-    // either are considered unsupported.
+    // Decrypt or decode the existing private key based on its format.  Base58
+    // strings are decoded directly, while legacy formats use the legacy
+    // decrypt helper.  If the wallet is unprotected but no key material is
+    // present, bail out.
     let pkBuf;
-    if (hasLegacyPK) {
+    if (isLegacyPK) {
       // Legacy encrypted private key stored in wallet.privateKey
-      pkBuf = legacy.decrypt(wallet.privateKey, { aad });
+      pkBuf = legacy.decrypt(pkVal, { aad });
     } else if (isLegacyString) {
       // Legacy colon-delimited string stored in wallet.encrypted
       pkBuf = legacy.decrypt(blob, { aad });
-    } else if (!wallet.isProtected) {
-      // For unprotected wallets we may have stored the plain base58 secret in
-      // wallet.privateKey.  Detect and decode it.  If it's an object, pass
-      // through the legacy decrypt helper.  Otherwise attempt to decode as
-      // base58.  Throw if no usable key material exists.
-      if (wallet.privateKey) {
-        if (typeof wallet.privateKey === "object" && wallet.privateKey.ct) {
-          pkBuf = legacy.decrypt(wallet.privateKey, { aad });
-        } else if (typeof wallet.privateKey === "string") {
-          try {
-            const decoded = bs58.decode(wallet.privateKey.trim());
-            if (decoded.length !== 64) throw new Error();
-            pkBuf = Buffer.from(decoded);
-          } catch {
-            throw new Error("Unsupported unprotected wallet format");
-          }
-        } else {
-          throw new Error("Unsupported unprotected wallet format");
-        }
-      } else {
-        // No privateKey material
+    } else if (!wallet.isProtected || isBase58PK) {
+      // Base58 encoded secret stored in wallet.privateKey
+      if (!pkVal || typeof pkVal !== 'string') {
+        throw new Error("Unsupported unprotected wallet format");
+      }
+      try {
+        const decoded = bs58.decode(pkVal.trim());
+        if (decoded.length !== 64) throw new Error();
+        pkBuf = Buffer.from(decoded);
+      } catch {
         throw new Error("Unsupported unprotected wallet format");
       }
     } else {
