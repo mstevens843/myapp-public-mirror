@@ -61,6 +61,7 @@ const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 
 
+// --- MANUAL BUY -----------------------------------------------------------
 router.post("/buy", requireAuth, async (req, res) => {
   console.log("🔥 /manual/buy HIT with body:", req.body);
 
@@ -69,7 +70,7 @@ router.post("/buy", requireAuth, async (req, res) => {
     amountInUSDC,
     mint,
     force        = false,
-    walletId,    
+    walletId,
     walletLabel,
     slippage     = 0.5,
     chatId       = null,
@@ -82,124 +83,107 @@ router.post("/buy", requireAuth, async (req, res) => {
     slPercent,
   } = req.body;
 
+  /* ───────── Resolve wallet ───────── */
   let wallet;
   try {
     if (walletId) {
       wallet = await prisma.wallet.findFirst({
-        where : { id: walletId, userId: req.user.id },
+        where:  { id: walletId, userId: req.user.id },
         select: { id: true, label: true },
       });
       if (!wallet) throw new Error("Wallet not found.");
-      if (!walletLabel) walletLabel = wallet.label;     // tidy logs
+      if (!walletLabel) walletLabel = wallet.label;
     } else {
-      wallet = await getWallet(req.user.id, walletLabel);   // old helper
+      wallet = await getWallet(req.user.id, walletLabel);
       if (!walletLabel) walletLabel = wallet.label;
     }
   } catch (e) {
     return res.status(403).json({ error: e.message });
   }
 
-  // fallback values if not present
+  /* ───────── Defaults / early skips ───────── */
   strategy = strategy || "manual";
   skipLog  = skipLog  || false;
 
+  if (
+    (amountInSOL  && mint === USDC_MINT) ||
+    (amountInUSDC && mint === SOL_MINT)
+  ) {
+    console.log("🚫 SOL ↔ USDC conversion detected — skipping trade logs");
+    skipLog = true;
+  }
 
-if (
-  (amountInSOL && mint === USDC_MINT) ||
-  (amountInUSDC && mint === SOL_MINT)
-) { 
-  console.log("🚫 Swap is SOL ↔ USDC: will execute but skip logging / open-trades");
-  skipLog = true;
-}
+  /* ───────── Pref-based fallbacks ───────── */
+  if (!amountInSOL && !amountInUSDC) {
+    const prefs = await getUserPreferencesByUserId(req.user.id, context);
+    if (prefs?.autoBuyEnabled) amountInSOL = prefs.autoBuyAmount;
+  }
 
- /* ✅ NEW fallback via DB prefs */
- if (!amountInSOL && !amountInUSDC) {
-   const prefs = await getUserPreferencesByUserId(req.user.id, context);
-   if (prefs?.autoBuyEnabled) amountInSOL = prefs.autoBuyAmount;
- }
-  // 🔐 Load the wallet (or reject if invalid)
-  // const { loadWalletsFromLabels } = require("../services/utils/wallet/walletManager");
-  // try {
-  //   loadWalletsFromLabels([walletLabel]);
-  // } catch (err) {
-  //   return res.status(403).json({ error: `Wallet '${walletLabel}' not available.` });
-  // }
-  // 🔐 Optional safety guard
+  /* ───────── Safety + confirmation guards ───────── */
   if (!force) {
     const safe = await isSafeToBuy(mint);
-    if (!safe) {
-      return res.status(403).json({ error: "Token failed honeypot check." });
-    }
+    if (!safe) return res.status(403).json({ error: "Token failed honeypot check." });
   }
- /* ✅ NEW confirmBeforeTrade guard (DB prefs) */
- const prefsForConfirm = await getUserPreferencesByUserId(req.user.id, context);
- if (prefsForConfirm.confirmBeforeTrade && !force) {
-   return res.status(403).json({ error: "🔒 Trade requires confirmation." });
- }
 
-  if ((tp != null && tpPercent == null) ||
-      (sl != null && slPercent == null)) {
+  const prefsForConfirm = await getUserPreferencesByUserId(req.user.id, context);
+  if (prefsForConfirm.confirmBeforeTrade && !force) {
+    return res.status(403).json({ error: "🔒 Trade requires confirmation." });
+  }
+
+  if ((tp != null && tpPercent == null) || (sl != null && slPercent == null)) {
     return res.status(400).json({ error: "tpPercent/slPercent required when tp/sl set." });
   }
 
-let result;
-try {
-  result = await performManualBuy({
-    amountInSOL,
-    amountInUSDC,
-    mint,
-    userId: req.user.id,
-    walletId: wallet.id,
-    walletLabel,
-    slippage,
-    strategy,
-    context,
-    tp,
-    sl,
-    tpPercent,
-    slPercent
-  });
-} catch (e) {
-  if (isArmError(e)) return sendArm401(res, wallet.id);
-  throw e;
-}
-
-    // ✅ Always create a NEW TP/SL rule even if same mint+strategy+wallet
-    if (tp != null || sl != null) {
-      console.log("📥 Creating new TP/SL rule:", { tp, sl, tpPercent, slPercent });
-
-      await prisma.tpSlRule.create({
-        data: {
-          id: uuid(),
-          mint,
-          walletId: wallet.id,
-          userId: req.user.id,
-          strategy,
-          tp,
-          sl,
-          tpPercent,
-          slPercent,
-          entryPrice: result.entryPrice,
-          force: false,
-          enabled: true,
-          status: "active",
-          failCount: 0,
-        },
-      });
-      console.log(`✅ Created new independent TP/SL rule for ${mint}`);
-    }
-
-    return res.json({ success: true, result });
-
-  } catch (err) {
-    console.error("❌ /manual/buy error:", err);
-
-    if (err.message?.includes("TOKEN_NOT_TRADABLE")) {
-      return res.status(403).json({ error: "This token is not tradable via Jupiter." });
-    }
-
-    return res.status(500).json({ error: err.message || "Manual buy failed." });
+  /* ───────── Execute buy ───────── */
+  let result;
+  try {
+    result = await performManualBuy({
+      amountInSOL,
+      amountInUSDC,
+      mint,
+      userId      : req.user.id,
+      walletId    : wallet.id,
+      walletLabel,
+      slippage,
+      strategy,
+      context,
+      tp,
+      sl,
+      tpPercent,
+      slPercent, 
+    });          
+  } catch (e) {
+    if (isArmError(e)) return sendArm401(res, wallet.id);
+    throw e;
   }
+
+  /* ───────── TP/SL rule creation ───────── */
+  if (tp != null || sl != null) {
+    console.log("📥 Creating new TP/SL rule:", { tp, sl, tpPercent, slPercent });
+
+    await prisma.tpSlRule.create({
+      data: {
+        id        : uuid(),
+        mint,
+        walletId  : wallet.id,
+        userId    : req.user.id,
+        strategy,
+        tp,
+        sl,
+        tpPercent,
+        slPercent,
+        entryPrice: result.entryPrice,
+        force     : false,
+        enabled   : true,
+        status    : "active",
+        failCount : 0,
+      },
+    });
+    console.log(`✅ Created new independent TP/SL rule for ${mint}`);
+  }
+
+  return res.json({ success: true, result });
+
 });
 
 
@@ -323,57 +307,57 @@ try {
  * @desc Quick snipe trade: verify token + buy with preset SOL amount
  * @body { mint: string, amountInSOL: number (optional), force?: boolean }
  */
-router.post("/snipe", async (req, res) => {
-  const { mint, amountInSOL = 0.25, force = false } = req.body;
+// router.post("/snipe", async (req, res) => {
+//   const { mint, amountInSOL = 0.25, force = false } = req.body;
 
-  if (!mint) {
-    return res.status(400).json({ error: "Missing mint address." });
-  }
+//   if (!mint) {
+//     return res.status(400).json({ error: "Missing mint address." });
+//   }
 
-  if (!force) {
-    const safe = await isSafeToBuy(mint);
-    if (!safe) {
-      return res.status(403).json({ error: "Token failed honeypot check." });
-    }
-  }
+//   if (!force) {
+//     const safe = await isSafeToBuy(mint);
+//     if (!safe) {
+//       return res.status(403).json({ error: "Token failed honeypot check." });
+//     }
+//   }
 
-  try {
-    const result = await performManualBuy(amountInSOL, mint);
-    return res.json({ success: true, result });
-  } catch (err) {
-    console.error("❌ Snipe failed:", err.message);
-    return res.status(500).json({ error: "Snipe failed." });
-  }
-});
+//   try {
+//     const result = await performManualBuy(amountInSOL, mint);
+//     return res.json({ success: true, result });
+//   } catch (err) {
+//     console.error("❌ Snipe failed:", err.message);
+//     return res.status(500).json({ error: "Snipe failed." });
+//   }
+// });
 
 
-  router.get("/quote", async (req, res) => {
-  const { inputMint, outputMint, amount, slippage } = req.query;
+//   router.get("/quote", async (req, res) => {
+//   const { inputMint, outputMint, amount, slippage } = req.query;
 
-  if (!inputMint || !outputMint || !amount || !slippage) {
-    return res.status(400).json({ error: "Missing required params" });
-  }
+//   if (!inputMint || !outputMint || !amount || !slippage) {
+//     return res.status(400).json({ error: "Missing required params" });
+//   }
 
-  try {
-    const quote = await getSwapQuote({
-      inputMint,
-      outputMint,
-      amount: parseInt(amount),
-      slippage: parseFloat(slippage),
-    });
+//   try {
+//     const quote = await getSwapQuote({
+//       inputMint,
+//       outputMint,
+//       amount: parseInt(amount),
+//       slippage: parseFloat(slippage),
+//     });
 
-    if (!quote) return res.status(500).json({ error: "Quote failed" });
+//     if (!quote) return res.status(500).json({ error: "Quote failed" });
 
-    res.json({
-      outAmount: quote.outAmount,
-      outToken: quote.outTokenSymbol,
-      priceImpact: quote.priceImpactPct,
-    });
-  } catch (err) {
-    console.error("❌ /api/quote error:", err.message);
-    res.status(500).json({ error: "Internal Server Error" });
-  }
-});
+//     res.json({
+//       outAmount: quote.outAmount,
+//       outToken: quote.outTokenSymbol,
+//       priceImpact: quote.priceImpactPct,
+//     });
+//   } catch (err) {
+//     console.error("❌ /api/quote error:", err.message);
+//     res.status(500).json({ error: "Internal Server Error" });
+//   }
+// });
 
 
 

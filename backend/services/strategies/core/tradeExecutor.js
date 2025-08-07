@@ -16,8 +16,8 @@ const { sendAlert }         = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 
 // 🔐 NEW: Arm session + envelope decrypt
-const { getDEK } = require("../../../core/crypto/sessionKeyCache");              // <-- ADD
-const { decryptPrivateKeyWithDEK } = require("../../../core/crypto/envelopeCrypto"); // <-- ADD
+const { getDEK } = require("../../../armEncryption/sessionKeyCache");              // <-- ADD
+const { decryptPrivateKeyWithDEK } = require("../../../armEncryption/envelopeCrypto"); // <-- ADD
 
 // 🔐 Legacy env-key encrypt/decrypt (your current helper)
 const { decrypt } = require("../../../middleware/auth/encryption");

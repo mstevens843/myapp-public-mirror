@@ -41,6 +41,8 @@ model User {
   // 2fa authentication
   is2FAEnabled      Boolean   @default(false)
   twoFactorSecret   String?
+    require2faLogin   Boolean   @default(false) // ← NEW
+  requireArmToTrade Boolean   @default(false)
    recoveryCodes    String[] 
      resetToken     String?
   resetExpires   DateTime?
@@ -57,7 +59,6 @@ model User {
   vaultPrivateKeyEnc   String?
   // trades  Trade[] @relation("UserTrades") 
   savedConfigs SavedConfigs[] 
-    requireArmToTrade  Boolean  @default(false)  // user-level switch (optional; can also put in UserPreference)
   armDefaultMinutes  Int      @default(240)    // optional: default 4h
 }
 
@@ -69,7 +70,7 @@ model Wallet {
   publicKey  String   @unique
 
   // 🔻 DEPRECATE this ASAP (stop writing plaintext to it)
-  privateKey String   // make optional later, then drop after migration
+  privateKey String ?   // make optional later, then drop after migration
 
   // 🔐 NEW: envelope-encrypted blob (Argon2id→AES-GCM object)
   encrypted  Json?    // stores {v,alg,kdf,{iv1,tag1,pkCipher},{iv2,tag2,dekCipher},aad}

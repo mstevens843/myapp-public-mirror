@@ -1,4 +1,5 @@
 const speakeasy = require("speakeasy");
+const prisma = require("../../prisma/prisma");
 
 module.exports = async function check2FA(req, res, next) {
   try {

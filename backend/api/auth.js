@@ -362,10 +362,11 @@ router.post("/check-user", async (req, res) => {
     const user = await prisma.user.findUnique({ where: { phantomPublicKey } });
     if (!user) return res.status(404).json({ exists: false });
 
-    // 2. 2FA gate (optional)
-    if (user.is2FAEnabled) {
+    /* NEW: login-time MFA toggle */
+    if (user.is2FAEnabled && user.require2faLogin) {
       return res.json({ twoFARequired: true, userId: user.userId });
     }
+
 
     // 3. issue tokens using correct ID field
     const accessToken  = jwt.sign(
@@ -421,22 +422,16 @@ router.get("/me", requireAuth, async (req, res) => {
       where: { id: req.user.id },                 // ← always present now
       select: {
         id: true, username: true, email: true, type: true, createdAt: true,
-        is2FAEnabled: true,
+        is2FAEnabled: true, require2faLogin: true, requireArmToTrade: true,
         phantomPublicKey: true,
-
         plan: true, subscriptionStatus: true,
         usage: true, usageResetAt: true, credits: true,
-
         activeWalletId: true,
-
         wallets: { select:{ id:true, label:true, publicKey:true } },
-
         userPreferences: {
           select: {
             autoBuyEnabled:true, autoBuyAmount:true, slippage:true
-          }
-        },
-
+          }},
         telegramPreferences: { select:{ enabled:true, chatId:true } }
       }
     });
@@ -464,7 +459,9 @@ router.get("/me", requireAuth, async (req, res) => {
           type: user.type,
           phantomPublicKey: user.phantomPublicKey,
           createdAt: user.createdAt,
-          is2FAEnabled: user.is2FAEnabled
+          is2FAEnabled: user.is2FAEnabled,
+          require2faLogin: user.require2faLogin,
+          requireArmToTrade: user.requireArmToTrade,
         },
       plan: {
         plan:user.plan, subscriptionStatus:user.subscriptionStatus,
@@ -477,10 +474,9 @@ router.get("/me", requireAuth, async (req, res) => {
       counts: {
         scheduledStrategies: scheduled,
         limitOrders:         limits,
-        dcaOrders:           dca
+        dcaOrders:           dca,
       }
     });
-
   } catch (err) {
     console.error("/auth/me ⇒", err);
     return res.status(500).json({ error:"Server error" });
@@ -490,44 +486,46 @@ router.get("/me", requireAuth, async (req, res) => {
 
 
 // POST /auth/enable-2fa
-
 router.post("/enable-2fa", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const secret = speakeasy.generateSecret({
-      name: `SolPulse (${req.user.email})`
-    });
+    // ✅ Manually generate base32 secret, skip generateSecret
+    const secret = speakeasy.generateSecret({ length: 32 }).base32;
 
-    // 🔥 Generate recovery codes
+    // ✅ Construct a CLEAN otpauth URL with NO colon
+    const otpauth_url = `otpauth://totp/SolPulse?secret=${secret}`;
+
+    // 🔐 Generate recovery codes
     const recoveryCodes = generateRecoveryCodes();
     const hashedCodes = await Promise.all(
       recoveryCodes.map(code => bcrypt.hash(code, 10))
     );
 
-    // 🔥 Store in DB
+    // 🔐 Store in DB
     await prisma.user.update({
       where: { id: userId },
       data: {
-        twoFactorSecret: secret.base32,
+        twoFactorSecret: secret,
         is2FAEnabled: false,
         recoveryCodes: hashedCodes
       }
     });
 
-    // 🔥 QR code
-    const qrCodeDataURL = await qrcode.toDataURL(secret.otpauth_url);
+    // ✅ Generate QR code from clean otpauth URL
+    const qrCodeDataURL = await qrcode.toDataURL(otpauth_url);
 
     res.json({
       message: "Scan this QR code in Google Authenticator",
       qrCodeDataURL,
-      recoveryCodes // <-- plain text to display ONCE
+      recoveryCodes
     });
   } catch (err) {
     console.error("Enable 2FA error:", err);
     res.status(500).json({ error: "Failed to enable 2FA" });
   }
 });
+
 
 
 router.post("/request-password-reset", async (req, res) => {
@@ -628,7 +626,9 @@ router.post("/disable-2fa", authenticate, async (req, res) => {
       where: { id: userId },
       data: {
         twoFactorSecret: null,
-        is2FAEnabled: false
+        is2FAEnabled: false,
+        require2faLogin  : false,
+        requireArmToTrade: false,
       }
     });
 
@@ -881,13 +881,20 @@ if (!data.user.email_confirmed_at) {
 
   if (!user) return res.status(400).json({ error: "User not found in local system." });
 
-    if (user.is2FAEnabled) {
-    return res.json({
-      message: "2FA required",
-      twoFARequired: true,
-      userId: user.id
-    });
-  }
+    /* --------------------------------------------------
+        Dynamic 2-FA gate
+       • require2faLogin === true  →  ask for code
+       • flag can be OFF even if 2FA is enabled (arm-only)
+    -------------------------------------------------- */
+    if (user.is2FAEnabled && user.require2faLogin) {
+      return res.json({
+        message: "2FA required",
+        twoFARequired: true,
+        userId: user.id
+      });
+    }
+
+
   // ✅ Issue your access + refresh tokens
     const accessToken  = jwt.sign({ id: user.id, type: user.type }, JWT_SECRET, { expiresIn: "7d" });
     const refreshToken = jwt.sign({ id: user.id },              JWT_SECRET, { expiresIn: "30d" });
@@ -1046,63 +1053,83 @@ router.post("/reset-password", async (req, res) => {
 
 router.post("/verify-2fa-login", async (req, res) => {
   const { userId, token } = req.body;
+
   if (!userId || !token) {
     return res.status(400).json({ error: "Missing userId or 2FA token." });
   }
+
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
-      twoFactorSecret: true,
-      is2FAEnabled: true,
-      recoveryCodes: true
+      twoFactorSecret   : true,
+      is2FAEnabled      : true,
+      recoveryCodes     : true,
+      require2faLogin   : true,
+      requireArmToTrade : true,
+      type              : true
     }
   });
+
   if (!user || !user.is2FAEnabled) {
     return res.status(400).json({ error: "2FA not enabled for this user." });
   }
+
   // ✅ First try TOTP
   const verified = speakeasy.totp.verify({
-    secret: user.twoFactorSecret,
-    encoding: "base32",
+    secret   : user.twoFactorSecret,
+    encoding : "base32",
     token
   });
-  if (verified) {
-    // success, continue
-  } else {
-    // ✅ Try recovery codes
-    let recoveryMatch = false;
+
+  let ok = verified;
+
+  // ✅ Fallback: check recovery codes
+  if (!ok) {
     for (const hashed of user.recoveryCodes) {
       if (await bcrypt.compare(token, hashed)) {
-        recoveryMatch = true;
-        // Remove the used code
+        ok = true;
+        // Remove the used recovery code
         await prisma.user.update({
           where: { id: userId },
           data: {
             recoveryCodes: {
-              set: user.recoveryCodes.filter(c => c !== hashed)
+              set: user.recoveryCodes.filter((c) => c !== hashed)
             }
           }
         });
         break;
       }
     }
-    if (!recoveryMatch) {return res.status(403).json({ error: "Invalid 2FA or recovery code." });}}
-  // ✅ Issue tokens
-  const accessToken  = jwt.sign({ id: userId, type: "web" }, JWT_SECRET, { expiresIn: "7d" });
-  const refreshToken = jwt.sign({ id: userId },              JWT_SECRET, { expiresIn: "30d" });
+  }
 
-  await prisma.refreshToken.create({data: { token: refreshToken, userId },});
+  if (!ok) {
+    return res.status(403).json({ error: "Invalid 2FA or recovery code." });
+  }
+
+  // ✅ Issue tokens
+  const accessToken  = jwt.sign({ id: userId, type: user.type }, JWT_SECRET, { expiresIn: "7d" });
+  const refreshToken = jwt.sign({ id: userId },                JWT_SECRET, { expiresIn: "30d" });
+
+  await prisma.refreshToken.create({
+    data: { token: refreshToken, userId }
+  });
 
   res.cookie("access_token", accessToken, {
-  httpOnly : true,
-  secure   : process.env.NODE_ENV === "production",
-  maxAge   : 1000 * 60 * 60 * 24 * 7,
-  sameSite : "Lax",
-});
+    httpOnly : true,
+    secure   : process.env.NODE_ENV === "production",
+    maxAge   : 1000 * 60 * 60 * 24 * 7,
+    sameSite : "Lax"
+  });
 
-  res.json({ accessToken, refreshToken, userId });
+  // ✅ ⬇⬇ Return new toggles to frontend
+  res.json({
+    accessToken,
+    refreshToken,
+    userId,
+    require2faLogin   : user.require2faLogin,
+    requireArmToTrade : user.requireArmToTrade
+  });
 });
-
 
 
 
@@ -1236,6 +1263,7 @@ router.delete("/wallets/delete/:walletId", authenticate, async (req, res) => {
     // 2. Cascade-delete refresh tokens & trades
     await prisma.refreshToken.deleteMany({ where: { walletId: idInt } });
     await prisma.trade.deleteMany({        where: { walletId: idInt } });
+    await prisma.closedTrade.deleteMany({  where: { walletId: idInt } });
 
     // 3. Delete the wallet itself
     await prisma.wallet.delete({ where: { id: idInt } });

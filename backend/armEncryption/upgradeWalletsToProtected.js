@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const readline = require('readline/promises');
-const prisma   = require('../backend/prisma/prisma');
-const { generateDEK, wrapDEK, encryptPrivateKey } = require('../backend/utils/encryption/armEncryption');
+const prisma   = require('../prisma/prisma');
+const { generateDEK, wrapDEK, encryptPrivateKey } = require('./armEncryption');
 const { decryptPrivateKey } = require('../backend/core/crypto/envelopeCrypto');
 
 (async () => {

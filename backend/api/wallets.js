@@ -21,6 +21,9 @@ const authenticate = require("../middleware/requireAuth")
 const { encrypt, decrypt } = require("../middleware/auth/encryption");
 const check2FA = require("../middleware/auth/check2FA");
 const { getTokenAccountsAndInfo, getMintDecimals } = require("../utils/tokenAccounts");
+const { encryptPrivateKey } = require("../armEncryption/envelopeCrypto");   // 👈 NEW
+const crypto  = require("crypto");    
+
 
 const MIN_VALUE_USD = 0.50;
 const EXCLUDE_MINTS = new Set([
@@ -36,8 +39,8 @@ const injectUntracked = async (userId, walletIds = null) => {
   let wrote = false;
 
   const wallets = await prisma.wallet.findMany({
-    where  : { userId, ...(walletIds ? { id: { in: walletIds } } : {}) },
-    select : { id: true, label: true, publicKey: true }
+    where : { userId, ...(walletIds ? { id: { in: walletIds } } : {}) },
+    select: { id: true, label: true, publicKey: true }
   });
 
   for (const w of wallets) {
@@ -47,16 +50,9 @@ const injectUntracked = async (userId, walletIds = null) => {
       if (amount <= 0 || EXCLUDE_MINTS.has(mint)) continue;
 
       const decimals = await getMintDecimals(mint).catch(() => 0);
-      const price    = await getCachedPrice(mint) ??
-                       await getTokenPrice(userId, mint);
-
+      const price    = await getTokenPrice(userId, mint).catch(() => 0);
       const valueUsd = (Number(amount) / 10 ** decimals) * price;
-
-      /* 🚫 Skip dust */
-      if (valueUsd <= MIN_IMPORT_USD) {
-        console.log(`⏭️  injectUntracked skipped ${mint} (${w.label}) — $${valueUsd.toFixed(3)}`);
-        continue;
-      }
+      if (valueUsd <= MIN_IMPORT_USD) continue; // skip dust
 
       const rawBalance = BigInt(Math.floor(Number(amount) * 10 ** decimals));
 
@@ -65,11 +61,7 @@ const injectUntracked = async (userId, walletIds = null) => {
         select : { outAmount: true, closedOutAmount: true }
       });
 
-      const tracked = trackedRows.reduce((s, r) => {
-        const closed = r.closedOutAmount ?? 0n;
-        return s + (r.outAmount - closed);
-      }, 0n);
-
+      const tracked = trackedRows.reduce((s, r) => s + (r.outAmount - (r.closedOutAmount ?? 0n)), 0n);
       if (tracked >= rawBalance) continue;
 
       const delta = rawBalance - tracked;
@@ -620,104 +612,83 @@ router.post("/validate-mint", async (req, res) => {
 
 
 // FOR NEW AUTH SYSTEM SAVE WALLET HIDE KEY
-// Body: { label, publicKey, privateKey }
 router.post("/import-wallet", authenticate, async (req, res) => {
   const { label, privateKey } = req.body;
   const userId = req.user.id;
+
   console.log("🛂 Authenticated user:", userId);
   console.log("📩 Request body:", { label, privateKey: privateKey?.slice(0, 6) + "..." });
 
-  if (!label || !privateKey) {
-    console.log("⚠️ Missing label or privateKey.");
+  if (!label || !privateKey)
     return res.status(400).json({ error: "Missing label or privateKey." });
-  }
 
   try {
-    // Decode base58
+    /* 1️⃣  Decode the base58 secret key */
     let secretKey;
     try {
       secretKey = bs58.decode(privateKey.trim());
       console.log("🔑 Decoded secretKey length:", secretKey.length);
-    } catch (decodeErr) {
-      console.error("❌ Failed to decode private key:", decodeErr.message);
+    } catch (e) {
       return res.status(400).json({ error: "Invalid base58 private key." });
     }
+    if (secretKey.length !== 64)
+      return res.status(400).json({ error: "Key must be 64-byte ed25519 secret." });
 
-    if (secretKey.length !== 64) {
-      console.error("❌ Invalid secretKey length:", secretKey.length);
-      return res.status(400).json({ error: "Invalid key length. Must be 64 bytes." });
-    }
-
-    let keypair;
-    try {
-      keypair = Keypair.fromSecretKey(secretKey);
-      console.log("🧾 Public key derived:", keypair.publicKey.toBase58());
-    } catch (keypairErr) {
-      console.error("❌ Failed to create keypair:", keypairErr.message);
-      return res.status(400).json({ error: "Invalid secret key." });
-    }
-
+    const keypair   = Keypair.fromSecretKey(secretKey);
     const publicKey = keypair.publicKey.toBase58();
+    console.log("🧾 Public key derived:", publicKey);
 
-    // Check for existing wallet with same publicKey
-    const existing = await prisma.wallet.findFirst({ where: { userId, publicKey } });
-    if (existing) {
-      console.log("⚠️ Wallet already exists for user:", publicKey);
+    /* 2️⃣  Duplicate checks */
+    if (await prisma.wallet.findFirst({ where: { userId, publicKey } }))
       return res.status(400).json({ error: "Wallet already saved." });
-    }
 
-    // Check for duplicate label
-    const duplicateLabel = await prisma.wallet.findFirst({ where: { userId, label } });
-    if (duplicateLabel) {
-      console.log(`⚠️ Label '${label}' already used by this user.`);
-      return res.status(400).json({ error: "Label already exists. Choose a different name." });
-    }
+    if (await prisma.wallet.findFirst({ where: { userId, label } }))
+      return res.status(400).json({ error: "Label already exists." });
 
-    const encryptedPrivateKey = encrypt(privateKey);
-    console.log("🔐 Encrypted privateKey length:", encryptedPrivateKey.length);
+    /* 3️⃣  Envelope-encrypt the private key immediately */
+    const tempPass = crypto.randomBytes(16).toString("hex");   // user will set real pass on first arm
+    const envelope = await encryptPrivateKey(Buffer.from(secretKey), {
+      passphrase : tempPass,
+      aad        : `user:${userId}:wallet:TBD`
+    });
 
-    // Save wallet to DB
+    /* 4️⃣  Save ONLY the envelope (JSON) — no plaintext, no legacy string */
     const wallet = await prisma.wallet.create({
       data: {
         userId,
         label,
         publicKey,
-        privateKey: encryptedPrivateKey,
+        encrypted   : envelope,
+        isProtected : true,
+        // privateKey left NULL on purpose
       },
     });
-
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
-        activeWalletId: {
-          set: (await prisma.user.findUnique({ where: { id: userId } })).activeWalletId || wallet.id
-        }
-      }
-    });
-
     console.log("✅ Wallet saved to DB:", wallet.id);
 
-    // 🧠 Inject any unknown SPL tokens this wallet holds
+    /* 5️⃣  Make it active if user has none */
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+    if (!user.activeWalletId)
+      await prisma.user.update({ where: { id: userId }, data: { activeWalletId: wallet.id } });
+
+    /* 6️⃣  Inject untracked SPL positions */
     await injectUntracked(userId, [wallet.id]);
 
-    // ✅ Final response
+    /* 7️⃣  Done */
     return res.json({
-      message: "Wallet saved.",
+      message         : "Wallet saved.",
       wallet,
-      activeWalletId: wallet.id,
+      activeWalletId  : wallet.id,
       refetchOpenTrades: true
     });
 
   } catch (err) {
-    if (err.code === 'P2002' && err.meta?.target?.includes('userId_label')) {
-      console.error("🚫 Duplicate label caught by Prisma constraint.");
-      return res.status(400).json({ error: "Label already exists. Choose a different name." });
-    }
-    console.error("🔥 Unexpected wallet import error:", err.stack);
+    if (err.code === "P2002" && err.meta?.target?.includes("userId_label"))
+      return res.status(400).json({ error: "Label already exists." });
+
+    console.error("🔥 Wallet import error:", err);
     return res.status(500).json({ error: "Failed to import wallet." });
   }
 });
-
 
 
 

@@ -43,7 +43,10 @@ const MyAccountTab = () => {
   const [activeWallet, setActiveWallet] = useState(null);
   const [telegramChatId, setTelegramChatId] = useState(null);
 
+
+  /* 2-FA */
   const [is2FAEnabled, setIs2FAEnabled] = useState(false);
+  const [require2faLogin, setRequire2faLogin] = useState(false); // ★ NEW
   const [qrCodeUrl, setQrCodeUrl] = useState(null);
   const [twoFAToken, setTwoFAToken] = useState("");
   const inputRef = useRef(null);
@@ -73,6 +76,7 @@ const MyAccountTab = () => {
   /* ───────── Helpers ───────── */
   const { type, phantomPublicKey } = useUser();
   const isWeb3 = type === "web3";
+  
 
   /* ───────── Focus token field when QR shows ───────── */
   useEffect(() => {
@@ -105,6 +109,7 @@ const MyAccountTab = () => {
 
       setProfile(profileData || null);
       setIs2FAEnabled(profileData?.is2FAEnabled || false);
+       setRequire2faLogin(!!profileData?.require2faLogin);
       setRequireArm(!!profileData?.requireArmToTrade);
 
       if (subStatus) {
@@ -145,6 +150,8 @@ const MyAccountTab = () => {
     if (activeWallet?.id) poll();
     return () => timer && clearTimeout(timer);
   }, [activeWallet?.id]);
+
+  
 
   // ⏱️ Local 1-second countdown between polls + pre-expiry toast at T-15m
   useEffect(() => {
@@ -270,6 +277,21 @@ useEffect(() => {
     } else toast.error("Failed to disable 2FA.");
   };
 
+
+    /* ───────── Toggles ───────── */
+  const handleToggleLogin2FA = async () => {                         // ★ NEW
+    try {
+      const next = !require2faLogin;
+      const ok = await updateProfile({ require2faLogin: next });
+      if (ok) {
+        setRequire2faLogin(next);
+        toast.success(next ? "Login 2FA enabled." : "Login 2FA disabled.");
+      } else toast.error("Failed to update setting.");
+    } catch (e) {
+      toast.error(e.message || "Failed to update setting.");
+    }
+  }
+
   /* ───────── Protected Mode actions ───────── */
   const handleToggleProtectedMode = async () => {
     try {
@@ -294,13 +316,13 @@ useEffect(() => {
     if (!armPassphrase) return toast.error("Enter your wallet passphrase.");
     setArmBusy(true);
     try {
-      const res = await armEncryptedWallet({
-        walletId: activeWallet.id,
-        passphrase: armPassphrase,
-        code: twoFAToken,
-        ttlMinutes: armDuration,
-        migrateLegacy: armMigrateLegacy,
-      });
+       const res = await armEncryptedWallet({
+         walletId: activeWallet.id,
+         passphrase: armPassphrase,
+         twoFactorToken: twoFAToken,
+         ttlMinutes: armDuration,
+         migrateLegacy: armMigrateLegacy,
+       });
       setArmStatus({ armed: true, msLeft: armDuration * 60 * 1000 });
       setWarned(false);
       setArmModalOpen(false);
@@ -318,11 +340,11 @@ useEffect(() => {
     if (!activeWallet?.id) return;
     setExtendBusy(true);
     try {
-      await extendEncryptedWallet({
-        walletId: activeWallet.id,
-        code: twoFAToken || undefined,
-        ttlMinutes: minutes,
-      });
+       await extendEncryptedWallet({
+         walletId: activeWallet.id,
+         twoFactorToken: twoFAToken || undefined,
+         ttlMinutes: minutes,
+       });
       setArmStatus((prev) => ({ armed: true, msLeft: Math.max(prev.msLeft, 0) + minutes * 60 * 1000 }));
       toast.success(`Session extended ${minutes} minutes.`);
     } catch (e) {
@@ -336,7 +358,10 @@ useEffect(() => {
     if (!activeWallet?.id) return;
     setDisarmBusy(true);
     try {
-      await disarmEncryptedWallet({ walletId: activeWallet.id, code: twoFAToken || undefined });
+       await disarmEncryptedWallet({
+         walletId: activeWallet.id,
+         twoFactorToken: twoFAToken || undefined,
+       });      
       setArmStatus({ armed: false, msLeft: 0 });
       setWarned(false);
       toast.success("Automation disarmed.");
@@ -704,6 +729,18 @@ useEffect(() => {
               <p className="text-sm mt-1 text-emerald-400">
                 2FA is enabled on your account.
               </p>
+
+                {/* ★ NEW — Require 2FA on Login toggle */}
+              <div className="flex items-center gap-2 mt-3">
+                <input
+                  type="checkbox"
+                  checked={require2faLogin}
+                  onChange={handleToggleLogin2FA}
+                />
+                <span className="text-sm">
+                  Require 2FA on Login (extra secure)
+                </span>
+              </div>
 
               <Dialog open={disableDialogOpen} onOpenChange={setDisableDialogOpen}>
                 <DialogTrigger asChild>

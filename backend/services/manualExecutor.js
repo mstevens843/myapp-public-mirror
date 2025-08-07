@@ -18,8 +18,8 @@ const { decrypt }                      = require("../middleware/auth/encryption"
 const { getUserPreferencesByUserId } = require("./userPrefs"); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const API_BASE = process.env.API_BASE; 
-const { getDEK } = require("../core/crypto/sessionKeyCache");
-const { decryptPrivateKeyWithDEK } = require("../core/crypto/envelopeCrypto");
+const { getDEK } = require("../armEncryption/sessionKeyCache");
+const { decryptPrivateKeyWithDEK } = require("../armEncryption/envelopeCrypto");
 // ------------------------------------------------------------------
 // restore missing log-file constant (dashboard still reads this file)
 const { closePositionFIFO } = require("./utils/analytics/fifoReducer")

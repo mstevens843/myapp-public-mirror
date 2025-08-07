@@ -67,7 +67,7 @@ async function httpJson(path, init = {}) {
 }
 
 export async function getArmStatus(walletId) {
-  return httpJson(`/api/encrypted-wallet-session/status/${walletId}`, {
+  return httpJson(`/api/arm-encryption/status/${walletId}`, {
     method: "GET",
   });
 }
@@ -75,36 +75,36 @@ export async function getArmStatus(walletId) {
 export async function armEncryptedWallet({
   walletId,
   passphrase,
-  code,                 // 2FA code (middleware typically expects req.body.code)
+  twoFactorToken,                // 2FA code (middleware typically expects req.body.code)
   ttlMinutes,           // optional; backend clamps/defaults
   migrateLegacy = false // set true to upgrade legacy colon-hex on the fly
 }) {
-  return httpJson(`/api/encrypted-wallet-session/arm`, {
+  return httpJson(`/api/arm-encryption/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletId, passphrase, ttlMinutes, code, migrateLegacy }),
+    body: JSON.stringify({ walletId, passphrase, ttlMinutes, twoFactorToken, migrateLegacy }),
   });
 }
 
-export async function extendEncryptedWallet({ walletId, code, ttlMinutes }) {
-  return httpJson(`/api/encrypted-wallet-session/extend`, {
+export async function extendEncryptedWallet({ walletId, twoFactorToken, ttlMinutes }) {
+  return httpJson(`/api/arm-encryption/extend`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletId, ttlMinutes, code }),
+    body: JSON.stringify({ walletId, ttlMinutes, twoFactorToken, }),
   });
 }
 
-export async function disarmEncryptedWallet({ walletId, code }) {
-  return httpJson(`/api/encrypted-wallet-session/disarm`, {
+export async function disarmEncryptedWallet({ walletId, twoFactorToken }) {
+  return httpJson(`/api/arm-encryption/disarm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletId, code }),
+    body: JSON.stringify({ walletId, twoFactorToken, }),
   });
 }
 
 // Protected Mode toggle at user-level (requireArmToTrade)
 export async function setRequireArmToTrade(requireArm) {
-  return httpJson(`/api/user/security/require-arm`, {
+  return httpJson(`/api/arm-encryption/require-arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ requireArmToTrade: !!requireArm }),
