@@ -9,6 +9,8 @@ const express = require("express");
 const router = express.Router();
 const { body, validationResult } = require("express-validator");
 
+const argon2 = require("argon2"); // for pass‑phrase hashing when migrating
+
 const prisma = require("../prisma/prisma");
 const requireAuth = require("../middleware/requireAuth");
 const check2FA = require("../middleware/auth/check2FA"); // user uploaded
@@ -39,58 +41,179 @@ function preview(data, len = 120) {
 
 
 router.post("/arm", requireAuth, check2FA, async (req, res) => {
-  /* ───── 1. Input / auth ───── */
+  /* ───── 1. Input validation ───── */
   console.log("🟢 /arm hit → body:", req.body);
-  const { walletId, passphrase, ttlMinutes, migrateLegacy } = req.body || {};
-  if (!walletId || !passphrase) {
+  const {
+    walletId,
+    passphrase,
+    ttlMinutes,
+    migrateLegacy,
+    applyToAll,
+    passphraseHint,
+  } = req.body || {};
+  // allow empty string passphrase but not undefined
+  if (!walletId || passphrase === undefined) {
     console.warn("⛔ Missing walletId / passphrase");
     return res.status(400).json({ error: "walletId & passphrase required" });
   }
 
-  /* ───── 2. Fetch wallet ───── */
   const userId = req.user.id;
-  console.log(`🔍 Looking up wallet ${walletId} for user ${userId}`);
-  const wallet = await prisma.wallet.findFirst({
-    where  : { id: walletId, userId },
-    select : { id: true, label: true, encrypted: true }
-  });
+
+  /* ───── 2. Fetch user + wallet ───── */
+  const [user, wallet] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        requireArmToTrade: true,
+        defaultPassphraseHash: true,
+        passphraseHint: true,
+      },
+    }),
+    prisma.wallet.findFirst({
+      where: { id: walletId, userId },
+      select: {
+        id: true,
+        label: true,
+        encrypted: true,
+        isProtected: true,
+        passphraseHash: true,
+      },
+    }),
+  ]);
 
   if (!wallet) {
     console.warn("⛔ Wallet not found");
     return res.status(404).json({ error: "Wallet not found" });
   }
 
-  console.log("📦 Wallet.encrypted type:", typeof wallet.encrypted,
-              "preview:", preview(wallet.encrypted));
+  // If user requires arm but wallet isn't protected, refuse until migration
+  if (user.requireArmToTrade && !wallet.isProtected) {
+    return res.status(400).json({ error: "Wallet must be migrated first" });
+  }
+
+  // prepare AAD for encryption/decryption
+  const aad = `user:${userId}:wallet:${walletId}`;
 
   let blob = wallet.encrypted;
+  let migrating = false;
 
-  /* ───── 3. Legacy string handling ───── */
-  if (typeof blob === "string" && blob.includes(":")) {
-    console.log("📝 Detected legacy colon-hex blob",
-                "migrateLegacy =", migrateLegacy);
-    if (!migrateLegacy) {
+  // Determine if this wallet is legacy (string) or unprotected
+  const isLegacyString = typeof blob === "string" && blob.includes(":");
+  const needsMigration = !wallet.isProtected || isLegacyString;
+
+  // ───── 3. Migration path ─────
+  if (needsMigration) {
+    // When encrypted data is a legacy string we require migrateLegacy flag
+    if (isLegacyString && !migrateLegacy) {
       return res.status(400).json({ error: "Legacy format: set migrateLegacy=true to upgrade" });
     }
-
+    migrating = true;
     try {
-      console.log("🔑 Decrypting legacy blob…");
-      const pkBuf = legacy.decrypt(blob, { aad: `user:${userId}:wallet:${walletId}` });
-      console.log("🔒 Re-encrypting to envelope-v1…");
+      // Decrypt the existing private key
+      let pkBuf;
+      if (isLegacyString) {
+        console.log("🔑 Decrypting legacy blob…");
+        pkBuf = legacy.decrypt(blob, { aad });
+      } else {
+        // For safety we do not support decrypting an unprotected envelope here.
+        // In practice this branch is hit when `isProtected` is false but the
+        // encrypted column is JSON; these wallets have not been arm‑encrypted
+        // yet. They should be considered legacy and thus should have been
+        // stored as a colon‑delimited string. If encountered, return error.
+        throw new Error("Unsupported unprotected wallet format");
+      }
+
+      // Re‑encrypt under the supplied pass‑phrase
+      console.log("🔒 Re‑encrypting to envelope-v1…");
       const wrapped = await encryptPrivateKey(pkBuf, {
         passphrase,
-        aad: `user:${userId}:wallet:${walletId}`
+        aad,
       });
       pkBuf.fill(0);
-      await prisma.wallet.update({
-        where: { id: walletId },
-        data : { encrypted: wrapped, isProtected: true }
-      });
-      blob = wrapped;
+
+      // Compute Argon2 hash of the pass‑phrase
+      const passHash = await argon2.hash(passphrase);
+
+      if (applyToAll) {
+        // Apply this pass‑phrase to all current and future wallets
+        await prisma.$transaction(async (tx) => {
+          // 1. Update user default hash + hint
+          await tx.user.update({
+            where: { id: userId },
+            data: {
+              defaultPassphraseHash: passHash,
+              passphraseHint: passphraseHint || null,
+            },
+          });
+
+          // 2. Find all wallets that need migration: legacy or not protected
+          const toUpgrade = await tx.wallet.findMany({
+            where: {
+              userId,
+              isProtected: false,
+            },
+            select: { id: true, encrypted: true, isProtected: true },
+          });
+
+          for (const w of toUpgrade) {
+            // skip current wallet as it will be updated separately
+            if (w.id === walletId) continue;
+            const upgradeAad = `user:${userId}:wallet:${w.id}`;
+            let pk;
+            const enc = w.encrypted;
+            const isStr = typeof enc === "string" && enc.includes(":");
+            if (isStr) {
+              pk = legacy.decrypt(enc, { aad: upgradeAad });
+            } else {
+              // already protected with null passphraseHash: skip re‑encrypt
+              continue;
+            }
+            const newWrap = await encryptPrivateKey(pk, {
+              passphrase,
+              aad: upgradeAad,
+            });
+            pk.fill(0);
+            await tx.wallet.update({
+              where: { id: w.id },
+              data: {
+                encrypted: newWrap,
+                isProtected: true,
+                passphraseHash: null,
+                passphraseHint: null,
+              },
+            });
+          }
+
+          // 3. Update the current wallet to use global (passphraseHash = null)
+          await tx.wallet.update({
+            where: { id: walletId },
+            data: {
+              encrypted: wrapped,
+              isProtected: true,
+              passphraseHash: null,
+              passphraseHint: null,
+            },
+          });
+        });
+        // After the transaction commit, fetch the updated envelope
+        blob = wrapped;
+      } else {
+        // Per‑wallet pass‑phrase: set hash on this wallet only
+        await prisma.wallet.update({
+          where: { id: walletId },
+          data: {
+            encrypted: wrapped,
+            isProtected: true,
+            passphraseHash: passHash,
+            passphraseHint: passphraseHint || null,
+          },
+        });
+        blob = wrapped;
+      }
       console.log("✅ Migration complete");
     } catch (err) {
-      console.error("❌ Legacy migration failed:", err);
-      return res.status(500).json({ error: "Legacy migration failed" });
+      console.error("❌ Migration failed:", err);
+      return res.status(500).json({ error: "Wallet migration failed" });
     }
   }
 
@@ -100,17 +223,40 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     return res.status(400).json({ error: "Unsupported wallet format; upgrade required" });
   }
 
-  /* ───── 5. Unwrap DEK ───── */
-  console.log("🔓 Unwrapping DEK with passphrase…");
+  // ───── 5. Verify pass‑phrase for protected wallets ─────
+  if (!migrating) {
+    // Only enforce pass‑phrase matching when wallet is already protected
+    let validPass = false;
+    if (wallet.passphraseHash) {
+      try {
+        validPass = await argon2.verify(wallet.passphraseHash, passphrase);
+      } catch {
+        validPass = false;
+      }
+    }
+    // fallback to user default pass‑phrase
+    if (!validPass && user.defaultPassphraseHash) {
+      try {
+        validPass = await argon2.verify(user.defaultPassphraseHash, passphrase);
+      } catch {
+        validPass = false;
+      }
+    }
+    if (!validPass) {
+      return res.status(401).json({ error: "Invalid passphrase" });
+    }
+  }
+
+  /* ───── 6. Unwrap DEK using provided pass‑phrase ───── */
   let DEK;
   try {
-    DEK = await unwrapDEKWithPassphrase(blob, passphrase);
+    DEK = await unwrapDEKWithPassphrase(blob, passphrase, aad);
   } catch (err) {
-    console.error("❌ Passphrase failed:", err.message);
+    console.error("❌ Passphrase unwrap failed:", err.message);
     return res.status(401).json({ error: "Invalid passphrase" });
   }
 
-  /* ───── 6. Cache and respond ───── */
+  /* ───── 7. Cache session and respond ───── */
   const ttlMin = ttlClamp(30, 240, 720, ttlMinutes);
   arm(userId, walletId, DEK, ttlMin * 60_000);
   console.log(`🛡️ ARMED wallet ${walletId} for ${ttlMin} min`);
@@ -119,7 +265,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     ok: true,
     walletId,
     label: wallet.label,
-    armedForMinutes: ttlMin
+    armedForMinutes: ttlMin,
+    migrated: migrating,
   });
 });
 
@@ -201,6 +348,8 @@ router.post(
 );
 
 module.exports = router;
+
+
 
 
 

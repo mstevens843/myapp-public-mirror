@@ -29,20 +29,48 @@ router.get("/profile", requireAuth, async (req, res) => {
 });
 
 // PATCH /account/profile
+//
+// This endpoint updates basic user profile data. Clients may update the
+// username as well as security toggles related to two‑factor authentication.
+// Additional properties in the request body are ignored to prevent mass
+// assignment. When enabling or disabling 2FA on login/arm please ensure
+// that `is2FAEnabled` is set appropriately via the 2FA setup routes (see
+// auth.js). Here we only persist the boolean flags controlling whether a
+// TOTP code is required at login or when arming a wallet session.
 router.patch("/profile", requireAuth, async (req, res) => {
   try {
-    const { username } = req.body;
+    const { username, require2faLogin, require2faArm } = req.body || {};
 
-    if (!username) {
-      return res.status(400).json({ error: "Username is required" });
+    // Build an update object from defined values only. We only allow
+    // username and the 2FA toggles to be updated via this route. Ignore
+    // unspecified keys to avoid accidentally setting them to null.
+    const data = {};
+    if (typeof username === "string" && username.trim() !== "") {
+      data.username = username.trim();
+    }
+    if (typeof require2faLogin === "boolean") {
+      data.require2faLogin = require2faLogin;
+    }
+    if (typeof require2faArm === "boolean") {
+      data.require2faArm = require2faArm;
+    }
+
+    // If no fields to update, return an error
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ error: "No valid fields provided for update" });
     }
 
     const updated = await prisma.user.update({
       where: { id: req.user.id },
-      data: { username },
+      data,
     });
 
-    res.json({ message: "Profile updated", username: updated.username });
+    res.json({
+      message: "Profile updated",
+      username: updated.username,
+      require2faLogin: updated.require2faLogin,
+      require2faArm: updated.require2faArm,
+    });
   } catch (err) {
     console.error("Update profile error:", err);
     res.status(500).json({ error: "Server error" });

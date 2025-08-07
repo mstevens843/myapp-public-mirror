@@ -42,6 +42,22 @@ model User {
   is2FAEnabled      Boolean   @default(false)
   twoFactorSecret   String?
     require2faLogin   Boolean   @default(false) // ← NEW
+  /// Indicates whether two‑factor authentication should be required when arming a
+  /// protected session. Login and arm requirements are controlled separately. A
+  /// user may have two‑factor disabled on login while still enforcing it when
+  /// arming a wallet for trades. See `require2faLogin` for the login toggle.
+  require2faArm    Boolean   @default(false)
+
+  /// When a user opts to use the same pass‑phrase for all current and future
+  /// wallets this field stores the Argon2id hash of that pass‑phrase. When
+  /// creating or migrating wallets the backend will fall back to this hash
+  /// whenever an individual wallet has no `passphraseHash` set. If null no
+  /// global pass‑phrase is defined.
+  defaultPassphraseHash String?
+
+  /// Optional short hint shown to the user for the global wallet pass‑phrase.
+  /// This is never used for authentication and is purely informational.
+  passphraseHint        String?
   requireArmToTrade Boolean   @default(false)
    recoveryCodes    String[] 
      resetToken     String?
@@ -74,6 +90,16 @@ model Wallet {
 
   // 🔐 NEW: envelope-encrypted blob (Argon2id→AES-GCM object)
   encrypted  Json?    // stores {v,alg,kdf,{iv1,tag1,pkCipher},{iv2,tag2,dekCipher},aad}
+
+  /// Argon2id hash of the pass‑phrase protecting this wallet. If null the
+  /// wallet inherits the user's `defaultPassphraseHash`. When non‑null the
+  /// wallet will only accept this specific pass‑phrase on arm. This allows
+  /// per‑wallet isolation even when a global pass‑phrase exists.
+  passphraseHash String?
+
+  /// Optional hint to help the user remember the pass‑phrase for this wallet.
+  /// If null the user’s global `passphraseHint` may be displayed instead.
+  passphraseHint String?
 
   isProtected Boolean @default(false) // true when using envelope+Arm
   encryptionVersion Int @default(1)   // future-proofing

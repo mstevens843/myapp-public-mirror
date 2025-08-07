@@ -17,6 +17,9 @@ import { enable2FA, disable2FA, verify2FA } from "../../utils/2fa";
 import { useUser } from "@/contexts/UserProvider";
 import { supabase } from "@/lib/supabase";
 
+// Authenticated fetch helper for /api calls
+import { authFetch } from "@/utils/authFetch";
+
 // 🔐 Encrypted Wallet Session helpers
 import {
   getArmStatus,
@@ -47,6 +50,10 @@ const MyAccountTab = () => {
   /* 2-FA */
   const [is2FAEnabled, setIs2FAEnabled] = useState(false);
   const [require2faLogin, setRequire2faLogin] = useState(false); // ★ NEW
+  const [require2faArm, setRequire2faArm] = useState(false);   // ★ NEW
+  const [hasGlobalPassphrase, setHasGlobalPassphrase] = useState(false); // ★ NEW
+  const [armUseForAll, setArmUseForAll] = useState(false);     // ★ NEW
+  const [armPassphraseHint, setArmPassphraseHint] = useState("");      // ★ NEW
   const [qrCodeUrl, setQrCodeUrl] = useState(null);
   const [twoFAToken, setTwoFAToken] = useState("");
   const inputRef = useRef(null);
@@ -108,8 +115,10 @@ const MyAccountTab = () => {
       }
 
       setProfile(profileData || null);
+      // We'll fetch additional auth details (2FA toggles, global passphrase)
+      // from /api/auth/me below. Fallback to profileData for basic info.
       setIs2FAEnabled(profileData?.is2FAEnabled || false);
-       setRequire2faLogin(!!profileData?.require2faLogin);
+      setRequire2faLogin(!!profileData?.require2faLogin);
       setRequireArm(!!profileData?.requireArmToTrade);
 
       if (subStatus) {
@@ -127,6 +136,27 @@ const MyAccountTab = () => {
       }
 
       setLoading(false);
+    })();
+  }, []);
+
+  // Load extended auth info (2FA toggles, global passphrase) on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await authFetch('/api/auth/me', { method: 'GET' });
+        if (!res.ok) return;
+        const data = await res.json();
+        const u = data?.user;
+        if (u) {
+          setIs2FAEnabled(!!u.is2FAEnabled);
+          setRequire2faLogin(!!u.require2faLogin);
+          setRequire2faArm(!!u.require2faArm);
+          setRequireArm(!!u.requireArmToTrade);
+          setHasGlobalPassphrase(!!u.hasGlobalPassphrase);
+        }
+      } catch (err) {
+        console.error('Failed to load auth/me:', err);
+      }
     })();
   }, []);
 
@@ -292,6 +322,20 @@ useEffect(() => {
     }
   }
 
+  // Toggle requiring 2FA when arming a wallet
+  const handleToggleArm2FA = async () => {
+    try {
+      const next = !require2faArm;
+      const ok = await updateProfile({ require2faArm: next });
+      if (ok) {
+        setRequire2faArm(next);
+        toast.success(next ? "2FA required when arming enabled." : "2FA on arm disabled.");
+      } else toast.error("Failed to update setting.");
+    } catch (e) {
+      toast.error(e.message || "Failed to update setting.");
+    }
+  };
+
   /* ───────── Protected Mode actions ───────── */
   const handleToggleProtectedMode = async () => {
     try {
@@ -322,12 +366,16 @@ useEffect(() => {
          twoFactorToken: twoFAToken,
          ttlMinutes: armDuration,
          migrateLegacy: armMigrateLegacy,
+         applyToAll: armUseForAll,
+         passphraseHint: armPassphraseHint && armPassphraseHint.trim() !== '' ? armPassphraseHint : undefined,
        });
       setArmStatus({ armed: true, msLeft: armDuration * 60 * 1000 });
       setWarned(false);
       setArmModalOpen(false);
       setArmPassphrase("");
       setTwoFAToken("");
+      setArmUseForAll(false);
+      setArmPassphraseHint("");
       toast.success(`Automation armed for ${res.armedForMinutes} minutes.`);
     } catch (e) {
       toast.error(e.message || "Failed to arm.");
@@ -631,6 +679,38 @@ useEffect(() => {
                 className="w-full p-2 rounded text-black"
               />
 
+              {/* Global pass‑phrase option */}
+              {hasGlobalPassphrase ? (
+                <div className="flex flex-col gap-1">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked disabled />
+                    Use this pass‑phrase for all my current and future wallets
+                  </label>
+                  <p className="text-xs text-zinc-500">
+                    You have a global wallet pass‑phrase set. New wallets will inherit it automatically.
+                  </p>
+                </div>
+              ) : (
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={armUseForAll}
+                    onChange={(e) => setArmUseForAll(e.target.checked)}
+                  />
+                  Use this pass‑phrase for all my current and future wallets
+                </label>
+              )}
+
+              {/* Pass‑phrase hint */}
+              <label className="text-sm">Pass‑phrase Hint (optional)</label>
+              <input
+                type="text"
+                placeholder="Hint (optional)"
+                value={armPassphraseHint}
+                onChange={(e) => setArmPassphraseHint(e.target.value)}
+                className="w-full p-2 rounded text-black"
+              />
+
               {is2FAEnabled && (
                 <>
                   <label className="text-sm">2FA Code</label>
@@ -730,16 +810,24 @@ useEffect(() => {
                 2FA is enabled on your account.
               </p>
 
-                {/* ★ NEW — Require 2FA on Login toggle */}
-              <div className="flex items-center gap-2 mt-3">
-                <input
-                  type="checkbox"
-                  checked={require2faLogin}
-                  onChange={handleToggleLogin2FA}
-                />
-                <span className="text-sm">
-                  Require 2FA on Login (extra secure)
-                </span>
+              {/* 2FA toggles */}
+              <div className="flex flex-col gap-2 mt-3">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={require2faLogin}
+                    onChange={handleToggleLogin2FA}
+                  />
+                  <span>Require 2FA on Login (extra secure)</span>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={require2faArm}
+                    onChange={handleToggleArm2FA}
+                  />
+                  <span>Require 2FA when arming (Arm‑to‑Trade)</span>
+                </label>
               </div>
 
               <Dialog open={disableDialogOpen} onOpenChange={setDisableDialogOpen}>

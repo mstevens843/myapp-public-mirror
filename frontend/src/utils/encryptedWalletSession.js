@@ -77,12 +77,26 @@ export async function armEncryptedWallet({
   passphrase,
   twoFactorToken,                // 2FA code (middleware typically expects req.body.code)
   ttlMinutes,           // optional; backend clamps/defaults
-  migrateLegacy = false // set true to upgrade legacy colon-hex on the fly
+  migrateLegacy = false, // set true to upgrade legacy colon-hex on the fly
+  applyToAll = false,
+  passphraseHint,
 }) {
+  const payload = {
+    walletId,
+    passphrase,
+    ttlMinutes,
+    twoFactorToken,
+    migrateLegacy,
+  };
+  // Only include optional params if defined to avoid overwriting defaults
+  if (applyToAll) payload.applyToAll = true;
+  if (typeof passphraseHint === 'string' && passphraseHint.trim() !== '') {
+    payload.passphraseHint = passphraseHint;
+  }
   return httpJson(`/api/arm-encryption/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletId, passphrase, ttlMinutes, twoFactorToken, migrateLegacy }),
+    body: JSON.stringify(payload),
   });
 }
 

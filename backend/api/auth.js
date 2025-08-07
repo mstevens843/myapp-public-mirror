@@ -422,7 +422,12 @@ router.get("/me", requireAuth, async (req, res) => {
       where: { id: req.user.id },                 // ← always present now
       select: {
         id: true, username: true, email: true, type: true, createdAt: true,
-        is2FAEnabled: true, require2faLogin: true, requireArmToTrade: true,
+        is2FAEnabled: true,
+        require2faLogin: true,
+        require2faArm: true,
+        requireArmToTrade: true,
+        defaultPassphraseHash: true,
+        passphraseHint: true,
         phantomPublicKey: true,
         plan: true, subscriptionStatus: true,
         usage: true, usageResetAt: true, credits: true,
@@ -451,6 +456,10 @@ router.get("/me", requireAuth, async (req, res) => {
       prisma.dcaOrder.count({ where:{ userId:user.id,  status:"active" } })
     ]);
 
+    // Derive a simple flag for the presence of a global wallet pass‑phrase. We
+    // do not expose the hash itself to the client for security reasons. The
+    // client can use this to disable the “Use for all wallets” checkbox.
+    const hasGlobalPassphrase = !!user.defaultPassphraseHash;
     return res.json({
         user: {
           id: user.id,
@@ -461,11 +470,17 @@ router.get("/me", requireAuth, async (req, res) => {
           createdAt: user.createdAt,
           is2FAEnabled: user.is2FAEnabled,
           require2faLogin: user.require2faLogin,
+          require2faArm: user.require2faArm,
           requireArmToTrade: user.requireArmToTrade,
+          hasGlobalPassphrase,
+          passphraseHint: user.passphraseHint,
         },
       plan: {
-        plan:user.plan, subscriptionStatus:user.subscriptionStatus,
-        usage:user.usage, usageResetAt:user.usageResetAt, credits:user.credits
+        plan: user.plan,
+        subscriptionStatus: user.subscriptionStatus,
+        usage: user.usage,
+        usageResetAt: user.usageResetAt,
+        credits: user.credits,
       },
       preferences: user.userPreferences,
       telegram:    user.telegramPreferences,
@@ -475,7 +490,7 @@ router.get("/me", requireAuth, async (req, res) => {
         scheduledStrategies: scheduled,
         limitOrders:         limits,
         dcaOrders:           dca,
-      }
+      },
     });
   } catch (err) {
     console.error("/auth/me ⇒", err);
@@ -627,9 +642,10 @@ router.post("/disable-2fa", authenticate, async (req, res) => {
       data: {
         twoFactorSecret: null,
         is2FAEnabled: false,
-        require2faLogin  : false,
+        require2faLogin: false,
+        require2faArm: false,
         requireArmToTrade: false,
-      }
+      },
     });
 
     res.json({ message: "2FA has been disabled." });
