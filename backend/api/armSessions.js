@@ -579,9 +579,41 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
           let pk;
           const enc = w.encrypted;
           const strLegacy = typeof enc === "string" && enc.includes(":");
-          if (w.privateKey) {
-            pk = legacy.decrypt(w.privateKey, { aad: upgradeAad });
+          const pkVal = w.privateKey;
+          if (pkVal) {
+            // Determine whether the stored privateKey is a legacy encrypted
+            // payload (object with ct or colon‑delimited string) or a base58
+            // encoded secret.  When base58 we decode directly; when legacy we
+            // decrypt via the legacy helper.  Other formats are skipped.
+            const isLegacyPK = !!pkVal && !Buffer.isBuffer(pkVal) && (
+              (typeof pkVal === "object" && pkVal.ct) ||
+              (typeof pkVal === "string" && pkVal.includes(":"))
+            );
+            let base58ForDetect;
+            if (pkVal) {
+              if (Buffer.isBuffer(pkVal)) base58ForDetect = pkVal.toString();
+              else if (typeof pkVal === "string") base58ForDetect = pkVal;
+            }
+            const isBase58PK = !!base58ForDetect && !base58ForDetect.includes(":");
+            if (isLegacyPK) {
+              pk = legacy.decrypt(pkVal, { aad: upgradeAad });
+            } else if (isBase58PK) {
+              // Decode the base58-encoded secret key.  Skip if invalid.
+              try {
+                const raw = base58ForDetect.trim();
+                const decoded = bs58.decode(raw);
+                if (decoded.length !== 64) throw new Error();
+                pk = Buffer.from(decoded);
+              } catch {
+                // Invalid base58 format; cannot migrate
+                continue;
+              }
+            } else {
+              // Unsupported format; skip this wallet
+              continue;
+            }
           } else if (strLegacy) {
+            // Fallback to legacy string stored in encrypted field
             pk = legacy.decrypt(enc, { aad: upgradeAad });
           } else {
             // Cannot migrate unprotected envelope without legacy material
@@ -785,8 +817,20 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
     // Clear sensitive buffers
     try { pkBuf.fill(0); } catch {}
     try { DEK.fill(0); } catch {}
-    // Encrypt the base58 secret using legacy helper with AAD
+    // Encrypt the base58 secret using legacy helper with AAD.  The encrypt()
+    // helper returns an object with base64-encoded iv, tag and cipher text.
+    // Prisma cannot store nested objects into a string column so we convert
+    // this payload into the legacy colon‑delimited hex format.  This format
+    // is supported by the decrypt() helper via the `_decryptLegacy` path.
     const legacyEnc = encrypt(pkBase58, { aad });
+    // Convert the base64 payload into hex strings and join with colons.  This
+    // mirrors the previous "ivHex:tagHex:cipherHex" storage format.  When
+    // decrypting, the legacy.decrypt() helper will detect a colon‑delimited
+    // string and invoke the legacy decryption routine.
+    const ivHex  = Buffer.from(legacyEnc.iv,  'base64').toString('hex');
+    const tagHex = Buffer.from(legacyEnc.tag, 'base64').toString('hex');
+    const ctHex  = Buffer.from(legacyEnc.ct,  'base64').toString('hex');
+    const legacyString = `${ivHex}:${tagHex}:${ctHex}`;
     // Remove any active session
     try {
       disarm(userId, walletId);
@@ -801,7 +845,10 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
         isProtected: false,
         passphraseHash: null,
         passphraseHint: null,
-        privateKey: legacyEnc,
+        // Store the colon‑delimited string representation in privateKey.  This
+        // preserves at‑rest encryption while remaining compatible with our
+        // legacy decrypt() helper.
+        privateKey: legacyString,
       },
     });
     console.log(`✅ Removed protection for wallet ${walletId}`);

@@ -40,6 +40,9 @@ import {
 // Leaving the import commented out to avoid unused variable warnings.
 // import { openConfirmModal } from "@/hooks/useConfirm";
 import { useLocation } from "react-router-dom";
+// Inline confirmation modal helper.  Replaces window.confirm with a
+// Radix-based modal for better UX.  See src/hooks/useConfirm.jsx.
+import { openConfirmModal } from "@/hooks/useConfirm";
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -151,7 +154,10 @@ const MyAccountTab = () => {
         // Use a simple inline confirm instead of the global confirm modal. This avoids
         // unmount race conditions in React.  If the user confirms, we set the
         // apply-to-all flag and allow overwriting existing passphrases.
-        const ok = window.confirm(
+        // Prompt the user with a modal confirmation rather than the native
+        // window.confirm().  This avoids unmount race conditions and uses
+        // our design system for a consistent look.  See useConfirm.jsx.
+        const ok = await openConfirmModal(
           `This will overwrite the pass‑phrase on ${customCount} wallet${customCount > 1 ? 's' : ''}. Proceed?`
         );
         if (ok) {
@@ -170,8 +176,11 @@ const MyAccountTab = () => {
   };
 
   /* ───────── Helpers ───────── */
-  // Destructure refreshProfile from UserProvider so we can sync global context after changes
-  const { type, phantomPublicKey, refreshProfile } = useUser();
+  // Destructure refreshProfile and passphraseHint from UserProvider so we can
+  // sync global context after changes and show pass‑phrase hints when
+  // unlocking or removing protection.  The passphraseHint comes from
+  // /auth/me and represents the user's global pass‑phrase hint.
+  const { type, phantomPublicKey, refreshProfile, passphraseHint } = useUser();
   const isWeb3 = type === "web3";
   
 
@@ -1000,6 +1009,12 @@ useEffect(() => {
                     onChange={(e) => setArmPassphrase(e.target.value)}
                     className="w-full p-2 rounded text-black"
                   />
+                  {/* Show a subtle hint to help the user recall their pass‑phrase.  The
+                      hint is provided by the backend via /auth/me and is purely
+                      informational. */}
+                  {passphraseHint && (
+                    <p className="mt-1 text-xs text-zinc-500">Hint: {passphraseHint}</p>
+                  )}
                 </>
               )}
 
@@ -1087,6 +1102,11 @@ useEffect(() => {
                 onChange={(e) => setRemovePassphrase(e.target.value)}
                 className="w-full p-2 rounded text-black"
               />
+              {/* Display the global pass‑phrase hint when available so users
+                  attempting to remove protection can recall their pass‑phrase. */}
+              {passphraseHint && (
+                <p className="mt-1 text-xs text-zinc-500">Hint: {passphraseHint}</p>
+              )}
               {removeError && (
                 <div className="rounded bg-red-500/20 p-2 text-sm text-red-400">
                   {removeError}
