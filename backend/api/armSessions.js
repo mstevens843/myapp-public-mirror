@@ -3,8 +3,10 @@
 // Assumes prisma schema with `User(requireArmToTrade:boolean)` and `Wallet` table
 // where wallet.encrypted (JSON) stores the envelope blob.
 
-// Legacy support: if wallet.encrypted is *legacy* (iv:tag:cipher hex string),
-// set `migrateLegacy=true` in the arm payload to upgrade-in-place.
+// Legacy support: if wallet.encrypted is *legacy* (iv:tag:cipher hex string) or a
+// legacy `privateKey` exists, the arm endpoint will automatically migrate
+// the secret under the hood on first arm. Clients no longer need to send
+// `migrateLegacy=true`; the server auto‑detects and upgrades in place.
 const express = require("express");
 const router = express.Router();
 const { body, validationResult } = require("express-validator");
@@ -47,6 +49,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     walletId,
     passphrase,
     ttlMinutes,
+    // migrateLegacy is accepted for backwards compatibility but ignored.
     migrateLegacy,
     applyToAll,
     passphraseHint,
@@ -78,6 +81,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         encrypted: true,
         isProtected: true,
         passphraseHash: true,
+        privateKey: true, // include legacy key for automatic migration
       },
     }),
   ]);
@@ -86,11 +90,11 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     console.warn("⛔ Wallet not found");
     return res.status(404).json({ error: "Wallet not found" });
   }
-
-  // If user requires arm but wallet isn't protected, refuse until migration
-  if (user.requireArmToTrade && !wallet.isProtected) {
-    return res.status(400).json({ error: "Wallet must be migrated first" });
-  }
+  // NOTE: Historically we blocked arming unprotected wallets outright when
+  // requireArmToTrade was enabled.  With automatic migration support we
+  // remove this guard so first-time arm can both migrate and arm in one
+  // step.  If a wallet truly cannot be migrated (e.g. missing both
+  // privateKey and legacy ciphertext) later logic will throw.
 
   // prepare AAD for encryption/decryption
   const aad = `user:${userId}:wallet:${walletId}`;
@@ -98,29 +102,26 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   let blob = wallet.encrypted;
   let migrating = false;
 
-  // Determine if this wallet is legacy (string) or unprotected
+  // Determine if this wallet is legacy (string) or has a stored legacy
+  // privateKey.  Also treat unprotected wallets as needing migration.
   const isLegacyString = typeof blob === "string" && blob.includes(":");
-  const needsMigration = !wallet.isProtected || isLegacyString;
+  const hasLegacyPK   = !!wallet.privateKey;
+  const needsMigration = !wallet.isProtected || isLegacyString || hasLegacyPK;
 
   // ───── 3. Migration path ─────
   if (needsMigration) {
-    // When encrypted data is a legacy string we require migrateLegacy flag
-    if (isLegacyString && !migrateLegacy) {
-      return res.status(400).json({ error: "Legacy format: set migrateLegacy=true to upgrade" });
-    }
     migrating = true;
     try {
       // Decrypt the existing private key
       let pkBuf;
-      if (isLegacyString) {
+      if (hasLegacyPK) {
+        console.log("🔑 Decrypting legacy privateKey…");
+        pkBuf = legacy.decrypt(wallet.privateKey, { aad });
+      } else if (isLegacyString) {
         console.log("🔑 Decrypting legacy blob…");
         pkBuf = legacy.decrypt(blob, { aad });
       } else {
-        // For safety we do not support decrypting an unprotected envelope here.
-        // In practice this branch is hit when `isProtected` is false but the
-        // encrypted column is JSON; these wallets have not been arm‑encrypted
-        // yet. They should be considered legacy and thus should have been
-        // stored as a colon‑delimited string. If encountered, return error.
+        // Unprotected envelope with no legacy material cannot be migrated
         throw new Error("Unsupported unprotected wallet format");
       }
 
@@ -130,7 +131,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         passphrase,
         aad,
       });
-      pkBuf.fill(0);
+      // best-effort wipe the plaintext
+      try { pkBuf.fill(0); } catch {}
 
       // Compute Argon2 hash of the pass‑phrase
       const passHash = await argon2.hash(passphrase);
@@ -147,13 +149,18 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
             },
           });
 
-          // 2. Find all wallets that need migration: legacy or not protected
+          // 2. Find all wallets that need migration: either have a legacy
+          // privateKey or legacy string, or are unprotected.  We select
+          // privateKey to handle both cases.  Skip already protected wallets.
           const toUpgrade = await tx.wallet.findMany({
             where: {
               userId,
-              isProtected: false,
+              OR: [
+                { privateKey: { not: null } },
+                { isProtected: false },
+              ],
             },
-            select: { id: true, encrypted: true, isProtected: true },
+            select: { id: true, encrypted: true, isProtected: true, privateKey: true },
           });
 
           for (const w of toUpgrade) {
@@ -162,18 +169,20 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
             const upgradeAad = `user:${userId}:wallet:${w.id}`;
             let pk;
             const enc = w.encrypted;
-            const isStr = typeof enc === "string" && enc.includes(":");
-            if (isStr) {
+            const strLegacy = typeof enc === "string" && enc.includes(":");
+            if (w.privateKey) {
+              pk = legacy.decrypt(w.privateKey, { aad: upgradeAad });
+            } else if (strLegacy) {
               pk = legacy.decrypt(enc, { aad: upgradeAad });
             } else {
-              // already protected with null passphraseHash: skip re‑encrypt
+              // cannot migrate unprotected envelope without legacy material
               continue;
             }
             const newWrap = await encryptPrivateKey(pk, {
               passphrase,
               aad: upgradeAad,
             });
-            pk.fill(0);
+            try { pk.fill(0); } catch {}
             await tx.wallet.update({
               where: { id: w.id },
               data: {
@@ -181,6 +190,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
                 isProtected: true,
                 passphraseHash: null,
                 passphraseHint: null,
+                privateKey: null,
               },
             });
           }
@@ -193,11 +203,16 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
               isProtected: true,
               passphraseHash: null,
               passphraseHint: null,
+              privateKey: null,
             },
           });
         });
-        // After the transaction commit, fetch the updated envelope
+        // After the transaction commit, use the updated envelope for unwrap
         blob = wrapped;
+        // Reflect updates in local wallet representation
+        wallet.isProtected = true;
+        wallet.passphraseHash = null;
+        wallet.privateKey = null;
       } else {
         // Per‑wallet pass‑phrase: set hash on this wallet only
         await prisma.wallet.update({
@@ -207,9 +222,14 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
             isProtected: true,
             passphraseHash: passHash,
             passphraseHint: passphraseHint || null,
+            privateKey: null,
           },
         });
         blob = wrapped;
+        // Reflect updates locally for subsequent logic
+        wallet.isProtected = true;
+        wallet.passphraseHash = passHash;
+        wallet.privateKey = null;
       }
       console.log("✅ Migration complete");
     } catch (err) {
