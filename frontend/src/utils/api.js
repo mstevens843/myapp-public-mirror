@@ -1,4 +1,9 @@
-const BASE = import.meta.env.VITE_API_BASE_URL;
+// Use relative requests when no explicit API base is configured.  If
+// VITE_API_BASE_URL is undefined (such as during local development with
+// Vite proxy), default to an empty string so fetch will resolve
+// relative to the current origin.  This avoids CORS issues where
+// requests would otherwise be made to http://localhost:5001 directly.
+const BASE = import.meta.env.VITE_API_BASE_URL || "";
 export async function authFetch(url, options = {}) {
   const token = localStorage.getItem("accessToken") || sessionStorage.getItem("accessToken");
 
@@ -90,15 +95,13 @@ export async function checkTokenSafety(mint, options = {}) {
 
 
 export async function getWalletNetworth() {
-  const res = await authFetch(
-    `${import.meta.env.VITE_API_BASE_URL}/api/wallets/networth`
-  );
-
+  // Use the configured API base if present, otherwise default to
+  // relative path.  See BASE definition above for details.
+  const res = await authFetch(`${BASE}/api/wallets/networth`);
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || "Failed to fetch wallet net worth");
   }
-
   return await res.json();
 }
 

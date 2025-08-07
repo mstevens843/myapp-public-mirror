@@ -31,7 +31,15 @@ export default function ManualTradeCard({
 
 }) {
   /* ---- local derived helpers ---- */
-  const isBuyDisabled  = disabled || !config.tokenMint || (safetyResult && !safetyResult.passed);
+  // Determine whether the buy/sell buttons should be disabled.  In the
+  // original implementation trades were blocked when a safety check
+  // failed.  This proved confusing because the safety check is
+  // optional and some users intentionally trade high‑risk tokens.  To
+  // restore manual control we only disable trades when no token mint is
+  // selected or the entire panel is globally disabled.  Safety
+  // information is still surfaced visually via the glow and toast
+  // messages, but it no longer prevents trading.
+  const isBuyDisabled  = disabled || !config.tokenMint;
   const isSellDisabled = disabled || !config.tokenMint;
   const [txStatus, setTxStatus] = useState(null); // null | "success" | "error"
   const [missingMint, setMissingMint] = useState(false);
@@ -115,21 +123,28 @@ useEffect(() => {
       </span>
     </div>
       <div className="flex items-center gap-2">
-    {config.tokenMint && (
-  <span
-    className="flex items-center gap-1 text-xs text-blue-300 truncate max-w-[180px] px-2 py-1 
+    {/* Display the current target token at the top of the card.  We
+       support both `tokenMint` (manual/stealth) and `outputMint`
+       (rotation/chad/turbo).  If none is defined nothing is shown. */}
+    {(() => {
+      const mint = config.tokenMint || config.outputMint;
+      if (!mint) return null;
+      return (
+        <span
+          className="flex items-center gap-1 text-xs text-blue-300 truncate max-w-[180px] px-2 py-1 \
                rounded-full bg-zinc-800 ring-1 ring-blue-500"
-    title={config.tokenMint}
-  >
-    <img
-      src={`https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/${config.tokenMint}/logo.png`}
-      onError={(e) => (e.target.style.display = 'none')}
-      alt="token"
-      className="w-4 h-4 rounded-full"
-    />
-    🎯 {config.tokenMint.slice(0, 6)}...{config.tokenMint.slice(-4)}
-  </span>
-)}
+          title={mint}
+        >
+          <img
+            src={`https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/${mint}/logo.png`}
+            onError={(e) => (e.target.style.display = 'none')}
+            alt="token"
+            className="w-4 h-4 rounded-full"
+          />
+          🎯 {mint.slice(0, 6)}...{mint.slice(-4)}
+        </span>
+      );
+    })()}
   </div>
   {/* Top-right gear button */}
   <div className="absolute right-0 top-0" id="open-settings">
@@ -208,21 +223,24 @@ useEffect(() => {
   )}
 
   {/* ✅ Input itself */}
-  <input
-    ref={mintInputRef}
-    type="text"
-    inputMode="decimal"
-    value={manualBuyAmount}
-    onChange={(e) => {
-      setManualBuyAmount(e.target.value);
-      setMissingMint(false);
-    }}
-    disabled={isBuyDisabled}
-    className={`pl-[2.2rem] pr-12 py-2 w-full bg-zinc-800 border ${
-      missingMint ? "border-yellow-400 ring-1 ring-yellow-400 animate-pulse" : "border-zinc-600"
-    } text-white rounded placeholder-transparent text-sm`}
-    placeholder="Amount" // placeholder still needed to trigger mobile keyboards
-  />
+    <input
+      ref={mintInputRef}
+      type="text"
+      inputMode="decimal"
+      value={manualBuyAmount}
+      onChange={(e) => {
+        setManualBuyAmount(e.target.value);
+        setMissingMint(false);
+      }}
+      // Only disable the amount field when the entire card is disabled.  We
+      // intentionally allow typing an amount even when no token mint is
+      // selected so users can prepare a trade before selecting a token.
+      disabled={disabled}
+      className={`pl-[2.2rem] pr-12 py-2 w-full bg-zinc-800 border ${
+        missingMint ? "border-yellow-400 ring-1 ring-yellow-400 animate-pulse" : "border-zinc-600"
+      } text-white rounded placeholder-transparent text-sm`}
+      placeholder="Amount"
+    />
 
   {/* Max button */}
   <button
@@ -288,7 +306,9 @@ useEffect(() => {
           value={manualSellPercent}
           onChange={(e) => setManualSellPercent(e.target.value)}
           placeholder="%"
-          disabled={isSellDisabled}
+          // Only disable when the card is globally disabled.  Users can
+          // prepare a sell percentage even before selecting a token.
+          disabled={disabled}
           className="w-36 px-3 py-2 bg-zinc-800 border border-zinc-600 text-white rounded"
         />
 

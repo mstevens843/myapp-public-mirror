@@ -114,21 +114,33 @@ const pick = (val, pref, hard) =>
 // Build shared base config
 const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
   const p = cfg._prefs || {};
+  // Extract user/preference slippage values first so we can clamp them below
+  const rawSlippage    = pick(cfg.slippage,  p.slippage,          0.5);
+  const rawMaxSlippage = pick(cfg.maxSlippage, p.defaultMaxSlippage, 0.25);
+
+  // Clamp slippage values into a sane range accepted by the backend. The API
+  // rejects configs with slippage or maxSlippage above ~10%; likewise
+  // negative values are nonsensical.  Keeping these in [0,10] prevents
+  // invalid configuration errors during bot launch (e.g. "invalid config").
+  const clampedSlippage    = Math.min(Math.max(rawSlippage,    0), 10);
+  const clampedMaxSlippage = Math.min(Math.max(rawMaxSlippage, 0), 10);
+
   return {
-  inputMint: cfg.buyWithUSDC ? USDC_MINT : SOL_MINT,
-  monitoredTokens : cfg.useTargetToken && targetToken ? [targetToken] : [],
-  walletId        : activeWallet?.id ?? null,
-  // walletPublicKeys: selectedWallets.map(w => w.publicKey),
-  // walletLabels    : resolvedWallets,
-  amountToSpend   : safeNum(cfg.amountToSpend ?? cfg.amount),
-  snipeAmount     : safeNum(cfg.snipeAmount   ?? cfg.amountToSpend ?? cfg.amount),
-  slippage        : pick(cfg.slippage,  p.slippage,          0.5),
-  interval        : safeNum(cfg.interval, 3),
-  maxTrades       : safeNum(cfg.maxTrades, 5),
-  tokenFeed         : cfg.tokenFeed || "new",   // 🚀 always default to "new"
-  haltOnFailures      : safeNum(cfg.haltOnFailures, 4),
-  autoSell            : cfg.autoSell,   // optional object
-  maxSlippage     : pick(cfg.maxSlippage, p.defaultMaxSlippage, 0.25),
+    inputMint: cfg.buyWithUSDC ? USDC_MINT : SOL_MINT,
+    monitoredTokens : cfg.useTargetToken && targetToken ? [targetToken] : [],
+    walletId        : activeWallet?.id ?? null,
+    // walletPublicKeys: selectedWallets.map(w => w.publicKey),
+    // walletLabels    : resolvedWallets,
+    amountToSpend   : safeNum(cfg.amountToSpend ?? cfg.amount),
+    snipeAmount     : safeNum(cfg.snipeAmount   ?? cfg.amountToSpend ?? cfg.amount),
+    // Use the clamped slippage values instead of the raw ones
+    slippage        : clampedSlippage,
+    interval        : safeNum(cfg.interval, 3),
+    maxTrades       : safeNum(cfg.maxTrades, 5),
+    tokenFeed         : cfg.tokenFeed || "new",   // 🚀 always default to "new"
+    haltOnFailures      : safeNum(cfg.haltOnFailures, 4),
+    autoSell            : cfg.autoSell,   // optional object
+    maxSlippage     : clampedMaxSlippage,
     ...(pick(cfg.priorityFeeLamports, p.defaultPriorityFee, null) != null && {
       priorityFeeLamports: pick(cfg.priorityFeeLamports, p.defaultPriorityFee, 0),
     }),
@@ -142,15 +154,15 @@ const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
       briberyAmount: pick(cfg.briberyAmount, p.briberyAmount, 0),
     }),
 
-  // dryRun          : true,
-  ...(cfg.takeProfit != null && {
-    takeProfit: safeNum(cfg.takeProfit),
-    tpPercent: safeNum(cfg.tpPercent, 100)
-  }),
-  ...(cfg.stopLoss != null && {
-    stopLoss: safeNum(cfg.stopLoss),
-    slPercent: safeNum(cfg.slPercent, 100)
-  }),
+    // dryRun          : true,
+    ...(cfg.takeProfit != null && {
+      takeProfit: safeNum(cfg.takeProfit),
+      tpPercent: safeNum(cfg.tpPercent, 100)
+    }),
+    ...(cfg.stopLoss != null && {
+      stopLoss: safeNum(cfg.stopLoss),
+      slPercent: safeNum(cfg.slPercent, 100)
+    }),
   };
 }
 
