@@ -578,7 +578,11 @@ export async function loadWallet(labels = []) {
       return null; // Return null on error
     }
 
-    return data; // Return wallet data (should be an array)
+    // ⬇️ Derive a backward-compat flag so existing UI checks keep working
+  return data.map((w) => ({
+    ...w,
+    hasPassphrase: !!w.isProtected || !!w.passphraseHash,
+  }));
   } catch (err) {
     console.error("❌ Load wallet failed:", err.message);
     return null; // Return null if fetch fails

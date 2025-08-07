@@ -781,6 +781,8 @@ router.get("/load", authenticate, async (req, res) => {
         label: true,
         publicKey: true,
         createdAt: true,
+        isProtected: true,
+        passphraseHash: true, 
       },
     });
 
@@ -797,6 +799,8 @@ router.get("/load", authenticate, async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+
 
 // TEMP: Delete all wallets for current user
 router.delete("/wipe", authenticate, async (req, res) => {
