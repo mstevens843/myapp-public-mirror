@@ -301,6 +301,232 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   });
 });
 
+/*
+ * Route: POST /setup-protection
+ *
+ * This endpoint sets a passphrase on an unprotected or legacy wallet without
+ * immediately arming it. It performs the same migration logic as the
+ * /arm route but does not require 2FA and does not unlock the wallet.
+ * Clients should call this endpoint when protecting a wallet for the first
+ * time. To subsequently unlock a protected wallet for trading, use the
+ * /arm route which enforces 2FA (when enabled) and creates a timed session.
+ *
+ * Accepts:
+ *   walletId        – the ID of the wallet to protect (required)
+ *   passphrase      – the new passphrase to encrypt the wallet with (required)
+ *   applyToAll      – optional boolean to apply this passphrase to all
+ *                     existing and future wallets (global passphrase)
+ *   passphraseHint  – optional string hint stored on the user or wallet
+ *   forceOverwrite  – optional boolean allowing overwriting existing per‑wallet
+ *                     passphrases during applyToAll; otherwise existing
+ *                     protected wallets are left untouched
+ *
+ * Returns:
+ *   { ok: true, walletId, label, migrated }
+ */
+router.post("/setup-protection", requireAuth, async (req, res) => {
+  const {
+    walletId,
+    passphrase,
+    applyToAll,
+    passphraseHint,
+    forceOverwrite,
+  } = req.body || {};
+
+  // Validate required fields
+  if (!walletId || passphrase === undefined) {
+    console.warn("⛔ Missing walletId / passphrase");
+    return res.status(400).json({ error: "walletId & passphrase required" });
+  }
+
+  const userId = req.user.id;
+
+  // Fetch user and wallet
+  const [user, wallet] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        defaultPassphraseHash: true,
+        passphraseHint: true,
+      },
+    }),
+    prisma.wallet.findFirst({
+      where: { id: walletId, userId },
+      select: {
+        id: true,
+        label: true,
+        encrypted: true,
+        isProtected: true,
+        passphraseHash: true,
+        passphraseHint: true,
+        privateKey: true,
+      },
+    }),
+  ]);
+
+  if (!wallet) {
+    console.warn("⛔ Wallet not found");
+    return res.status(404).json({ error: "Wallet not found" });
+  }
+
+  // Prepare associated data for encryption/decryption
+  const aad = `user:${userId}:wallet:${walletId}`;
+  let blob = wallet.encrypted;
+  let migrating = false;
+
+  // Determine if migration is needed: unprotected or legacy format or legacy key
+  const isLegacyString = typeof blob === "string" && blob.includes(":");
+  const hasLegacyPK = !!wallet.privateKey;
+  // Always migrate if wallet is not yet protected.  Also honour forceOverwrite
+  // to allow replacing existing per‑wallet passphrases when applying to all.
+  const needsMigration = !wallet.isProtected || isLegacyString || hasLegacyPK || forceOverwrite;
+
+  if (!needsMigration) {
+    // Wallet is already protected and no forceOverwrite flag; nothing to do
+    return res.status(400).json({ error: "Wallet already protected" });
+  }
+
+  migrating = true;
+  try {
+    // Decrypt the existing private key if we have legacy material.  For
+    // unprotected wallets with no legacy fields we cannot derive the key and
+    // thus bail out.  In practice wallets should always have either a
+    // legacy privateKey, a legacy encrypted string or be marked as
+    // unprotected envelope with a legacy blob; unprotected wallets without
+    // either are considered unsupported.
+    let pkBuf;
+    if (hasLegacyPK) {
+      pkBuf = legacy.decrypt(wallet.privateKey, { aad });
+    } else if (isLegacyString) {
+      pkBuf = legacy.decrypt(blob, { aad });
+    } else if (!wallet.isProtected) {
+      // Unprotected wallets should always have a legacy privateKey or
+      // string for migration.  If not present, we cannot set up
+      // protection because there is no key material to wrap.
+      throw new Error("Unsupported unprotected wallet format");
+    } else {
+      // Wallet is protected but forceOverwrite implies we may change passphrase;
+      // to do this we need to unwrap the key using the existing passphrase.  We
+      // cannot perform this without the passphrase from the user, so we
+      // decline.  Clients should call /arm to rewrap an existing wallet.
+      throw new Error("Cannot overwrite passphrase without existing key material");
+    }
+
+    // Re-encrypt the private key under the new passphrase
+    const wrapped = await encryptPrivateKey(pkBuf, {
+      passphrase,
+      aad,
+    });
+    // Best-effort wipe plaintext from memory
+    try {
+      pkBuf.fill(0);
+    } catch {}
+
+    // Compute Argon2 hash of new passphrase
+    const passHash = await argon2.hash(passphrase);
+
+    if (applyToAll) {
+      // Apply this passphrase to all wallets.  This will override
+      // per-wallet passphrases.  We ignore forceOverwrite here because
+      // we're explicitly overwriting everything.
+      await prisma.$transaction(async (tx) => {
+        // 1. Update user with global passphrase hash & hint
+        await tx.user.update({
+          where: { id: userId },
+          data: {
+            defaultPassphraseHash: passHash,
+            passphraseHint: passphraseHint || null,
+          },
+        });
+
+        // 2. Find wallets needing migration or unprotected; update them all
+        const toUpgrade = await tx.wallet.findMany({
+          where: {
+            userId,
+            OR: [
+              { privateKey: { not: null } },
+              { isProtected: false },
+            ],
+          },
+          select: { id: true, encrypted: true, isProtected: true, privateKey: true },
+        });
+        for (const w of toUpgrade) {
+          // Skip current wallet; we'll update separately
+          if (w.id === walletId) continue;
+          const upgradeAad = `user:${userId}:wallet:${w.id}`;
+          let pk;
+          const enc = w.encrypted;
+          const strLegacy = typeof enc === "string" && enc.includes(":");
+          if (w.privateKey) {
+            pk = legacy.decrypt(w.privateKey, { aad: upgradeAad });
+          } else if (strLegacy) {
+            pk = legacy.decrypt(enc, { aad: upgradeAad });
+          } else {
+            // Cannot migrate unprotected envelope without legacy material
+            continue;
+          }
+          const newWrap = await encryptPrivateKey(pk, {
+            passphrase,
+            aad: upgradeAad,
+          });
+          try {
+            pk.fill(0);
+          } catch {}
+          await tx.wallet.update({
+            where: { id: w.id },
+            data: {
+              encrypted: newWrap,
+              isProtected: true,
+              passphraseHash: null,
+              passphraseHint: null,
+              privateKey: null,
+            },
+          });
+        }
+
+        // 3. Update the current wallet to use the global passphrase
+        await tx.wallet.update({
+          where: { id: walletId },
+          data: {
+            encrypted: wrapped,
+            isProtected: true,
+            passphraseHash: null,
+            passphraseHint: null,
+            privateKey: null,
+          },
+        });
+      });
+      blob = wrapped;
+      // Reflect updates locally
+      wallet.isProtected = true;
+      wallet.passphraseHash = null;
+      wallet.privateKey = null;
+    } else {
+      // Per-wallet passphrase: update just this wallet
+      await prisma.wallet.update({
+        where: { id: walletId },
+        data: {
+          encrypted: wrapped,
+          isProtected: true,
+          passphraseHash: passHash,
+          passphraseHint: passphraseHint || null,
+          privateKey: null,
+        },
+      });
+      blob = wrapped;
+      wallet.isProtected = true;
+      wallet.passphraseHash = passHash;
+      wallet.privateKey = null;
+    }
+    console.log("✅ Wallet protection setup complete");
+  } catch (err) {
+    console.error("❌ Setup-protection failed:", err.message);
+    return res.status(500).json({ error: err.message || "Wallet protection setup failed" });
+  }
+
+  return res.json({ ok: true, walletId, label: wallet.label, migrated });
+});
+
 
 
 

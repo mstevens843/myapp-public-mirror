@@ -118,6 +118,42 @@ export async function disarmEncryptedWallet({ walletId, twoFactorToken }) {
   });
 }
 
+/**
+ * Set up pass‑phrase protection for a wallet.
+ *
+ * This helper calls the backend endpoint that upgrades an unprotected or
+ * legacy wallet to use envelope encryption with the provided passphrase.
+ * It does not unlock the wallet for trading – after setup you must call
+ * armEncryptedWallet() separately to create a timed session.
+ * 2FA codes are never required when setting up protection.
+ *
+ * @param {Object} params
+ * @param {string} params.walletId – ID of the wallet to protect (required)
+ * @param {string} params.passphrase – new pass‑phrase to encrypt with (required)
+ * @param {boolean} [params.applyToAll] – apply this pass‑phrase to all wallets
+ * @param {string} [params.passphraseHint] – optional hint shown to the user
+ * @param {boolean} [params.forceOverwrite] – overwrite existing pass‑phrases on wallets when applyToAll
+ */
+export async function setupWalletProtection({
+  walletId,
+  passphrase,
+  applyToAll = false,
+  passphraseHint,
+  forceOverwrite = false,
+}) {
+  const payload = { walletId, passphrase };
+  if (applyToAll) payload.applyToAll = true;
+  if (typeof passphraseHint === "string" && passphraseHint.trim() !== "") {
+    payload.passphraseHint = passphraseHint;
+  }
+  if (forceOverwrite) payload.forceOverwrite = true;
+  return httpJson(`/api/arm-encryption/setup-protection`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 // Protected Mode toggle at user-level (requireArmToTrade)
 export async function setRequireArmToTrade(requireArm) {
   return httpJson(`/api/arm-encryption/require-arm`, {

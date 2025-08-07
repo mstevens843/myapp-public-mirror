@@ -28,6 +28,7 @@ import {
   disarmEncryptedWallet,
   setRequireArmToTrade,
   formatCountdown,
+  setupWalletProtection,
 } from "@/utils/encryptedWalletSession";
 
 // Confirmation modal for potentially destructive actions (e.g. overwriting
@@ -459,31 +460,94 @@ useEffect(() => {
     }
     setArmBusy(true);
     try {
-      const res = await armEncryptedWallet({
-        walletId: activeWallet.id,
-        passphrase: armPassphrase,
-        twoFactorToken: armMode !== "firstTime" && require2faArm && is2FAEnabled ? twoFAToken : undefined,
-        ttlMinutes: armDuration,
-        migrateLegacy: armMigrateLegacy,
-        applyToAll: armUseForAll,
-        passphraseHint:
-          armMode === "firstTime" && armPassphraseHint && armPassphraseHint.trim() !== ""
-            ? armPassphraseHint
-            : undefined,
-        forceOverwrite,
-      });
-      setArmStatus({ armed: true, msLeft: (armDuration || res.armedForMinutes) * 60 * 1000 });
-      setWarned(false);
-      setArmModalOpen(false);
-      setArmPassphrase("");
-      setArmPassphraseConfirm("");
-      setTwoFAToken("");
-      setArmUseForAll(false);
-      setForceOverwrite(false);
-      setArmPassphraseHint("");
-      toast.success(`Automation armed for ${res.armedForMinutes} minutes.`);
-      // Optionally refresh wallet data to update hasPassphrase and global flags
-      // (we skip reloading here to keep UI snappy; the next poll will update status)
+      if (armMode === "firstTime") {
+        // For first‑time setup we only protect the wallet; do not arm it yet.
+        await setupWalletProtection({
+          walletId: activeWallet.id,
+          passphrase: armPassphrase,
+          applyToAll: armUseForAll,
+          passphraseHint:
+            armPassphraseHint && armPassphraseHint.trim() !== ""
+              ? armPassphraseHint
+              : undefined,
+          forceOverwrite,
+        });
+        // Update local state to reflect that the wallet is now protected.  We
+        // leave the session unarmed so the user must explicitly unlock.
+        setArmStatus({ armed: false, msLeft: 0 });
+        setWarned(false);
+        setArmModalOpen(false);
+        // Clear form fields
+        setArmPassphrase("");
+        setArmPassphraseConfirm("");
+        setTwoFAToken("");
+        setArmUseForAll(false);
+        setForceOverwrite(false);
+        setArmPassphraseHint("");
+        // Update wallet state locally so that the UI switches to existing mode
+        if (activeWallet) {
+          setActiveWallet((prev) =>
+            prev && prev.id === activeWallet.id
+              ? {
+                  ...prev,
+                  isProtected: true,
+                  hasPassphrase: true,
+                  passphraseHash: prev.passphraseHash || "set",
+                }
+              : prev,
+          );
+          setWallets((prev) =>
+            prev.map((w) =>
+              w.id === activeWallet.id
+                ? {
+                    ...w,
+                    isProtected: true,
+                    hasPassphrase: true,
+                    passphraseHash: w.passphraseHash || "set",
+                  }
+                : w,
+            ),
+          );
+        }
+        // If the user applied the pass‑phrase globally, flag global state
+        if (armUseForAll) {
+          setHasGlobalPassphrase(true);
+        }
+        toast.success(
+          armUseForAll
+            ? "Pass‑phrase applied to all wallets. Your wallets are now protected."
+            : "Wallet protected. Unlock when you’re ready to trade."
+        );
+      } else {
+        const res = await armEncryptedWallet({
+          walletId: activeWallet.id,
+          passphrase: armPassphrase,
+          twoFactorToken:
+            armMode !== "firstTime" && require2faArm && is2FAEnabled
+              ? twoFAToken
+              : undefined,
+          ttlMinutes: armDuration,
+          migrateLegacy: armMigrateLegacy,
+          applyToAll: armUseForAll,
+          passphraseHint: undefined,
+          forceOverwrite,
+        });
+        setArmStatus({
+          armed: true,
+          msLeft: (armDuration || res.armedForMinutes) * 60 * 1000,
+        });
+        setWarned(false);
+        setArmModalOpen(false);
+        setArmPassphrase("");
+        setArmPassphraseConfirm("");
+        setTwoFAToken("");
+        setArmUseForAll(false);
+        setForceOverwrite(false);
+        setArmPassphraseHint("");
+        toast.success(
+          `Automation armed for ${res.armedForMinutes || armDuration} minutes.`
+        );
+      }
     } catch (e) {
       // If the backend signals that 2FA is required (needs2FA) or returns
       // a 403 Forbidden status, show a dedicated toast rather than a generic
@@ -493,9 +557,11 @@ useEffect(() => {
       // both markers as an indicator that 2FA setup is required.
       const msg = e.message || "";
       if (/needs2FA/i.test(msg) || /forbidden/i.test(msg)) {
-        toast.error("Enable 2FA before you can arm this wallet. Visit the Security tab.");
+        toast.error(
+          "Enable 2FA before you can arm this wallet. Visit the Security tab."
+        );
       } else {
-        toast.error(msg || "Failed to arm.");
+        toast.error(msg || (armMode === "firstTime" ? "Failed to set up protection." : "Failed to arm."));
       }
     } finally {
       setArmBusy(false);
