@@ -10,7 +10,7 @@
  *     – Auto-rug check & exit
  */
 
-const prisma = require("../../../../prisma/prisma");
+const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
 const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
@@ -25,11 +25,11 @@ const { sendAlert } = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 
 // 🔐  Arm / envelope-crypto helpers
-const { getDEK } = require("../../../../core/crypto/sessionKeyCache");
+const { getDEK } = require("../../../armEncryption/sessionKeyCache");
 const {
   decryptPrivateKeyWithDEK,
 } = require("../../../armEncryption/envelopeCrypto");
-const { decrypt } = require("../../../../middleware/auth/encryption");
+const { decrypt } = require("../../../middleware/auth/encryption");
 
 // 👻  Ghost utilities
 const {

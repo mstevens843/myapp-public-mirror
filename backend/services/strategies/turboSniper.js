@@ -46,7 +46,7 @@ const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
 
 /* Ghost utils + quote for multi-buy */
-const { prewarmTokenAccount }  = require("../../utils/ghost");
+const { prewarmTokenAccount }  = require("./core/ghost");
 const { Connection }           = require("@solana/web3.js");
 const { getSwapQuote }         = require("../../utils/swap");
 
