@@ -8,31 +8,38 @@ module.exports = async function check2FA(req, res, next) {
 
     if (!user) return res.status(401).json({ error: "Not authenticated" });
 
-    // Load only the fields we care about. We fetch require2faArm here to
-    // determine whether this particular action demands a TOTP code. If a
-    // consumer wishes to enforce login‑time 2FA they should implement that
-    // logic separately (see auth.js). This middleware is primarily used
-    // for protected actions such as arm/extend/disarm.
+    /*
+     * Load only the fields we care about. We fetch both require2faArm and
+     * require2faLogin so that this middleware can be re‑used for endpoints
+     * that need 2FA on arm/disarm actions as well as login flows. If a
+     * consumer wishes to enforce login‑time 2FA they should still call
+     * this middleware but ensure require2faLogin is enabled. When neither
+     * flag is enabled the check is skipped entirely.
+     */
     const dbUser = await prisma.user.findUnique({
       where: { id: user.id },
       select: {
         is2FAEnabled: true,
         twoFactorSecret: true,
         require2faArm: true,
+        require2faLogin: true,
       },
     });
 
-    // If 2FA is not enabled globally or arm‑specific requirement is off,
-    // short‑circuit to next handler. This allows users to enable 2FA but
-    // selectively require it only on login (via require2faLogin) or only
-    // when arming a wallet. When neither is set the check is skipped.
-    if (!dbUser.is2FAEnabled || !dbUser.require2faArm) {
+    // If 2FA is not enabled globally or neither arm nor login requires 2FA,
+    // skip the check. This allows users to enable 2FA but selectively
+    // require it only on login or only when arming a wallet. When neither
+    // flag is set the check is skipped.
+    if (!dbUser.is2FAEnabled || (!dbUser.require2faArm && !dbUser.require2faLogin)) {
       return next();
     }
 
-    // At this point a TOTP code is required to proceed.
+    // At this point a TOTP code is required to proceed. We return a 403
+    // with a needs2FA flag when missing or invalid, as expected by the
+    // frontend. A 403 status signals that the client should prompt the user
+    // to enable or supply 2FA.
     if (!twoFactorToken) {
-      return res.status(400).json({ error: "2FA code required" });
+      return res.status(403).json({ needs2FA: true });
     }
 
     const verified = speakeasy.totp.verify({
@@ -42,7 +49,7 @@ module.exports = async function check2FA(req, res, next) {
     });
 
     if (!verified) {
-      return res.status(403).json({ error: "Invalid 2FA code" });
+      return res.status(403).json({ needs2FA: true });
     }
 
     // ✅ Passed 2FA

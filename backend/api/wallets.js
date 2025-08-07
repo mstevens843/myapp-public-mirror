@@ -659,7 +659,7 @@ router.post("/import-wallet", authenticate, async (req, res) => {
         label,
         publicKey,
         encrypted   : envelope,
-        isProtected : true,
+        isProtected : false,
         // privateKey left NULL on purpose
       },
     });

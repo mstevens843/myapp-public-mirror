@@ -50,6 +50,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     migrateLegacy,
     applyToAll,
     passphraseHint,
+    forceOverwrite,
   } = req.body || {};
   // allow empty string passphrase but not undefined
   if (!walletId || passphrase === undefined) {
@@ -224,7 +225,9 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   }
 
   // ───── 5. Verify pass‑phrase for protected wallets ─────
-  if (!migrating) {
+  const firstTime = !wallet.passphraseHash && !user.defaultPassphraseHash;
+
+  if (!migrating && !firstTime) {
     // Only enforce pass‑phrase matching when wallet is already protected
     let validPass = false;
     if (wallet.passphraseHash) {
@@ -245,6 +248,14 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     if (!validPass) {
       return res.status(401).json({ error: "Invalid passphrase" });
     }
+  }
+  // ✨ First-time adoption: accept the pass-phrase and store its hash
+  if (firstTime) {
+      const newHash = await argon2.hash(passphrase);
+      await prisma.wallet.update({
+        where: { id: wallet.id },
+        data : { passphraseHash: newHash },
+      });
   }
 
   /* ───── 6. Unwrap DEK using provided pass‑phrase ───── */

@@ -75,11 +75,12 @@ export async function getArmStatus(walletId) {
 export async function armEncryptedWallet({
   walletId,
   passphrase,
-  twoFactorToken,                // 2FA code (middleware typically expects req.body.code)
+  twoFactorToken,                // 2FA code (middleware typically expects req.body.twoFactorToken)
   ttlMinutes,           // optional; backend clamps/defaults
   migrateLegacy = false, // set true to upgrade legacy colon-hex on the fly
   applyToAll = false,
   passphraseHint,
+  forceOverwrite = false,
 }) {
   const payload = {
     walletId,
@@ -93,6 +94,7 @@ export async function armEncryptedWallet({
   if (typeof passphraseHint === 'string' && passphraseHint.trim() !== '') {
     payload.passphraseHint = passphraseHint;
   }
+  if (forceOverwrite) payload.forceOverwrite = true;
   return httpJson(`/api/arm-encryption/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

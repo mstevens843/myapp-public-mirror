@@ -115,8 +115,12 @@ router.post("/generate-vault", async (req, res) => {
       // 1. Create Vault Keypair
       const keypair = Keypair.generate();
       const publicKey = keypair.publicKey.toBase58();
-      const privateKey = bs58.encode(keypair.secretKey);
-      const encryptedPrivateKey = encrypt(privateKey);
+      const tempPass = crypto.randomBytes(16).toString("hex");
+      const encrypted = await encryptPrivateKey(Buffer.from(wallet.secretKey), {
+        passphrase: tempPass,
+         aad       : `user:${userId}:wallet:vault`
+       });
+
 
       // 2. Create User
       const userId = uuidv4();
@@ -134,7 +138,9 @@ router.post("/generate-vault", async (req, res) => {
         data: {
           label: "starter",
           publicKey,
-          privateKey: encryptedPrivateKey,
+          encrypted  : encrypted,
+          isProtected: false,
+          passphraseHash: null,
           userId: user.id,
         },
       });
@@ -739,14 +745,19 @@ if (error) {
       // Generate wallet and associate it
       const wallet = Keypair.generate();
       const publicKey = wallet.publicKey.toBase58();
-      const privateKey = bs58.encode(wallet.secretKey);
-      const encryptedPrivateKey = encrypt(privateKey);
+      const tempPass = crypto.randomBytes(16).toString("hex");
+      const encrypted = await encryptPrivateKey(Buffer.from(wallet.secretKey), {
+         passphrase: tempPass,
+         aad       : `user:${user.id}:wallet:starter`
+       });
 
       const createdWallet = await prisma.wallet.create({
         data: {
           label: "starter",
           publicKey,
-          privateKey: encryptedPrivateKey,
+          encrypted  : encrypted,
+          isProtected: false,
+          passphraseHash: null,
           userId: user.id,
         },
       });
@@ -1166,55 +1177,60 @@ router.post("/refresh", async (req, res) => {
 });
 
 
+// Generate a new wallet (envelope-encrypted, no extra side-effects)
 router.post("/wallet/generate", requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
     const { label } = req.body;
 
-    const wallet = Keypair.generate();
+    const wallet    = Keypair.generate();
     const publicKey = wallet.publicKey.toBase58();
-    const privateKey = bs58.encode(wallet.secretKey);
-    const encryptedPrivateKey = encrypt(privateKey);
+    const tempPass  = crypto.randomBytes(16).toString("hex");
+
+    const encrypted = await encryptPrivateKey(Buffer.from(wallet.secretKey), {
+      passphrase: tempPass,
+      aad: `user:${userId}:wallet:TBD`
+    });
 
     if (label) {
-      const duplicateLabel = await prisma.wallet.findFirst({
-        where: { userId, label }
-      });
-      if (duplicateLabel) {
-        console.log(`⚠️ Label '${label}' already used by this user.`);
-        return res.status(400).json({ error: "Label already exists. Choose a different name." });
-      }
+      const dup = await prisma.wallet.findFirst({ where: { userId, label } });
+      if (dup) return res.status(400).json({ error: "Label already exists." });
     }
 
     const newWallet = await prisma.wallet.create({
       data: {
+        userId,
         label: label || "New Wallet",
         publicKey,
-        privateKey: encryptedPrivateKey,
-        userId,
+        encrypted,
+        isProtected: false,
+        passphraseHash: null,
       },
     });
 
-    await prisma.user.update({
-      where: { id: userId },
-      data: {
-        activeWalletId: {
-          set: (await prisma.user.findUnique({ where: { id: userId } })).activeWalletId || newWallet.id
-        }
-      }
+    const user = await prisma.user.findUnique({ where: { id: userId } });
+
+    let activeWalletId = user.activeWalletId;
+
+    if (!activeWalletId) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { activeWalletId: newWallet.id }
+      });
+      activeWalletId = newWallet.id;
+    }
+
+    return res.json({
+      wallet: newWallet,
+      activeWalletId
     });
 
-    res.json({ wallet: newWallet, activeWalletId: newWallet.id });
-
   } catch (err) {
-    if (err.code === 'P2002' && err.meta?.target?.includes('userId_label')) {
-      console.error("🚫 Duplicate label caught by Prisma constraint.");
-      return res.status(400).json({ error: "Label already exists. Choose a different name." });
-    }
-    console.error("🔥 Unexpected wallet generation error:", err.stack);
-    res.status(500).json({ error: "Failed to generate wallet." });
+    console.error("🔥 Wallet generate error:", err.stack || err);
+    return res.status(500).json({ error: "Failed to generate wallet." });
   }
 });
+
 
 
 

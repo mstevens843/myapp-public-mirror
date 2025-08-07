@@ -29,6 +29,12 @@ import {
   setRequireArmToTrade,
   formatCountdown,
 } from "@/utils/encryptedWalletSession";
+
+// Confirmation modal for potentially destructive actions (e.g. overwriting
+// pass‑phrases on other wallets). We import the helper which renders a
+// ConfirmModal on demand and returns a promise resolved with the user's
+// choice. See src/hooks/useConfirm.jsx for implementation.
+import { openConfirmModal } from "@/hooks/useConfirm";
 import { useLocation } from "react-router-dom";
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
@@ -79,6 +85,55 @@ const MyAccountTab = () => {
   const [armBusy, setArmBusy] = useState(false);
   const [extendBusy, setExtendBusy] = useState(false);
   const [disarmBusy, setDisarmBusy] = useState(false);
+
+  // Additional state for pass‑phrase confirmation on first arm and
+  // destructive overwrites
+  const [armPassphraseConfirm, setArmPassphraseConfirm] = useState("");
+  const [forceOverwrite, setForceOverwrite] = useState(false);
+
+  /* ───────── Derived helpers ───────── */
+  // Determine whether the currently active wallet has its own pass‑phrase.
+  // On first arm (walletHasPassphrase = false and no global passphrase), the
+  // UI shows a confirmation field and an option to apply to all. If either
+  // the wallet already has a hash or the user has a global hash we consider
+  // the wallet protected and show unlock mode.
+  const activeWalletHasPassphrase = !!activeWallet?.hasPassphrase;
+  const armMode = (!activeWalletHasPassphrase && !hasGlobalPassphrase) ? "firstTime" : "existing";
+
+  /**
+   * handleUseForAllToggle
+   * Invoked when the user toggles the "Use for ALL wallets" checkbox. If
+   * the checkbox is being turned on and there are existing wallets with
+   * custom pass‑phrases, a confirmation dialog is shown. If the user
+   * proceeds we set forceOverwrite=true so that the backend overwrites
+   * those wallets; otherwise we revert the toggle. When toggling off or
+   * when no custom wallets exist, forceOverwrite is reset.
+   *
+   * @param {boolean} checked - The new state of the checkbox
+   */
+  const handleUseForAllToggle = async (checked) => {
+    if (checked) {
+      // Count wallets (excluding active) that already have a custom hash. We
+      // rely on the sanitized `hasPassphrase` field from /wallets/load.
+      const customCount = wallets.filter((w) => w.id !== activeWallet?.id && w.hasPassphrase).length;
+      if (customCount > 0) {
+        const ok = await openConfirmModal(
+          `This will overwrite the pass‑phrase on ${customCount} wallet${customCount > 1 ? 's' : ''}. Proceed?`
+        );
+        if (ok) {
+          setArmUseForAll(true);
+          setForceOverwrite(true);
+        } else {
+          setArmUseForAll(false);
+          setForceOverwrite(false);
+        }
+        return;
+      }
+    }
+    // Either toggling off or no custom wallets
+    setArmUseForAll(checked);
+    setForceOverwrite(false);
+  };
 
   /* ───────── Helpers ───────── */
   const { type, phantomPublicKey } = useUser();
@@ -350,35 +405,73 @@ useEffect(() => {
 
   const handleOpenArm = () => {
     if (!activeWallet?.id) return toast.error("No active wallet selected.");
-    if (!is2FAEnabled) {
-      return toast.error("Enable 2FA first to arm trading.");
+    // When arming we require 2FA only if the user has enabled 2FA and
+    // require2faArm is on. Simply enabling 2FA isn't enough; the arm
+    // requirement gate is a separate toggle.
+    if (require2faArm && !is2FAEnabled) {
+      return toast.error("Enable 2FA before you can arm this wallet. Go to the Security tab to set up 2FA.");
     }
     setArmModalOpen(true);
   };
 
   const handleArm = async () => {
-    if (!armPassphrase) return toast.error("Enter your wallet passphrase.");
+    // Basic validation: pass‑phrase is required. On first arm ensure the
+    // confirmation matches.
+    if (!armPassphrase) {
+      return toast.error("Enter your wallet pass‑phrase.");
+    }
+    if (armMode === "firstTime") {
+      if (!armPassphraseConfirm) {
+        return toast.error("Confirm your pass‑phrase.");
+      }
+      if (armPassphrase !== armPassphraseConfirm) {
+        return toast.error("Pass‑phrases do not match.");
+      }
+    }
+    // If 2FA is required but no token provided, abort early.
+    if (require2faArm && is2FAEnabled && !twoFAToken) {
+      return toast.error("Enter your 2FA code.");
+    }
     setArmBusy(true);
     try {
-       const res = await armEncryptedWallet({
-         walletId: activeWallet.id,
-         passphrase: armPassphrase,
-         twoFactorToken: twoFAToken,
-         ttlMinutes: armDuration,
-         migrateLegacy: armMigrateLegacy,
-         applyToAll: armUseForAll,
-         passphraseHint: armPassphraseHint && armPassphraseHint.trim() !== '' ? armPassphraseHint : undefined,
-       });
-      setArmStatus({ armed: true, msLeft: armDuration * 60 * 1000 });
+      const res = await armEncryptedWallet({
+        walletId: activeWallet.id,
+        passphrase: armPassphrase,
+        twoFactorToken: require2faArm && is2FAEnabled ? twoFAToken : undefined,
+        ttlMinutes: armDuration,
+        migrateLegacy: armMigrateLegacy,
+        applyToAll: armUseForAll,
+        passphraseHint:
+          armMode === "firstTime" && armPassphraseHint && armPassphraseHint.trim() !== ""
+            ? armPassphraseHint
+            : undefined,
+        forceOverwrite,
+      });
+      setArmStatus({ armed: true, msLeft: (armDuration || res.armedForMinutes) * 60 * 1000 });
       setWarned(false);
       setArmModalOpen(false);
       setArmPassphrase("");
+      setArmPassphraseConfirm("");
       setTwoFAToken("");
       setArmUseForAll(false);
+      setForceOverwrite(false);
       setArmPassphraseHint("");
       toast.success(`Automation armed for ${res.armedForMinutes} minutes.`);
+      // Optionally refresh wallet data to update hasPassphrase and global flags
+      // (we skip reloading here to keep UI snappy; the next poll will update status)
     } catch (e) {
-      toast.error(e.message || "Failed to arm.");
+      // If the backend signals that 2FA is required (needs2FA) or returns
+      // a 403 Forbidden status, show a dedicated toast rather than a generic
+      // error. The underlying httpJson helper surfaces only the message,
+      // but our 2FA middleware returns an object without an `error` field,
+      // which results in the generic status text "Forbidden". We treat
+      // both markers as an indicator that 2FA setup is required.
+      const msg = e.message || "";
+      if (/needs2FA/i.test(msg) || /forbidden/i.test(msg)) {
+        toast.error("Enable 2FA before you can arm this wallet. Visit the Security tab.");
+      } else {
+        toast.error(msg || "Failed to arm.");
+      }
     } finally {
       setArmBusy(false);
     }
@@ -658,60 +751,88 @@ useEffect(() => {
         {/* Arm Modal */}
         <Dialog open={armModalOpen} onOpenChange={setArmModalOpen}>
           <DialogContent>
-            <h3 className="text-xl font-bold mb-2">Start Secure Session</h3>
+            <h3 className="text-xl font-bold mb-2">
+              {armMode === "firstTime" ? "Set Wallet Pass‑phrase" : "Unlock Wallet"}
+            </h3>
             <p className="text-sm text-zinc-400 mb-4">
-              Enter your passphrase {is2FAEnabled ? "and 2FA code " : ""}to enable
-              trading for the selected duration. This session auto-expires.
+              {armMode === "firstTime"
+                ? "Enter a new pass‑phrase for this wallet. You will never see this pass‑phrase again. Store it safely."
+                : `Enter your pass‑phrase${require2faArm && is2FAEnabled ? " and 2FA code" : ""} to enable trading for the selected duration.`}
             </p>
-
             <div className="space-y-3">
               <label className="text-sm">Active Wallet</label>
               <div className="w-full p-2 rounded bg-zinc-900 border border-zinc-700 text-emerald-400 text-xs font-mono">
                 {activeWallet?.label || `ID#${activeWallet?.id || "—"}`}
               </div>
 
-              <label className="text-sm">Passphrase</label>
-              <input
-                type="password"
-                placeholder="Wallet passphrase"
-                value={armPassphrase}
-                onChange={(e) => setArmPassphrase(e.target.value)}
-                className="w-full p-2 rounded text-black"
-              />
-
-              {/* Global pass‑phrase option */}
-              {hasGlobalPassphrase ? (
-                <div className="flex flex-col gap-1">
-                  <label className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" checked disabled />
-                    Use this pass‑phrase for all my current and future wallets
-                  </label>
-                  <p className="text-xs text-zinc-500">
-                    You have a global wallet pass‑phrase set. New wallets will inherit it automatically.
-                  </p>
-                </div>
-              ) : (
-                <label className="flex items-center gap-2 text-sm">
+              {armMode === "firstTime" && (
+                <>
+                  <label className="text-sm">Pass‑phrase</label>
                   <input
-                    type="checkbox"
-                    checked={armUseForAll}
-                    onChange={(e) => setArmUseForAll(e.target.checked)}
+                    type="password"
+                    placeholder="Wallet pass‑phrase"
+                    value={armPassphrase}
+                    onChange={(e) => setArmPassphrase(e.target.value)}
+                    className="w-full p-2 rounded text-black"
                   />
-                  Use this pass‑phrase for all my current and future wallets
-                </label>
+                  <label className="text-sm">Confirm Pass‑phrase</label>
+                  <input
+                    type="password"
+                    placeholder="Confirm pass‑phrase"
+                    value={armPassphraseConfirm}
+                    onChange={(e) => setArmPassphraseConfirm(e.target.value)}
+                    className="w-full p-2 rounded text-black"
+                  />
+                  {/* Global pass‑phrase option on first arm */}
+                  {hasGlobalPassphrase ? (
+                    <div className="flex flex-col gap-1">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input type="checkbox" checked disabled />
+                        Use this pass‑phrase for all my current and future wallets
+                      </label>
+                      <p className="text-xs text-zinc-500">
+                        New wallets will inherit your saved pass‑phrase automatically.
+                      </p>
+                    </div>
+                  ) : (
+                    <label className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={armUseForAll}
+                        onChange={(e) => handleUseForAllToggle(e.target.checked)}
+                      />
+                      Use this pass‑phrase for all my current and future wallets
+                    </label>
+                  )}
+                  <label className="text-sm">Pass‑phrase Hint (optional)</label>
+                  <input
+                    type="text"
+                    placeholder="Hint (optional)"
+                    value={armPassphraseHint}
+                    onChange={(e) => setArmPassphraseHint(e.target.value)}
+                    className="w-full p-2 rounded text-black"
+                  />
+                  <p className="text-xs text-amber-400">
+                    ⚠️ You will never see this pass‑phrase again. Save it in a password manager.
+                  </p>
+                </>
               )}
 
-              {/* Pass‑phrase hint */}
-              <label className="text-sm">Pass‑phrase Hint (optional)</label>
-              <input
-                type="text"
-                placeholder="Hint (optional)"
-                value={armPassphraseHint}
-                onChange={(e) => setArmPassphraseHint(e.target.value)}
-                className="w-full p-2 rounded text-black"
-              />
+              {armMode === "existing" && (
+                <>
+                  <label className="text-sm">Pass‑phrase</label>
+                  <input
+                    type="password"
+                    placeholder="Wallet pass‑phrase"
+                    value={armPassphrase}
+                    onChange={(e) => setArmPassphrase(e.target.value)}
+                    className="w-full p-2 rounded text-black"
+                  />
+                </>
+              )}
 
-              {is2FAEnabled && (
+              {/* 2FA Code: show for both modes when required */}
+              {require2faArm && is2FAEnabled && (
                 <>
                   <label className="text-sm">2FA Code</label>
                   <input
@@ -724,6 +845,7 @@ useEffect(() => {
                 </>
               )}
 
+              {/* Duration selector common to both modes */}
               <label className="text-sm">Duration</label>
               <select
                 className="w-full p-2 rounded text-black"
@@ -735,14 +857,17 @@ useEffect(() => {
                 <option value={480}>8 hours</option>
               </select>
 
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={armMigrateLegacy}
-                  onChange={(e) => setArmMigrateLegacy(e.target.checked)}
-                />
-                Upgrade legacy wallet encryption during this arm
-              </label>
+              {/* Legacy migration option (hide on first arm) */}
+              {armMode !== "firstTime" && (
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={armMigrateLegacy}
+                    onChange={(e) => setArmMigrateLegacy(e.target.checked)}
+                  />
+                  Upgrade legacy wallet encryption during this arm
+                </label>
+              )}
 
               <div className="flex justify-end gap-2 pt-2">
                 <Button variant="ghost" onClick={() => setArmModalOpen(false)}>
@@ -753,7 +878,11 @@ useEffect(() => {
                   onClick={handleArm}
                   disabled={armBusy}
                 >
-                  {armBusy ? "Arming…" : "Arm"}
+                  {armBusy
+                    ? "Arming…"
+                    : armMode === "firstTime"
+                    ? "Set & Arm"
+                    : "Unlock"}
                 </Button>
               </div>
             </div>
