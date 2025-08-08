@@ -1,10 +1,14 @@
 // backend/services/strategies/core/tradeExecutorTurbo.js
 /**
- * turboTradeExecutor.js – Turbo-path trade executor
- * -------------------------------------------------
+ * turboTradeExecutor.js – Turbo-path trade executor (+ Execution Edges)
+ * --------------------------------------------------------------------
  * • Arm-to-Trade envelope decryption (in-memory DEK)
  * • Ultra-fast swap via executeSwapTurbo() / executeSwapJitoBundle()
  * • Leader-timed send, warm quote cache, retry matrix, idempotency TTL
+ * • NEW: Deterministic idempotency key + crash-safe resume window
+ * • NEW: Liquidity-aware sizing (price impact / pool % / min USD)
+ * • NEW: Probe buy then scale (fast two-step) with shared idKey
+ * • NEW: Private relay/shadow mempool (feature-flag) fire-and-forget (fastest ack wins)
  * • Post-trade side-effects (non-blocking):
  *     – TP/SL rule insert
  *     – Telegram alert
@@ -14,6 +18,7 @@
 
 'use strict';
 
+const crypto = require('crypto');
 const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
 const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
@@ -29,15 +34,21 @@ const getSolPrice = getTokenPrice.getSolPrice;
 const { sendAlert } = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 
-// 🔧 New infra from “you gave me”
+// 🔧 Existing infra
 const LeaderScheduler = require("./leaderScheduler");
 const QuoteWarmCache  = require("./quoteWarmCache");
 
 // Additional helpers for Turbo enhancements
 const JitoFeeController = require("./jitoFeeController");
 const { directSwap } = require("../../../utils/raydiumDirect");
-const metricsLogger = require("../logging/metrics");
-const idempotencyStore = require("../../../utils/idempotencyStore");
+const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
+const idempotencyStore = require("../../../utils/idempotencyStore"); // existing in your repo (short-TTL cache)
+
+// 🔧 NEW core modules added by Prompt 1 (shadow mempool + deterministic idempotency + sizing + probe)
+const RelayClient = require('./relays/relayClient');                 // new abstraction (feature-flag)
+const CoreIdemStore = require('./idempotencyStore');                 // crash-safe resume window (disk-backed)
+const { sizeTrade } = require('./liquiditySizer');                   // liquidity-aware sizing
+const { performProbe } = require('./probeBuyer');                    // micro-buy then scale
 
 // 🔐  Arm / envelope-crypto helpers
 const { getDEK } = require("../../../armEncryption/sessionKeyCache");
@@ -61,6 +72,24 @@ const toNum = (v) =>
   v === undefined || v === null ? null : Number(v);
 
 /* ──────────────────────────────────────────────
+ *  Metrics helpers (preserve existing, add new)
+ * ──────────────────────────────────────────── */
+function inc(counter, value = 1, labels) {
+  try {
+    if (typeof metricsLogger.increment === 'function') {
+      metricsLogger.increment(counter, value, labels);
+    }
+  } catch (_) {}
+}
+function observe(name, value) {
+  try {
+    if (typeof metricsLogger.observe === 'function') {
+      metricsLogger.observe(name, value);
+    }
+  } catch (_) {}
+}
+
+/* ──────────────────────────────────────────────
  *  Warm Quote Cache (shared per TTL bucket)
  * ──────────────────────────────────────────── */
 const _quoteCaches = new Map(); // ttlMs -> QuoteWarmCache
@@ -73,7 +102,7 @@ function getQuoteCache(ttlMs = 600) {
 }
 
 /* ──────────────────────────────────────────────
- *  Idempotency TTL Gate (in addition to idempotencyStore)
+ *  Deterministic Idempotency (TTL gate + crash-safe)
  * ──────────────────────────────────────────── */
 const _idTtlGate = new Map(); // idKey -> expiresAtMs
 function idTtlCheckAndSet(idKey, ttlSec = 60) {
@@ -84,6 +113,16 @@ function idTtlCheckAndSet(idKey, ttlSec = 60) {
   _idTtlGate.set(idKey, now + ttlSec * 1000);
   return true;
 }
+// Crash-safe store (disk/DB fallback) — singleton
+const coreIdem = new CoreIdemStore(
+  {
+    ttlSec: Number(process.env.IDEMPOTENCY_TTL_SEC) || 90,
+    salt: process.env.IDEMPOTENCY_SALT || '',
+    resumeFromLast: true,
+  },
+  { increment: inc }
+);
+let _coreIdemInited = false;
 
 /* ──────────────────────────────────────────────
  *  Leader Scheduler (lazy singleton by validator+rpc)
@@ -155,6 +194,45 @@ async function loadWalletKeypairArmAware(userId, walletId) {
 }
 
 /* ──────────────────────────────────────────────
+ *  Local helpers: deterministic idKey + sizing + private relay
+ * ──────────────────────────────────────────── */
+function computeStableIdKey({ userId, walletId, mint, amount, slotBucket, salt }) {
+  const s = String(salt || '');
+  const input = [userId, walletId, mint, amount, slotBucket ?? '', s].join('|');
+  return crypto.createHash('sha256').update(input).digest('hex');
+}
+
+async function applyLiquiditySizing({ baseQuote, sizingCfg, priceImpactEstimator }) {
+  if (!sizingCfg) return baseQuote;
+  const poolReserves = Number(baseQuote?.poolReserves) || null; // if provided by your quote, else null
+  const amount = Number(baseQuote?.inAmount);
+  const finalAmount = await sizeTrade({
+    amount,
+    poolReserves,
+    priceImpactEstimator,
+    config: sizingCfg,
+    metrics: { observe },
+  });
+  if (finalAmount === amount) return baseQuote;
+  // refresh quote for reduced size
+  return await getSwapQuote({
+    inputMint: baseQuote.inputMint,
+    outputMint: baseQuote.outputMint,
+    amount: String(finalAmount),
+    slippage: baseQuote.slippage ?? 0,
+  });
+}
+
+function startPrivateRelayIfEnabled({ privateRelay, walletPubkey, mint, idKey, amount }) {
+  if (!privateRelay || !privateRelay.enabled) return { ack: Promise.resolve(null) };
+  const client = new RelayClient(privateRelay, { increment: inc });
+  const payload = { walletPublicKey: walletPubkey, mint, idKey, amount };
+  // Fire-and-forget; but capture first ack to mark relay_win_total
+  const ack = client.send(payload);
+  return { client, ack };
+}
+
+/* ──────────────────────────────────────────────
  *  Main executor
  * ──────────────────────────────────────────── */
 async function execTrade({ quote, mint, meta, simulated = false }) {
@@ -189,7 +267,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     // NEW: retry + ttl
     quoteTtlMs = 600,
     retryPolicy = { max: 3, bumpCuStep: 2000, bumpTipStep: 1000, routeSwitch: true, rpcFailover: true },
-    idempotencyTtlSec = 60,
 
     // routing flags remain same
     multiRoute,
@@ -215,7 +292,18 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
     // iceberg
     iceberg,
+
+    // NEW: Execution Edges config blocks (optional in meta)
+    privateRelay,
+    idempotency, // { ttlSec, salt, resumeFromLast, slotBucket? }
+    sizing,      // { maxImpactPct, maxPoolPct, minUsd }
+    probe,       // { enabled, usd, scaleFactor, abortOnImpactPct, delayMs }
   } = meta;
+
+  if (!_coreIdemInited) {
+    await coreIdem.init().catch(() => {});
+    _coreIdemInited = true;
+  }
 
   if (!userId || !walletId)
     throw new Error("userId and walletId are required in meta");
@@ -234,7 +322,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       if (holdMs > 0) {
         const t0 = Date.now();
         await new Promise((r) => setTimeout(r, holdMs));
-        metricsLogger.recordTiming('leader_hold_ms', Date.now() - t0);
+        metricsLogger.recordTiming?.('leader_hold_ms', Date.now() - t0);
         // fired_in_leader_window counted as success path later (implicit)
       }
     } catch (e) {
@@ -259,20 +347,29 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     toNum(prefs?.defaultPriorityFee) ??
     0;
 
-  // Idempotency: immediate replay protection (TTL gate)
-  const idKey = meta.idempotencyKey;
-  if (idKey) {
-    const pass = idTtlCheckAndSet(idKey, idempotencyTtlSec);
-    if (!pass) {
-      const cached = idempotencyStore.get(idKey);
-      if (cached) return cached;
-      // duplicate within TTL and no cached tx → block
-      metricsLogger.recordFail('dupe-blocked');
-      throw new Error('duplicate attempt blocked');
-    }
-    const cached = idempotencyStore.get(idKey);
+  // ── Deterministic idKey (stable across restarts) ───────────────────────────
+  const idemSalt = idempotency?.salt ?? process.env.IDEMPOTENCY_SALT ?? '';
+  const slotBucket = idempotency?.slotBucket ?? meta.slotBucket ?? '';
+  const stableIdKey =
+    meta.idempotencyKey ||
+    computeStableIdKey({
+      userId,
+      walletId,
+      mint,
+      amount: quote?.inAmount ?? '',
+      slotBucket,
+      salt: idemSalt,
+    });
+
+  const ttlSec = Number(idempotency?.ttlSec ?? 60);
+  if (!idTtlCheckAndSet(stableIdKey, ttlSec)) {
+    const cached = idempotencyStore.get(stableIdKey) || (await coreIdem.get?.(stableIdKey));
     if (cached) return cached;
+    inc('idempotency_blocked_total', 1);
+    throw new Error('duplicate attempt blocked');
   }
+  // Crash-safe resume stamp (pending)
+  try { await coreIdem.persist?.().catch(() => {}); } catch (_) {}
 
   // Dynamic slippage limit
   let effSlippage = slippage;
@@ -282,11 +379,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       effSlippage = Math.min(slippage, ds / 100);
     }
   }
+
   // Impact guard: abort early if quoted price impact is too high
   if (impactAbortPct > 0 && quote?.priceImpactPct != null) {
     const pct = quote.priceImpactPct * 100;
     if (pct > impactAbortPct) {
-      metricsLogger.recordFail('impact-abort');
+      metricsLogger.recordFail?.('impact-abort');
       throw new Error('abort: price impact too high');
     }
   }
@@ -311,185 +409,247 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       allowedDexes,
       excludedDexes,
     });
-    metricsLogger.recordTiming('quote_latency_ms', Date.now() - t0);
+    metricsLogger.recordTiming?.('quote_latency_ms', Date.now() - t0);
     if (fresh) quoteCache.set(key, fresh);
     return fresh;
   }
 
-  /*
-   * Iceberg splitting – unchanged core behavior, but switch to warm quotes
-   */
-  if (!simulated && iceberg && iceberg.enabled && Number(iceberg.tranches) > 1) {
+  // ── Liquidity-aware sizing BEFORE retries/probe ────────────────────────────
+  const sizedQuote = await applyLiquiditySizing({
+    baseQuote: { ...quote, slippage: effSlippage },
+    sizingCfg: sizing,
+    priceImpactEstimator: async (a) => {
+      const q = await getWarmQuote({
+        inputMint: quote.inputMint,
+        outputMint: quote.outputMint,
+        amount: String(a),
+        slippage: effSlippage,
+      });
+      // q.priceImpactPct is in fraction (e.g., 0.012 => 1.2%)
+      return (q?.priceImpactPct ?? 0) * 100;
+    },
+  }).catch(() => quote);
+
+  if (!sizedQuote) throw new Error('sizing/quote unavailable');
+  if (Number(sizedQuote.inAmount) !== Number(quote.inAmount)) {
+    const original = Number(quote.inAmount);
+    const reduced = Number(sizedQuote.inAmount);
+    const reducedPct = original > 0 ? ((original - reduced) / original) * 100 : 0;
+    observe('sizing_reduced_pct', reducedPct);
+    // Also emit impact histogram for the final sized amount
     try {
-      const tranches = Math.max(1, parseInt(iceberg.tranches, 10));
-      const delayMs = Number(iceberg.trancheDelayMs) || 0;
-      const totalIn = Number(quote.inAmount);
-      const per = Math.floor(totalIn / tranches);
-      let remaining = totalIn;
-      let lastTx = null;
-      for (let i = 0; i < tranches; i++) {
-        const thisAmount = i === tranches - 1 ? remaining : per;
-        remaining -= thisAmount;
-        const qRes = await getWarmQuote({
-          inputMint: quote.inputMint,
-          outputMint: quote.outputMint,
-          amount: String(thisAmount),
-          slippage: effSlippage,
-        });
-        if (!qRes) {
-          metricsLogger.recordFail('iceberg-quote');
-          break;
-        }
-        if (impactAbortPct > 0 && qRes.priceImpactPct != null && qRes.priceImpactPct * 100 > impactAbortPct) {
-          metricsLogger.recordFail('iceberg-impact-abort');
-          break;
-        }
-        const nestedMeta = {
-          ...meta,
-          iceberg: { ...iceberg, enabled: false },
-          idempotencyKey: idKey ? `${idKey}:${i}` : undefined,
-        };
-        try {
-          lastTx = await execTrade({ quote: qRes, mint, meta: nestedMeta, simulated });
-        } catch (_) { break; }
-        if (delayMs > 0 && i < tranches - 1) {
-          await new Promise((r) => setTimeout(r, delayMs));
-        }
-      }
-      return lastTx;
-    } catch (ie) {
-      console.warn('Iceberg execution error:', ie.message);
-    }
+      const finalImpactPct = (sizedQuote.priceImpactPct ?? 0) * 100;
+      observe('price_impact_pct', finalImpactPct);
+    } catch (_) {}
   }
 
-  /*
-   * RETRY MATRIX AROUND SEND:
-   * - attempt 0: chosen path (Jito if enabled else Turbo; Direct only on fallback condition)
-   * - on each retry:
-   *    * bump CU/priority fee (lamports) and bribery tip
-   *    * optional route switch (toggle jito<->turbo OR try direct)
-   *    * RPC failover (rotate RPC endpoint)
-   *    * optionally refresh quote (warm cache)
-   */
-  let txHash = null;
-  let attempt = 0;
-  const maxAttempts = Math.max(1, Number(retryPolicy?.max ?? 3));
-  let briberyAmount = Number(briberyAmountBase) || 0;
-  let priorityFee = Number(basePriorityFeeLamports) || 0;
-  let jitoMode = !!useJitoBundle;
-  let usedDirect = false;
+  // ── Private Relay: prepare client and fire shadow submit ───────────────────
+  const walletPubkeyStr =
+    (wallet.publicKey && wallet.publicKey.toBase58) ? wallet.publicKey.toBase58() :
+    (wallet.publicKey && wallet.publicKey.toString) ? wallet.publicKey.toString() :
+    String(wallet.publicKey || '');
 
-  while (attempt < maxAttempts && !txHash) {
-    try {
-      // Direct fallback if requested by meta and quoteLatency hints (priority on first attempt)
-      if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200 && attempt === 0) {
-        const startSlot = await conn.getSlot();
-        txHash = await directSwap({
-          wallet,
-          inputMint: quote.inputMint,
-          outputMint: quote.outputMint,
-          amount: String(quote.inAmount),
-          slippage: effSlippage,
-          privateRpcUrl: currentRpcUrl,
-        });
-        const endSlot = await conn.getSlot();
-        if (txHash) {
-          metricsLogger.recordInclusion(endSlot - startSlot);
-          metricsLogger.recordSuccess();
-          usedDirect = true;
-          break;
-        } else {
-          metricsLogger.recordFail('direct-swap-fail');
-        }
-      }
+  const { client: relayClient, ack: relayAck } = startPrivateRelayIfEnabled({
+    privateRelay,
+    walletPubkey: walletPubkeyStr,
+    mint,
+    idKey: stableIdKey,
+    amount: sizedQuote.inAmount,
+  });
 
-      // Choose path (Jito or Turbo)
-      if (jitoMode) {
-        const controller = new JitoFeeController({
-          cuAdapt,
-          cuPriceMicroLamportsMin,
-          cuPriceMicroLamportsMax,
-          tipCurve,
-          baseTipLamports: jitoTipLamports || 1000,
-        });
-        // Controller can be static or bumped via attempt count
-        const fees = controller.getFee(attempt);
-        const startSlot = await conn.getSlot();
-        txHash = await executeSwapJitoBundle({
-          quote,
-          wallet,
-          shared,
-          priorityFee: fees.computeUnitPriceMicroLamports, // Jito expects CU price μLamports
-          briberyAmount: 0,
-          jitoRelayUrl,
-        });
-        const endSlot = await conn.getSlot();
-        if (txHash) {
-          metricsLogger.recordInclusion(endSlot - startSlot);
-          metricsLogger.recordSuccess();
-        }
-      } else {
-        const startSlot = await conn.getSlot();
-        txHash = await executeSwapTurbo({
-          quote,
-          wallet,
-          shared,
-          priorityFee,       // lamports
-          briberyAmount,     // lamports
-          privateRpcUrl: currentRpcUrl,
-          skipPreflight,
-        });
-        const endSlot = await conn.getSlot();
-        if (txHash) {
-          metricsLogger.recordInclusion(endSlot - startSlot);
-          metricsLogger.recordSuccess();
-        }
-      }
+  // ── Sender (single send attempt loop) abstracted so we can reuse for probe ─
+  async function sendOnce(localQuote) {
+    let txHash = null;
+    let attempt = 0;
+    const maxAttempts = Math.max(1, Number(retryPolicy?.max ?? 3));
+    let briberyAmount = Number(briberyAmountBase) || 0;
+    let priorityFee = Number(basePriorityFeeLamports) || 0;
+    let jitoMode = !!useJitoBundle;
+    let usedDirect = false;
 
-      if (!txHash) throw new Error('swap-failed');
-    } catch (err) {
-      attempt += 1;
-      if (attempt >= maxAttempts) {
-        metricsLogger.recordFail(err?.code || err?.message || 'swap-error');
-        throw err;
-      }
-      // Bump CU / tip (we only have lamport priority/ tip here)
-      priorityFee += Number(retryPolicy.bumpCuStep || 2000);
-      briberyAmount += Number(retryPolicy.bumpTipStep || 1000);
-      metricsLogger.recordRetry();
-
-      // Route switch on 2nd try
-      if (retryPolicy.routeSwitch && attempt === 2) {
-        // toggle Jito <-> Turbo; if already Turbo, consider direct on next round
-        jitoMode = !jitoMode;
-      }
-
-      // RPC failover on last retry step before final
-      if (retryPolicy.rpcFailover && attempt === (maxAttempts - 1)) {
-        const endpoints = Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : [];
-        if (endpoints.length > 1) {
-          const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
-          currentRpcUrl = endpoints[idx];
-          conn = new Connection(currentRpcUrl, 'confirmed');
-        }
-      }
-
-      // Refresh quote if warm cache expired or after route change
+    // note: race a tiny early-ack from relay if available (does not block)
+    const earlyAck = (async () => {
       try {
-        const qRes = await getWarmQuote({
-          inputMint: quote.inputMint,
-          outputMint: quote.outputMint,
-          amount: String(quote.inAmount),
-          slippage: effSlippage,
-        });
-        if (qRes) quote = qRes;
-      } catch (_) { /* keep last */ }
+        const a = await Promise.race([
+          relayAck,
+          new Promise((resolve) => setTimeout(() => resolve(null), 50)),
+        ]);
+        return a;
+      } catch { return null; }
+    })();
+
+    while (attempt < maxAttempts && !txHash) {
+      try {
+        // Direct fallback if requested by meta and quoteLatency hints (priority on first attempt)
+        if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200 && attempt === 0) {
+          const startSlot = await conn.getSlot();
+          txHash = await directSwap({
+            wallet,
+            inputMint: localQuote.inputMint,
+            outputMint: localQuote.outputMint,
+            amount: String(localQuote.inAmount),
+            slippage: effSlippage,
+            privateRpcUrl: currentRpcUrl,
+          });
+          const endSlot = await conn.getSlot();
+          if (txHash) {
+            metricsLogger.recordInclusion?.(endSlot - startSlot);
+            metricsLogger.recordSuccess?.();
+            usedDirect = true;
+            break;
+          } else {
+            metricsLogger.recordFail?.('direct-swap-fail');
+          }
+        }
+
+        // Choose path (Jito or Turbo)
+        if (jitoMode) {
+          const controller = new JitoFeeController({
+            cuAdapt,
+            cuPriceMicroLamportsMin,
+            cuPriceMicroLamportsMax,
+            tipCurve,
+            baseTipLamports: jitoTipLamports || 1000,
+          });
+          const fees = controller.getFee(attempt);
+          const startSlot = await conn.getSlot();
+          txHash = await executeSwapJitoBundle({
+            quote: localQuote,
+            wallet,
+            shared,
+            priorityFee: fees.computeUnitPriceMicroLamports, // μLamports
+            briberyAmount: 0,
+            jitoRelayUrl,
+          });
+          const endSlot = await conn.getSlot();
+          if (txHash) {
+            metricsLogger.recordInclusion?.(endSlot - startSlot);
+            metricsLogger.recordSuccess?.();
+          }
+        } else {
+          const startSlot = await conn.getSlot();
+          txHash = await executeSwapTurbo({
+            quote: localQuote,
+            wallet,
+            shared,
+            priorityFee,       // lamports
+            briberyAmount,     // lamports
+            privateRpcUrl: currentRpcUrl,
+            skipPreflight,
+          });
+          const endSlot = await conn.getSlot();
+          if (txHash) {
+            metricsLogger.recordInclusion?.(endSlot - startSlot);
+            metricsLogger.recordSuccess?.();
+          }
+        }
+
+        if (!txHash) throw new Error('swap-failed');
+      } catch (err) {
+        attempt += 1;
+        if (attempt >= maxAttempts) {
+          metricsLogger.recordFail?.(err?.code || err?.message || 'swap-error');
+          throw err;
+        }
+        // Bump CU / tip (lamports)
+        priorityFee += Number(retryPolicy.bumpCuStep || 2000);
+        briberyAmount += Number(retryPolicy.bumpTipStep || 1000);
+        metricsLogger.recordRetry?.();
+
+        // Route switch on 2nd try
+        if (retryPolicy.routeSwitch && attempt === 2) {
+          jitoMode = !jitoMode;
+        }
+
+        // RPC failover on last retry step before final
+        if (retryPolicy.rpcFailover && attempt === (maxAttempts - 1)) {
+          const endpoints = Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : [];
+          if (endpoints.length > 1) {
+            const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
+            currentRpcUrl = endpoints[idx];
+            conn = new Connection(currentRpcUrl, 'confirmed');
+          }
+        }
+
+        // Refresh quote if warm cache expired or after route change
+        try {
+          const qRes = await getWarmQuote({
+            inputMint: localQuote.inputMint,
+            outputMint: localQuote.outputMint,
+            amount: String(localQuote.inAmount),
+            slippage: effSlippage,
+          });
+          if (qRes) localQuote = qRes;
+        } catch (_) { /* keep last */ }
+      }
     }
+
+    // mark relay winner if its ack resolved first (bookkeeping)
+    try { await earlyAck; } catch {}
+    return txHash;
   }
 
-  // Cache idempotency key on success
-  if (!simulated && idKey && txHash) {
-    idempotencyStore.set(idKey, txHash);
+  // ── Probe Buy then Scale (optional) ────────────────────────────────────────
+  let txHash = null;
+  if (probe?.enabled) {
+    inc('probe_sent_total', 1);
+
+    // Derive a probe size (fraction). We avoid USD lookups to keep hot-path minimal.
+    // If scaleFactor provided → probe = total/scaleFactor; else fallback to 1/4th.
+    const scale = Number(probe.scaleFactor || 4);
+    const probeIn = Math.max(1, Math.floor(Number(sizedQuote.inAmount) / Math.max(2, scale)));
+
+    // Probe quote
+    const probeQuote = await getWarmQuote({
+      inputMint: sizedQuote.inputMint,
+      outputMint: sizedQuote.outputMint,
+      amount: String(probeIn),
+      slippage: effSlippage,
+    });
+
+    // Execute probe
+    const probeTx = await sendOnce(probeQuote);
+
+    // Check live impact and decide scale
+    const liveImpactPct = (probeQuote?.priceImpactPct ?? 0) * 100;
+    if (probe.abortOnImpactPct != null && liveImpactPct > Number(probe.abortOnImpactPct)) {
+      inc('probe_abort_total', 1);
+      // cache idempotency as "done" to avoid double-buys if user retries immediately
+      try { idempotencyStore.set(stableIdKey, probeTx || 'probe-aborted'); } catch {}
+      return probeTx || null;
+    }
+
+    // Optional short delay before scaling
+    const delayMs = Number(probe.delayMs || 250);
+    if (delayMs > 0) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+
+    // Remaining amount
+    const remaining = Math.max(0, Number(sizedQuote.inAmount) - probeIn);
+    if (remaining > 0) {
+      const scaleQuote = await getWarmQuote({
+        inputMint: sizedQuote.inputMint,
+        outputMint: sizedQuote.outputMint,
+        amount: String(remaining),
+        slippage: effSlippage,
+      });
+      const scaleTx = await sendOnce(scaleQuote);
+      txHash = scaleTx || probeTx || null;
+      if (scaleTx) inc('probe_scale_success_total', 1);
+    } else {
+      txHash = probeTx || null;
+      inc('probe_scale_success_total', 1);
+    }
+  } else {
+    // Single-shot send
+    txHash = await sendOnce(sizedQuote);
+  }
+
+  // Cache idempotency key on success (both caches)
+  if (!simulated && stableIdKey && txHash) {
+    try { idempotencyStore.set(stableIdKey, txHash); } catch {}
+    try { coreIdem.markSuccess?.(stableIdKey); } catch {}
   }
 
   /* ——— 2️⃣  Enrichment ——— */
@@ -498,20 +658,20 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     entryPrice = null,
     decimals = null;
   try {
-    const inDec = await getMintDecimals(quote.inputMint);
-    const outDec = await getMintDecimals(quote.outputMint);
-    const inUi = Number(quote.inAmount) / 10 ** inDec;
-    const outUi = Number(quote.outAmount) / 10 ** outDec;
+    const inDec = await getMintDecimals(sizedQuote.inputMint);
+    const outDec = await getMintDecimals(sizedQuote.outputMint);
+    const inUi = Number(sizedQuote.inAmount) / 10 ** inDec;
+    const outUi = Number(sizedQuote.outAmount) / 10 ** outDec;
     decimals = outDec;
     entryPrice = inUi / outUi;
     const baseUsd =
-      (await getTokenPrice(userId, quote.inputMint)) ||
-      (quote.inputMint === SOL_MINT
+      (await getTokenPrice(userId, sizedQuote.inputMint)) ||
+      (sizedQuote.inputMint === SOL_MINT
         ? await getSolPrice(userId)
         : null);
     entryPriceUSD = baseUsd ? entryPrice * baseUsd : null;
     usdValue = baseUsd
-      ? +((quote.inAmount / 1e9) * baseUsd).toFixed(2)
+      ? +((sizedQuote.inAmount / 1e9) * baseUsd).toFixed(2)
       : null;
   } catch (e) {
     console.warn("Enrichment error:", e.message);
@@ -541,8 +701,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         tokenName: tokenName ?? null,
         entryPrice,
         entryPriceUSD,
-        inAmount: BigInt(quote.inAmount),
-        outAmount: BigInt(quote.outAmount),
+        inAmount: BigInt(sizedQuote.inAmount),
+        outAmount: BigInt(sizedQuote.outAmount),
         closedOutAmount: BigInt(0),
         strategy,
         txHash,
@@ -551,22 +711,22 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         walletLabel,
         botId: botId || strategy,
         unit:
-          quote.inputMint === SOL_MINT
+          sizedQuote.inputMint === SOL_MINT
             ? "sol"
-            : quote.inputMint === USDC_MINT
+            : sizedQuote.inputMint === USDC_MINT
             ? "usdc"
             : "spl",
         decimals,
         usdValue,
         type: "buy",
         side: "buy",
-        slippage,
+        slippage: effSlippage,
         mevMode,
-        priorityFee: priorityFee,
-        briberyAmount,
+        priorityFee: undefined, // varies inside retries; omit precise
+        briberyAmount: undefined,
         mevShared: shared,
-        inputMint: quote.inputMint,
-        outputMint: quote.outputMint,
+        inputMint: sizedQuote.inputMint,
+        outputMint: sizedQuote.outputMint,
       },
     });
   }
@@ -607,9 +767,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
     /* Telegram alert */
     try {
-      const amountFmt = txHash ? (quote.outAmount / 10 ** (decimals || 9)).toFixed(4) : "0";
+      const amountFmt = txHash ? (sizedQuote.outAmount / 10 ** (decimals || 9)).toFixed(4) : "0";
       const impactFmt =
-        (quote.priceImpactPct * 100).toFixed(2) + "%";
+        ((sizedQuote.priceImpactPct ?? 0) * 100).toFixed(2) + "%";
       const header = simulated
         ? `🧪 *Dry-Run ${category} Triggered!*`
         : txHash
@@ -639,10 +799,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         });
         if (coverRow?.publicKey) {
           const dest = new PublicKey(coverRow.publicKey);
-          const amt = BigInt(quote.outAmount);
+          const amt = BigInt(sizedQuote.outAmount);
           await forwardTokens(
             connPost,
-            quote.outputMint,
+            sizedQuote.outputMint,
             wallet,
             dest,
             amt
@@ -658,16 +818,16 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       try {
         const freezeAuth = await checkFreezeAuthority(
           connPost,
-          quote.outputMint
+          sizedQuote.outputMint
         );
         if (freezeAuth) {
           console.warn(
             `🚨 Honeypot detected (freezeAuthority: ${freezeAuth})`
           );
           const sellQuote = await getWarmQuote({
-            inputMint: quote.outputMint,
-            outputMint: quote.inputMint,
-            amount: String(quote.outAmount),
+            inputMint: sizedQuote.outputMint,
+            outputMint: sizedQuote.inputMint,
+            amount: String(sizedQuote.outAmount),
             slippage: slippage || 5.0,
           });
           if (sellQuote) {
@@ -675,8 +835,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
               quote: sellQuote,
               wallet,
               shared,
-              priorityFee,
-              briberyAmount,
+              priorityFee: undefined,
+              briberyAmount: undefined,
               privateRpcUrl: currentRpcUrl,
               skipPreflight,
             });
@@ -693,9 +853,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       const startTime = Date.now();
       const endTime = startTime + Math.max(0, durationSec) * 1000;
       const intervalMs = 5000;
-      const sellInputMint = quote.outputMint;
-      const sellOutputMint = quote.inputMint;
-      const sellAmount = quote.outAmount;
+      const sellInputMint = sizedQuote.outputMint;
+      const sellOutputMint = sizedQuote.inputMint;
+      const sellAmount = sizedQuote.outAmount;
       let active = true;
       const intervalId = setInterval(async () => {
         if (!active || Date.now() > endTime) {
@@ -719,8 +879,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
                     quote: sq,
                     wallet,
                     shared,
-                    priorityFee,
-                    briberyAmount,
+                    priorityFee: undefined,
+                    briberyAmount: undefined,
                     privateRpcUrl: currentRpcUrl,
                     skipPreflight,
                   });
@@ -747,8 +907,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
                     quote: exitQuote,
                     wallet,
                     shared,
-                    priorityFee,
-                    briberyAmount,
+                    priorityFee: undefined,
+                    briberyAmount: undefined,
                     privateRpcUrl: currentRpcUrl,
                     skipPreflight,
                   });

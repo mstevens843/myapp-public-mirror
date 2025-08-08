@@ -22,9 +22,18 @@ export default function validateTurboSniperConfig(config) {
     errors.push('quoteTtlMs must be positive');
   }
   // Idempotency TTL
-  if (!(cfg.idempotencyTtlSec > 0)) {
-    errors.push('idempotencyTtlSec must be positive');
+// Idempotency
+if (cfg.idempotency) {
+  if (!(cfg.idempotency.ttlSec > 0)) {
+    errors.push('idempotency.ttlSec must be > 0');
   }
+  if (typeof cfg.idempotency.salt !== 'string' || !cfg.idempotency.salt.length) {
+    errors.push('idempotency.salt must be a non-empty string');
+  }
+  if (typeof cfg.idempotency.resumeFromLast !== 'boolean') {
+    errors.push('idempotency.resumeFromLast must be a boolean');
+  }
+}
   // Retry policy
   if (cfg.retryPolicy) {
     const rp = cfg.retryPolicy;
@@ -91,5 +100,44 @@ export default function validateTurboSniperConfig(config) {
       });
     }
   }
+  // Private Relay
+if (cfg.privateRelay && cfg.privateRelay.enabled) {
+  if (!Array.isArray(cfg.privateRelay.urls) || cfg.privateRelay.urls.length === 0) {
+    errors.push('privateRelay.urls must contain at least one relay URL when enabled');
+  }
+  if (cfg.privateRelay.mode && !['bundle', 'tx'].includes(cfg.privateRelay.mode)) {
+    errors.push('privateRelay.mode must be either "bundle" or "tx"');
+  }
+}
+
+// Sizing
+if (cfg.sizing) {
+  if (!(cfg.sizing.maxImpactPct > 0)) {
+    errors.push('sizing.maxImpactPct must be positive');
+  }
+  if (!(cfg.sizing.maxPoolPct > 0 && cfg.sizing.maxPoolPct <= 1)) {
+    errors.push('sizing.maxPoolPct must be between 0 and 1');
+  }
+  if (!(cfg.sizing.minUsd >= 0)) {
+    errors.push('sizing.minUsd must be >= 0');
+  }
+}
+
+// Probe
+if (cfg.probe && cfg.probe.enabled) {
+  if (!(cfg.probe.usd > 0)) {
+    errors.push('probe.usd must be positive');
+  }
+  if (!(cfg.probe.scaleFactor > 1)) {
+    errors.push('probe.scaleFactor must be greater than 1');
+  }
+  if (!(cfg.probe.abortOnImpactPct > 0)) {
+    errors.push('probe.abortOnImpactPct must be positive');
+  }
+  if (!(cfg.probe.delayMs >= 0)) {
+    errors.push('probe.delayMs must be >= 0');
+  }
+}
+
   return errors;
 }

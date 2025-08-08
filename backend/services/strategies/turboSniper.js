@@ -85,7 +85,9 @@ class TurboSniper {
           // Leverage executor to perform safe sell; reuse same userCtx but switch input/output
           const tradeParams = { inputMint: mint, outputMint: cfg.inputMint || 'So11111111111111111111111111111111111111112', amount, slippage: maxSlippage };
           const userCtx = { userId: cfg.userId || 'airdrop', walletId };
-          await this.executor.executeTrade(userCtx, tradeParams, Object.assign({}, cfg, { idempotencyTtlSec: 300 }));
+          await this.executor.executeTrade(userCtx, tradeParams,Object.assign({}, cfg, {
+  idempotencyTtlSec: (cfg.idempotency?.ttlSec ?? cfg.idempotencyTtlSec ?? 300)
+}));
         },
       });
     }
@@ -254,7 +256,33 @@ async function turboSniperStrategy(botCfg = {}) {
   const ICEBERG_TRANCHE_DELAY  = botCfg.iceberg?.trancheDelayMs ? +botCfg.iceberg.trancheDelayMs : 0;
   const IMPACT_ABORT_PCT       = normalizeNumber(botCfg.impactAbortPct, 0);
   const DYNAMIC_SLIPPAGE_MAX_PCT = normalizeNumber(botCfg.dynamicSlippageMaxPct, MAX_SLIPPAGE * 100);
+    /* new config sections (private relay / idempotency / sizing / probe) */
+  const PRIVATE_RELAY_ENABLED = botCfg.privateRelay?.enabled === true;
+  const PRIVATE_RELAY_URLS    = normalizeList(botCfg.privateRelay?.urls);
+  const PRIVATE_RELAY_MODE    = botCfg.privateRelay?.mode || "bundle"; // "bundle" | "tx"
 
+  const IDEMP_TTL_SEC   = normalizeNumber(
+    botCfg.idempotency?.ttlSec ?? botCfg.idempotencyTtlSec,
+    90
+  );
+  const IDEMP_SALT      = botCfg.idempotency?.salt || "";
+  const IDEMP_RESUME    = botCfg.idempotency?.resumeFromLast !== false;
+
+  const SIZING_MAX_IMPACT_PCT = (
+    botCfg.sizing?.maxImpactPct != null ? +botCfg.sizing.maxImpactPct : null
+  );
+  const SIZING_MAX_POOL_PCT   = (
+    botCfg.sizing?.maxPoolPct   != null ? +botCfg.sizing.maxPoolPct   : null
+  );
+  const SIZING_MIN_USD        = (
+    botCfg.sizing?.minUsd       != null ? +botCfg.sizing.minUsd       : null
+  );
+
+  const PROBE_ENABLED         = botCfg.probe?.enabled === true;
+  const PROBE_USD             = normalizeNumber(botCfg.probe?.usd, 5);
+  const PROBE_SCALE_FACTOR    = normalizeNumber(botCfg.probe?.scaleFactor, 4);
+  const PROBE_ABORT_IMPACT_PCT= normalizeNumber(botCfg.probe?.abortOnImpactPct, 2.0);
+  const PROBE_DELAY_MS        = normalizeNumber(botCfg.probe?.delayMs, 250);
   // routing
   const MULTI_ROUTE        = botCfg.multiRoute === true;
   const SPLIT_TRADE        = botCfg.splitTrade === true;
@@ -366,7 +394,7 @@ async function turboSniperStrategy(botCfg = {}) {
         outputMint   : mint,
         amount       : SNIPE_LAMPORTS,
         slippage     : SLIPPAGE,
-        maxImpactPct : MAX_SLIPPAGE,
+        maxImpactPct : (SIZING_MAX_IMPACT_PCT != null ? SIZING_MAX_IMPACT_PCT : MAX_SLIPPAGE),
       });
       const quoteEnd = Date.now();
       metricsLogger.recordTiming('detectToQuote', quoteEnd - phaseStart);
@@ -455,6 +483,37 @@ async function turboSniperStrategy(botCfg = {}) {
 
         // idempotency key to avoid duplicate buys
         idempotencyKey  : idempotencyKey,
+                // private relay
+        privateRelay   : {
+          enabled: PRIVATE_RELAY_ENABLED,
+          urls   : PRIVATE_RELAY_URLS,
+          mode   : PRIVATE_RELAY_MODE,
+        },
+
+        // idempotency controls
+        idempotency    : {
+          ttlSec       : IDEMP_TTL_SEC,
+          salt         : IDEMP_SALT,
+          resumeFromLast: IDEMP_RESUME,
+          key          : idempotencyKey, // keep your existing key visible to executor
+        },
+
+        // liquidity sizing constraints
+        sizing         : {
+          maxImpactPct : SIZING_MAX_IMPACT_PCT,
+          maxPoolPct   : SIZING_MAX_POOL_PCT,
+          minUsd       : SIZING_MIN_USD,
+        },
+
+        // probe buy behavior
+        probe          : {
+          enabled          : PROBE_ENABLED,
+          usd              : PROBE_USD,
+          scaleFactor      : PROBE_SCALE_FACTOR,
+          abortOnImpactPct : PROBE_ABORT_IMPACT_PCT,
+          delayMs          : PROBE_DELAY_MS,
+        },
+
 
         // measured quote latency in ms, used for direct AMM fallback
         quoteLatencyMs  : quoteEnd - quoteStart,

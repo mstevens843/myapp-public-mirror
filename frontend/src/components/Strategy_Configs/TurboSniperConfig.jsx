@@ -180,7 +180,31 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
     },
     impactAbortPct       : "",
     dynamicSlippageMaxPct: "",
+      // Extra sections
+    privateRelay: {
+      enabled: false,
+      urls: [],
+      mode: "bundle", // "bundle" or "tx"
+    },
+    idempotency: {
+      ttlSec: 90,
+      salt: "",
+      resumeFromLast: true,
+    },
+    sizing: {
+      maxImpactPct: 1.2,
+      maxPoolPct: 0.8,
+      minUsd: 50,
+    },
+    probe: {
+      enabled: false,
+      usd: 5,
+      scaleFactor: 4,
+      abortOnImpactPct: 2.0,
+      delayMs: 250,
+    },
   };
+  
 
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
@@ -477,6 +501,238 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
       </div>
+        {/* ——— Private Relay ——— */}
+      <section>
+        <h3 className="font-semibold">Private Relay</h3>
+        <label className="flex items-center space-x-2">
+          <input
+            type="checkbox"
+            checked={merged.privateRelay?.enabled || false}
+            onChange={(e) =>
+              onChangeSection('privateRelay', 'enabled', e.target.checked)
+            }
+          />
+          <span>Enable private relay</span>
+        </label>
+        {merged.privateRelay?.enabled && (
+          <div className="ml-4 space-y-2">
+            <label className="block">
+              <span className="block text-sm">Relay URLs (comma separated)</span>
+              <input
+                type="text"
+                className={inp}
+                value={(merged.privateRelay.urls || []).join(',')}
+                onChange={(e) =>
+                  onChangeSection(
+                    'privateRelay',
+                    'urls',
+                    e.target.value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter((v) => v)
+                  )
+                }
+              />
+            </label>
+            <label className="block">
+              <span className="block text-sm">Mode</span>
+              <select
+                className={inp}
+                value={merged.privateRelay.mode || 'bundle'}
+                onChange={(e) =>
+                  onChangeSection('privateRelay', 'mode', e.target.value)
+                }
+              >
+                <option value="bundle">bundle</option>
+                <option value="tx">tx</option>
+              </select>
+            </label>
+          </div>
+        )}
+      </section>
+
+      {/* ——— Idempotency ——— */}
+      <section>
+        <h3 className="font-semibold">Idempotency</h3>
+        <div className="ml-4 space-y-2">
+          <label className="block">
+            <span className="block text-sm">TTL (seconds)</span>
+            <input
+              type="number"
+              className={inp}
+              value={merged.idempotency?.ttlSec || 90}
+              onChange={(e) =>
+                onChangeSection('idempotency', 'ttlSec', Number(e.target.value))
+              }
+              min={1}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-sm">Salt</span>
+            <input
+              type="text"
+              className={inp}
+              value={merged.idempotency?.salt || ''}
+              onChange={(e) =>
+                onChangeSection('idempotency', 'salt', e.target.value)
+              }
+            />
+          </label>
+          <label className="flex items-center space-x-2">
+            <input
+              type="checkbox"
+              checked={merged.idempotency?.resumeFromLast !== false}
+              onChange={(e) =>
+                onChangeSection(
+                  'idempotency',
+                  'resumeFromLast',
+                  e.target.checked
+                )
+              }
+            />
+            <span>Resume pending on restart</span>
+          </label>
+        </div>
+      </section>
+
+      {/* ——— Liquidity Sizing ——— */}
+      <section>
+        <h3 className="font-semibold">Liquidity Sizing</h3>
+        <div className="ml-4 space-y-2">
+          <label className="block">
+            <span className="block text-sm">Max Impact (%)</span>
+            <input
+              type="number"
+              className={inp}
+              step="0.1"
+              value={merged.sizing?.maxImpactPct || 1.2}
+              onChange={(e) =>
+                onChangeSection(
+                  'sizing',
+                  'maxImpactPct',
+                  Number(e.target.value)
+                )
+              }
+              min={0}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-sm">Max Pool (%)</span>
+            <input
+              type="number"
+              className={inp}
+              step="0.1"
+              value={merged.sizing?.maxPoolPct || 0.8}
+              onChange={(e) =>
+                onChangeSection(
+                  'sizing',
+                  'maxPoolPct',
+                  Number(e.target.value)
+                )
+              }
+              min={0}
+              max={1}
+            />
+          </label>
+          <label className="block">
+            <span className="block text-sm">Minimum USD</span>
+            <input
+              type="number"
+              className={inp}
+              value={merged.sizing?.minUsd || 50}
+              onChange={(e) =>
+                onChangeSection(
+                  'sizing',
+                  'minUsd',
+                  Number(e.target.value)
+                )
+              }
+              min={0}
+            />
+          </label>
+        </div>
+      </section>
+
+      {/* ——— Probe Buy ——— */}
+      <section>
+        <h3 className="font-semibold">Probe Buy</h3>
+        <label className="flex items-center space-x-2">
+          <input
+            type="checkbox"
+            checked={merged.probe?.enabled || false}
+            onChange={(e) =>
+              onChangeSection('probe', 'enabled', e.target.checked)
+            }
+          />
+          <span>Enable probe buy</span>
+        </label>
+        {merged.probe?.enabled && (
+          <div className="ml-4 space-y-2">
+            <label className="block">
+              <span className="block text-sm">Probe Size (USD)</span>
+              <input
+                type="number"
+                className={inp}
+                value={merged.probe?.usd || 5}
+                onChange={(e) =>
+                  onChangeSection('probe', 'usd', Number(e.target.value))
+                }
+                min={0}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-sm">Scale Factor</span>
+              <input
+                type="number"
+                className={inp}
+                value={merged.probe?.scaleFactor || 4}
+                onChange={(e) =>
+                  onChangeSection(
+                    'probe',
+                    'scaleFactor',
+                    Number(e.target.value)
+                  )
+                }
+                min={1}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-sm">Abort Impact (%)</span>
+              <input
+                type="number"
+                className={inp}
+                step="0.1"
+                value={merged.probe?.abortOnImpactPct || 2.0}
+                onChange={(e) =>
+                  onChangeSection(
+                    'probe',
+                    'abortOnImpactPct',
+                    Number(e.target.value)
+                  )
+                }
+                min={0}
+              />
+            </label>
+            <label className="block">
+              <span className="block text-sm">Delay (ms)</span>
+              <input
+                type="number"
+                className={inp}
+                value={merged.probe?.delayMs || 250}
+                onChange={(e) =>
+                  onChangeSection(
+                    'probe',
+                    'delayMs',
+                    Number(e.target.value)
+                  )
+                }
+                min={0}
+              />
+            </label>
+          </div>
+        )}
+      </section>
+
 
       {/* ——— Advanced Sniper Flags ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
