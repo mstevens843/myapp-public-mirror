@@ -1197,6 +1197,7 @@ backdrop-blur-md";
           }
         }}
         className="accent-emerald-500"
+        aria-label="Apply to all wallets"
       />
       <label htmlFor="applyAllWallets" className="text-xs text-zinc-300">
         Apply to all wallets

@@ -12,12 +12,15 @@
  * - This file is the heart of the frontend: connects UI + bot control logic 
  */
 
-import { useEffect, useState } from "react"
+import React, { useEffect, useState, lazy, Suspense } from "react"
 import { useNavigate, useLocation } from "react-router-dom";
 import ConfigPanel from "@/components/Controls/ConfigPanel";
-import TradeChart from "@/components/Tables_Charts/TradeChart";
-import PortfolioChart from "@/components/Tables_Charts/PortfolioChart";
-import HistoryPanel from "@/components/Tables_Charts/HistoryPanel";
+// Lazily import heavy chart components; these chunks are fetched only
+// when the user needs them.  This reduces the initial JS bundle size
+// and helps maintain our performance budgets.
+const TradeChart     = lazy(() => import("@/components/Tables_Charts/TradeChart"));
+const PortfolioChart = lazy(() => import("@/components/Tables_Charts/PortfolioChart"));
+const HistoryPanel   = lazy(() => import("@/components/Tables_Charts/HistoryPanel"));
 import Watchlist from "@/components/Dashboard/Watchlist";
 import OpenTradesTab from "@/components/Dashboard/OpenTradesTab";
 import mockOpenTrades from "@/mock/mockOpenTrades";
@@ -28,8 +31,18 @@ import TargetToken from "@/components/Controls/TargetToken";
 import { toast, Toaster } from "sonner";
 import "./styles/dashboard.css";
 import { dateKeycap } from "./utils/dateEmoji";
-import SettingsPanel from "@/components/Dashboard/SettingsPanel";
-import RecapSheet from "@/components/Tables_Charts/RecapSheet";
+// Lazily load dashboard panels which pull in charts and other heavy
+// dependencies.  They are only needed when rendered and therefore
+// should not block the first paint.
+const SettingsPanel = lazy(() => import("@/components/Dashboard/SettingsPanel"));
+const RecapSheet    = lazy(() => import("@/components/Tables_Charts/RecapSheet"));
+
+// Additional heavy components are also loaded lazily.  Both the
+// strategy console and bot status modal comprise complex UI and
+// business logic.  Splitting them into separate chunks prevents
+// them from affecting the dashboard's initial render.
+const LazyStrategyConsoleSheet = lazy(() => import("./components/Strategy_Configs/strategyConsoleSheet"));
+const LazyBotStatusModal       = lazy(() => import("./components/Controls/Modals/BotStatusModal"));
 import useSingleLogsSocket from "@/hooks/useSingleLogsSocket";
 import WalletsTab from "./components/Dashboard/WalletsTab";
 import logo from "@/assets/solpulse-logo.png";
@@ -55,7 +68,10 @@ import {
    User2Icon, 
    UserIcon,
    X,
-} from "lucide-react";import StrategyConsoleSheet from "./components/Strategy_Configs/strategyConsoleSheet";
+} from "lucide-react";
+// Direct import of StrategyConsoleSheet removed for code splitting.
+// The component is lazily imported below.
+// import StrategyConsoleSheet from "./components/Strategy_Configs/strategyConsoleSheet";
 import {
   startStrategy,
   stopStrategy,
@@ -70,7 +86,7 @@ import FloatingBotBeacon from "./components/Dashboard/BotBeaconModal";
 
 import { listenToLogs } from "./lib/ws";
 import { startMockLogs } from "./utils/mockLogs";
-import BotStatusModal from "./components/Controls/Modals/BotStatusModal";
+// import BotStatusModal from "./components/Controls/Modals/BotStatusModal"; // replaced by lazy import
 const sanitizeConfig = (cfg = {}) =>
   Object.fromEntries(
     Object.entries(cfg)
@@ -1147,29 +1163,39 @@ return (
     </div>
 
     {/* sheets / overlays ---------------------------------------- */}
-    <StrategyConsoleSheet
-      open={logsOpen}
-      onClose={closeLogsConsole}
-      botId={activeLogsBotId}
-      strategy={activeLogsStrategy}
-      logs={logsByBotId?.[activeLogsBotId] ?? []}
-      onClearLogs={() => clearLogsForBot(activeLogsBotId)}
-      currentTab={sheetTab}
-      bots={
-        Array.isArray(statusData?.botIds) && statusData.botIds.length > 0
-          ? statusData.botIds.map((id) => ({
-              botId: id,
-              mode: statusData?.botCfgs?.[id]?.mode ?? "unknown",
-              paused: statusData?.botCfgs?.[id]?.isPaused ?? false,
-            }))
-          : (Array.isArray(runningBots) ? runningBots : [])
+    <Suspense
+      fallback={
+        <div className="p-4 text-zinc-400 text-sm" role="status" aria-live="polite">
+          Loading console…
+        </div>
       }
-      onSwitchBot={({ botId, mode }) => {
-        setActiveLogsBotId(botId);
-        setActiveLogsStrategy(mode);
-        setLogTarget(botId);
-      }}
-    />
+    >
+      <LazyStrategyConsoleSheet
+        open={logsOpen}
+        onClose={closeLogsConsole}
+        botId={activeLogsBotId}
+        strategy={activeLogsStrategy}
+        logs={logsByBotId?.[activeLogsBotId] ?? []}
+        onClearLogs={() => clearLogsForBot(activeLogsBotId)}
+        currentTab={sheetTab}
+        bots={
+          Array.isArray(statusData?.botIds) && statusData.botIds.length > 0
+            ? statusData.botIds.map((id) => ({
+                botId: id,
+                mode: statusData?.botCfgs?.[id]?.mode ?? "unknown",
+                paused: statusData?.botCfgs?.[id]?.isPaused ?? false,
+              }))
+            : Array.isArray(runningBots)
+            ? runningBots
+            : []
+        }
+        onSwitchBot={({ botId, mode }) => {
+          setActiveLogsBotId(botId);
+          setActiveLogsStrategy(mode);
+          setLogTarget(botId);
+        }}
+      />
+    </Suspense>
 
 <FloatingBotBeacon
   runningBots={beaconBots}
@@ -1183,11 +1209,18 @@ return (
 />
     
 
-    <BotStatusModal
-      open={isBotStatusOpen}
-      onClose={() => setIsBotStatusOpen(false)}
-      data={statusData}
-      onRefresh={refetchStatus}
+    <Suspense
+      fallback={
+        <div className="p-4 text-zinc-400 text-sm" role="status" aria-live="polite">
+          Loading bot status…
+        </div>
+      }
+    >
+      <LazyBotStatusModal
+        open={isBotStatusOpen}
+        onClose={() => setIsBotStatusOpen(false)}
+        data={statusData}
+        onRefresh={refetchStatus}
 onPause={async (id) => {
   try {
     await pauseStrategy(id);
@@ -1231,7 +1264,8 @@ onResume={async (id) => {
         toast.success("⏸️ All bots paused");
         await refetchStatus();
       }}
-    />
+      />
+    </Suspense>
 
     {/* global toasts */}
 

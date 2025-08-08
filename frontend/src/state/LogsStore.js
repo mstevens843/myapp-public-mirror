@@ -3,8 +3,10 @@ import { create } from "zustand";
 // Maximum number of log entries to retain.  When the buffer exceeds this
 // threshold older entries will be discarded.  A hard cap helps
 // prevent unbounded memory growth when logs are streamed at a high
-// volume.
-const MAX_LOGS = 200;
+// volume.  Increased to 1 000 to support longer sessions while
+// remaining well under the 10 MB memory budget (approx. ~10kB per
+// thousand small log messages).
+const MAX_LOGS = 1000;
 
 export const useLogsStore = create((set) => ({
   logs: [],

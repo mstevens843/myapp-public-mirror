@@ -34,6 +34,13 @@ import React, {
   useState,
   useCallback,
 } from "react";
+
+// Import a small virtualization library.  FixedSizeList efficiently
+// renders only the visible portion of long log lists, preventing
+// thousands of DOM nodes from slowing down the console.  This
+// dependency adds just a few kilobytes to the bundle but saves
+// significant memory and CPU usage during long sessions.
+import { FixedSizeList } from "react-window";
 import { Listbox } from "@headlessui/react";
 
 /* ------------------------------------------------------------------ */
@@ -115,6 +122,22 @@ export default function StrategyConsoleSheet({
     window.removeEventListener("mouseup", onDragEnd);
     localStorage.setItem(LS_KEY, String(height));
   };
+
+  // --------------------------------------------------------------------
+  // Virtualized list helpers
+  // --------------------------------------------------------------------
+  // A ref to the underlying list so we can imperatively scroll to the
+  // bottom when new logs arrive.  Without virtualization the browser
+  // would slow down as thousands of messages accumulate.  react-window
+  // keeps only visible items mounted.
+  const listRef = useRef(null);
+  // Compute the available height for the list.  The console sheet has
+  // a fixed header/toolbar region (144px), so subtract that from the
+  // resizable total height.  Ensure it never goes negative to avoid
+  // react-window warnings.
+  const listHeight = Math.max(0, height - 144);
+  // Approximate height of a single log row.  Adjust if fonts change.
+  const LOG_ITEM_HEIGHT = 20;
 
   /* ------------------------------------------------------------------ */
   /* Sync tab changes from parent                                       */
@@ -198,6 +221,31 @@ export default function StrategyConsoleSheet({
       </div>
     );
   };
+
+  // Row renderer for the virtualized list.  react-window calls this
+  // component for each visible index.  We leverage the existing
+  // renderLog helper to keep styling consistent.
+  const Row = ({ index, style, data }) => {
+    const text = data[index];
+    return (
+      <div style={style} className="w-full">
+        {renderLog(text, index)}
+      </div>
+    );
+  };
+
+  // Auto-scroll to the newest log entry when logs update or when
+  // switching back to the logs tab.  Without this effect the user
+  // would have to manually scroll to see new messages.
+  useEffect(() => {
+    if (activeTab === "logs" && listRef.current) {
+      try {
+        listRef.current.scrollToItem(Math.max(0, visibleLogs.length - 1));
+      } catch (err) {
+        // list may not be initialised yet; ignore errors
+      }
+    }
+  }, [visibleLogs.length, activeTab]);
 
   const renderSummary = () =>
     summaryHistory.length ? (
@@ -377,7 +425,7 @@ export default function StrategyConsoleSheet({
         {/* ---------- body ---------- */}
         <div
           className={`
-            px-4 py-3 overflow-y-auto
+            px-4 py-3
             h-[calc(100%-144px)]             /* handle + hdr + toolbar */
             bg-black-1000/95                   /* glass */
             font-mono text-[13px] leading-relaxed
@@ -386,7 +434,16 @@ export default function StrategyConsoleSheet({
         >
           {activeTab === "logs" ? (
             visibleLogs.length ? (
-              visibleLogs.map(renderLog)
+              <FixedSizeList
+                height={listHeight}
+                width="100%"
+                itemCount={visibleLogs.length}
+                itemSize={LOG_ITEM_HEIGHT}
+                itemData={visibleLogs}
+                ref={listRef}
+              >
+                {Row}
+              </FixedSizeList>
             ) : (
               <div className="text-green-400 flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin" />

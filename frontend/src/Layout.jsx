@@ -197,6 +197,19 @@ export default function Layout() {
 
   return (
     <div className="glow-bg min-h-screen text-white">
+      {/*
+       * Skip link for keyboard users.  Placed at the top of the page it
+       * allows screen reader and keyboard users to bypass the navigation
+       * elements and jump straight to the main content.  The link is
+       * visually hidden until it receives focus.
+       */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only absolute top-0 left-0 m-2 px-3 py-2 bg-emerald-600 text-white rounded"
+      >
+        Skip to main content
+      </a>
+
       <div className="app-container">
         {/* Header */}
         <div className="flex items-center mb-4">
@@ -263,7 +276,9 @@ export default function Layout() {
         )}
 
         {/* Page Content */}
-        <Outlet />
+        <div id="main-content">
+          <Outlet />
+        </div>
       </div>
 
       {/* 🔘 Global Floating Arm Chip */}

@@ -30,6 +30,19 @@ body {
   min-height: 100vh;
 }
 
+/*
+ * Accessibility enhancements
+ *
+ * Provide a clearly visible focus ring for keyboard navigation.  Dark
+ * backgrounds can obscure default outlines, so we use a bright
+ * emerald colour with an offset to avoid clipping.  This rule will
+ * apply to any element that supports the focus-visible pseudo-class.
+ */
+:focus-visible {
+  outline: 2px solid #34d399; /* emerald-400 */
+  outline-offset: 2px;
+}
+
 h1 {
   font-size: 3.2em;
   line-height: 1.1;
