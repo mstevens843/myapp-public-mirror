@@ -118,6 +118,12 @@ if (modeFromCLI) {
   // Enforce strict CORS with an allow-list derived from env vars and sensible
   // development defaults.  Credentials are enabled to allow cookie-based auth.
   app.use(createCors());
+  // Explicitly handle preflight (OPTIONS) requests for all routes.  This
+  // improves clarity around CORS handling and returns a 204 No Content for
+  // unknown routes rather than falling through to the next middleware.
+  app.options('*', createCors());
+
+
 
   // Apply a global rate limiter to protect against abuse.  Limits can be tuned
   // via RATE_LIMIT_WINDOW_MS and RATE_LIMIT_MAX_REQUESTS environment variables.

@@ -48,6 +48,13 @@ function createCors() {
       return callback(new Error('Not allowed by CORS'));
     },
     credentials: true,
+    // Explicitly list supported HTTP methods for improved preflight handling.
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
+    // Return 204 for successful OPTIONS requests instead of default 200.
+    optionsSuccessStatus: 204,
+    // Terminate preflight requests at the CORS middleware instead of
+    // forwarding them to downstream handlers.
+    preflightContinue: false,
   });
 }
 

@@ -14,7 +14,11 @@ try {
 
   // Convert to array and print it
   const secretKeyArray = Array.from(decoded);
-  console.log("✅ Decoded secret key array:\n", JSON.stringify(secretKeyArray, null, 2));
-} catch (err) {
+  if (process.env.LOG_LEVEL === 'debug') {
+    console.log(
+      "✅ Decoded secret key array:\n",
+      JSON.stringify(secretKeyArray, null, 2)
+    );
+  }} catch (err) {
   console.error("❌ Failed to decode wallet key:", err.message);
 }

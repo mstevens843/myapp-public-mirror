@@ -11,21 +11,21 @@ const helmet = require('helmet');
  * @returns {import('express').RequestHandler} Helmet middleware
  */
 function securityHeaders() {
-  const enableReportOnly = process.env.ENABLE_CSP_REPORT_ONLY === 'true';
-  const cspOptions = enableReportOnly
-    ? {
-        directives: {
-          defaultSrc: ["'self'"],
-          scriptSrc: ["'self'", "'unsafe-inline'", 'https:'],
-          connectSrc: ["'self'", '*'],
-          imgSrc: ["'self'", 'data:', '*'],
-        },
-        reportOnly: true,
-      }
-    : false;
+  const reportOnly = process.env.ENABLE_CSP_REPORT_ONLY !== 'false';
+  const cspDirectives = {
+    defaultSrc: ["'self'"],
+    scriptSrc: ["'self'", "'unsafe-inline'", 'https:'],
+    styleSrc: ["'self'", "'unsafe-inline'", 'https:'],
+    imgSrc: ["'self'", 'data:', 'blob:', '*'],
+    connectSrc: ["'self'", '*'],
+    fontSrc: ["'self'", 'https:'],
+    objectSrc: ["'none'"]
+  };
+  const cspOptions = { directives: cspDirectives, reportOnly };
   return helmet({
+    // Always enable CSP.  When reportOnly is true, Helmet will deliver
+    // Content‑Security‑Policy‑Report‑Only headers instead of enforcing them.
     contentSecurityPolicy: cspOptions,
-    // We could also configure other Helmet modules here as needed.
   });
 }
 
