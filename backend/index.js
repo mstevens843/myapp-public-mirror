@@ -233,19 +233,12 @@ if (modeFromCLI) {
   // -------------------------------------------------------------------------
   // Metrics endpoint – returns Prometheus formatted metrics for scraping.
   // Exposed only when METRICS_ENABLED is set to 'true'.  If disabled the
-  // route is omitted entirely (resulting in a 404).  The registry is
-  // exported from metrics.js and includes the request/DB/WebSocket metrics.
+  // route is omitted entirely (resulting in a 404).  Instead of returning
+  // the raw registry directly we delegate to `metrics.metricsEndpoint`
+  // which performs API key and IP allow‑list checks before serving.  See
+  // middleware/metrics.js for details.
   if (process.env.METRICS_ENABLED === 'true') {
-    app.get('/metrics', async (req, res) => {
-      try {
-        res.set('Content-Type', metrics.register.contentType);
-        const payload = await metrics.register.metrics();
-        res.status(200).end(payload);
-      } catch (err) {
-        // if gathering metrics fails return 500 for clarity
-        res.status(500).end(`# Metrics collection failed: ${err.message}\n`);
-      }
-    });
+    app.get('/metrics', metrics.metricsEndpoint);
   }
 
   /**

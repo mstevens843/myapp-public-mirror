@@ -1,26 +1,37 @@
-const { v4: uuid } = require("uuid");
-// Import the shared idempotency store from the utils directory. Use a
-// relative path so that the file can be resolved correctly from within
-// the `backend/services/jobs` folder. Do not include the full tmp path
-// since that will change between environments.
-const idempotencyStore = require("../../utils/idempotencyStore.js");
+// Idempotent job runner with metrics instrumentation.  This module
+// wraps the execution of long running jobs, ensuring only one job
+// executes per idempotency key and emitting Prometheus gauge updates to
+// reflect the current number of running jobs.
 
-// Track in-flight jobs keyed by their idempotency key. This ensures that
-// concurrent callers with the same key wait on the same promise rather than
-// spawning duplicate executions.
+const { v4: uuid } = require('uuid');
+const idempotencyStore = require('../../utils/idempotencyStore.js');
+const metrics = require('../../utils/metrics');
+
+// Track in‑flight jobs keyed by their idempotency key.  This ensures
+// concurrent callers with the same key wait on the same promise rather
+// than spawning duplicate executions.
 const runningJobs = new Map();
 
 /**
- * Execute a potentially long-running job exactly once given an idempotency
- * key. Duplicate calls with the same key within the TTL window will receive
- * the cached result. When no key is supplied the job runs immediately and
- * isn’t cached.
+ * Update the queue depth gauge.  Called whenever the number of
+ * in‑flight jobs changes.
+ */
+function updateGauge() {
+  metrics.setQueueDepth('jobRunner', runningJobs.size);
+}
+
+/**
+ * Execute a potentially long‑running job exactly once given an idempotency
+ * key. Duplicate calls with the same key within the TTL window will
+ * receive the cached result. When no key is supplied the job runs
+ * immediately and isn’t cached.
  *
- * The job is executed with a retry mechanism: when the job throws an error
- * (aside from manual abort via timeout) it will retry up to `maxRetries`
- * times with exponential backoff and jitter. A timeout is applied to each
- * attempt. If all attempts fail the error is propagated to the caller and
- * cached so subsequent duplicate calls also return the error.
+ * The job is executed with a retry mechanism: when the job throws an
+ * error (aside from manual abort via timeout) it will retry up to
+ * `maxRetries` times with exponential backoff and jitter. A timeout
+ * is applied to each attempt. If all attempts fail the error is
+ * propagated to the caller and cached so subsequent duplicate calls
+ * also return the error.
  *
  * @param {string|null} idKey A unique idempotency identifier provided by the client
  * @param {function(): Promise<{status:number,response:any}>} jobFn The async
@@ -30,8 +41,8 @@ const runningJobs = new Map();
  */
 async function runJob(idKey, jobFn, opts = {}) {
   const key = idKey || null;
-  const timeoutMs = typeof opts.timeoutMs === "number" ? opts.timeoutMs : 30000;
-  const maxRetries = typeof opts.maxRetries === "number" ? opts.maxRetries : 2;
+  const timeoutMs = typeof opts.timeoutMs === 'number' ? opts.timeoutMs : 30000;
+  const maxRetries = typeof opts.maxRetries === 'number' ? opts.maxRetries : 2;
 
   // If a valid idKey is provided and a cached result exists, return it.
   if (key) {
@@ -47,7 +58,7 @@ async function runJob(idKey, jobFn, opts = {}) {
   const attemptJob = async () => {
     return await Promise.race([
       jobFn(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Job timed out")), timeoutMs)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Job timed out')), timeoutMs)),
     ]);
   };
 
@@ -69,7 +80,7 @@ async function runJob(idKey, jobFn, opts = {}) {
         }
         const backoff = Math.pow(2, attempt) * 100; // exponential backoff in ms
         const jitter = Math.random() * 100;
-        await new Promise(resolve => setTimeout(resolve, backoff + jitter));
+        await new Promise((resolve) => setTimeout(resolve, backoff + jitter));
         continue;
       }
     }
@@ -77,15 +88,20 @@ async function runJob(idKey, jobFn, opts = {}) {
 
   // Create a promise for the running job and store it to dedupe concurrent calls
   const jobPromise = executeWithRetries()
-    .catch(err => {
+    .catch((err) => {
       // Remove failed job from running map so future calls can retry
       if (key) runningJobs.delete(key);
+      updateGauge();
       throw err;
     })
     .finally(() => {
       if (key) runningJobs.delete(key);
+      updateGauge();
     });
-  if (key) runningJobs.set(key, jobPromise);
+  if (key) {
+    runningJobs.set(key, jobPromise);
+    updateGauge();
+  }
   return jobPromise;
 }
 

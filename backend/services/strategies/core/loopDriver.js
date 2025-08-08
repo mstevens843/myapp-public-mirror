@@ -1,8 +1,13 @@
-// core/loopDriver.js
-const { lastTickTimestamps } = require("../../utils/strategy_utils/activeStrategyTracker");
-// Import the health emitter.  This helper writes to an in-memory
-// registry and logs structured lines prefixed with `[HEALTH]`.
-const { emitHealth } = require("../logging/emitHealth");
+// Updated strategy loop driver with Prometheus instrumentation.
+//
+// In addition to emitting health telemetry via `emitHealth`, this
+// version records the duration of each loop iteration to a Prometheus
+// histogram.  The metric is labelled by the strategy name (passed via
+// `opts.label` or falling back to the supplied `botId`).
+
+const { lastTickTimestamps } = require('../../utils/strategy_utils/activeStrategyTracker');
+const { emitHealth } = require('../logging/emitHealth');
+const metrics = require('../../utils/metrics');
 
 /**
  * Generic driver for running a strategy loop on a timer.
@@ -13,6 +18,8 @@ const { emitHealth } = require("../logging/emitHealth");
  * loop iteration, a static restartCount (incremented on restarts by the
  * parent process if desired), and a status of "running".  When the
  * process exits gracefully the driver marks the bot as "stopped".
+ * A Prometheus histogram is also updated with the loop duration for
+ * observability.
  *
  * @param {Function} tick   Async function invoked on each interval
  * @param {number}   intervalMs  Delay between invocations in milliseconds
@@ -20,14 +27,14 @@ const { emitHealth } = require("../logging/emitHealth");
  * @returns {NodeJS.Timeout|null} The interval handle, or null if no interval
  */
 function runStrategyLoop(tick, intervalMs, opts = {}) {
-  const { label, botId = "manual" } = opts;
-  let running = false;              // 🔒 simple mutex
+  const { label, botId = 'manual' } = opts;
+  let running = false; // simple mutex
   let restartCount = 0;
 
   // Emit a "stopped" status on process exit so the health registry knows
   // when a bot has terminated cleanly.
-  process.on("exit", () => {
-    emitHealth(botId, { status: "stopped" });
+  process.on('exit', () => {
+    emitHealth(botId, { status: 'stopped' });
   });
 
   async function wrapped() {
@@ -48,15 +55,21 @@ function runStrategyLoop(tick, intervalMs, opts = {}) {
         lastTickAt: new Date().toISOString(),
         loopDurationMs: duration,
         restartCount,
-        status: "running",
+        status: 'running',
       });
+      // Update Prometheus histogram for loop duration.  Use the
+      // user‑supplied label when provided otherwise fall back to the
+      // botId.  Duration is recorded in milliseconds but converted to
+      // seconds inside the metrics helper.
+      const name = label || botId || 'unknown';
+      metrics.recordStrategyLoop(name, duration);
       running = false;
     }
   }
 
   // Fire once immediately
   wrapped();
-  // If intervalMs>0 schedule recurring invocations
+  // If intervalMs > 0 schedule recurring invocations
   if (intervalMs > 0) return setInterval(wrapped, intervalMs);
   return null;
 }
