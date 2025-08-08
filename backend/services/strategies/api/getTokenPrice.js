@@ -1,59 +1,31 @@
 /**
- * getTokenPriceApp.js
+ * getTokenPrice.js (updated)
  * ---------------------------------
- * “One-shot” latest USD price for any mint.
- * Uses Birdeye → Jupiter fallback, plus SOL/USDC fast-path.
+ * Thin wrapper around the enhanced marketData.getTokenPrice. Accepts
+ * a mint and optionally additional unused parameters (e.g. userId) and
+ * returns the latest price. Errors from the underlying market data
+ * module are caught and converted into a zero value to preserve
+ * backwards compatibility with callers that expect a numeric return.
  */
 
-require("dotenv").config({ path: __dirname + "/../../../.env" });
-const axios = require("axios");
-console.log("Birdeye Key:", process.env.BIRDEYE_API_KEY);
-const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
-const SOL_MINT  = "So11111111111111111111111111111111111111112";
-const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const { getTokenPrice: fetchPrice, getSolPrice } = require('../../../utils/marketData');
 
-const BIRDEYE = "https://public-api.birdeye.so/defi/price";
-const JUPITER = "https://lite-api.jup.ag/tokens/v1/token";
-
-const cache = new Map();
-const TTL_MS = 30_000;
-
-async function getSolPrice() {
-  const { data } = await axios.get(
-    "https://lite-api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112"
-  );
-  return Number(data?.data?.[SOL_MINT]?.price || 0);
-}
-
-async function getTokenPrice(mint) {
-  if (mint === SOL_MINT) return getSolPrice();
-  if (mint === USDC_MINT) return 1;
-
-  const hit = cache.get(mint);
-  if (hit && Date.now() - hit.ts < TTL_MS) return hit.price;
-
-  /* 1️⃣  Birdeye first */
+/**
+ * Retrieve the latest price for a given mint. If more than one
+ * argument is passed the first is ignored and the second is taken
+ * as the mint, mirroring the original function signature used
+ * throughout the codebase (userId, mint).
+ *
+ * @param {...any} args (userId?, mint)
+ * @returns {Promise<number>}
+ */
+async function getTokenPrice(...args) {
+  // The mint is the last argument
+  const mint = args[args.length - 1];
   try {
-    const { data } = await axios.get(BIRDEYE, {
-      params: { address: mint },
-      headers: { "x-chain": "solana", "X-API-KEY": BIRDEYE_API_KEY },
-      timeout: 6000,
-    });
-    const p = Number(data?.data?.value || 0);
-    if (p) { cache.set(mint, { ts: Date.now(), price: p }); return p; }
-  } catch (err) {
-    if (err?.response?.status !== 429)
-      console.warn(`⚠️ Birdeye price failed for ${mint}:`, err.message);
-  }
-
-  /* 2️⃣  Jupiter fallback */
-  try {
-    const { data } = await axios.get(`${JUPITER}/${mint}`, { timeout: 6000 });
-    const price = Number(data?.price || 0);
-    cache.set(mint, { ts: Date.now(), price });
-    return price;
-  } catch (err) {
-    console.warn(`⚠️ Jupiter price failed for ${mint}:`, err.message);
+    return await fetchPrice(mint);
+  } catch (_) {
+    // Price unavailable – preserve original fallback behaviour
     return 0;
   }
 }

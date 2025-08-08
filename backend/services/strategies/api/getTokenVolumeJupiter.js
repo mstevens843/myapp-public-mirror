@@ -1,28 +1,16 @@
 /**
- * getTokenVolumeJupiter.js
+ * getTokenVolumeJupiter.js (updated)
  * ---------------------------------
- * Fetches real 24h USD trading volume via Jupiter Token API.
+ * Delegates volume retrieval to the enhanced marketData.getTokenVolume.
+ * Returns a numeric volume (USD) and falls back to zero on error.
  */
 
-require("dotenv").config({ path: __dirname + "/../../../.env" });
-const axios = require("axios");
-
-const cache = new Map();
-const TTL_MS = 60_000;
+const { getTokenVolume: fetchVolume } = require('../../../utils/marketData');
 
 async function getTokenVolumeJupiter(mint) {
-  const cached = cache.get(mint);
-  if (cached && Date.now() - cached.ts < TTL_MS) return cached.volume;
-
   try {
-    const url = `https://tokens.jup.ag/token/${mint}`;
-    const { data } = await axios.get(url, { timeout: 6000 });
-
-    const volume = Number(data?.daily_volume || 0);
-    cache.set(mint, { ts: Date.now(), volume });
-    return volume;
-  } catch (err) {
-    console.warn(`⚠️ getTokenVolumeJupiter failed for ${mint}:`, err.message);
+    return await fetchVolume(mint);
+  } catch (_) {
     return 0;
   }
 }
