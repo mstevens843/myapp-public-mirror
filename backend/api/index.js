@@ -13,6 +13,7 @@ const tpsl = require("./tpsl");
 const prefs = require("./prefs.js");
 const safety = require("./safety.js");
 const auth = require("./auth.js");
+const { authLimiter } = require('../middleware/rateLimit');
 const paymentRoutes = require('./payment');
 const accountsRoute = require("./accounts");
 const schedulerRoutes = require("./schedulerRoutes");
@@ -72,7 +73,9 @@ router.use("/safety", safety);
 console.log("✅ /safety router loaded");
 router.use("/schedule", schedulerRoutes);
 console.log("✅ /schedule router loaded");
-router.use("/auth", auth);
+// Apply a stricter rate limit on authentication endpoints to mitigate brute
+// force attempts.  See middleware/rateLimit.js for configuration.
+router.use("/auth", authLimiter, auth);
 console.log("✅ /auth router loaded");
 router.use('/payment', paymentRoutes);
 console.log("✅ /payment router loaded");

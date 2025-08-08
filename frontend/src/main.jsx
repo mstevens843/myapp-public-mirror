@@ -36,6 +36,7 @@ import { PhantomWalletAdapter } from "@solana/wallet-adapter-wallets";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import ChartPanelRoute from "./components/Tables_Charts/ChartPanelRoute";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 function AuthHandler() {
   const navigate = useNavigate();
@@ -71,9 +72,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(
             <UserPrefsProvider>
               <PrefsProvider>
                 <SupabaseSessionProvider>
-                  <BrowserRouter>
-                    <AuthHandler />
-                    <Routes>
+                  <ErrorBoundary>
+                    <BrowserRouter>
+                      <AuthHandler />
+                      <Routes>
                       <Route path="/" element={<LandingPage />} />
                       <Route path="/verify-2fa" element={<Verify2FA />} />
                       <Route path="/forgot-password" element={<ForgotPassword />} />
@@ -100,9 +102,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                       <Route path="/privacy" element={<PrivacyPolicy />} />
                       <Route path="/payment-success" element={<PaymentSuccess />} />
                       <Route path="/payment-cancel" element={<PaymentCancel />} />
-                    </Routes>
-                    <Toaster position="top-right" reverseOrder={false} />
-                  </BrowserRouter>
+                      </Routes>
+                      <Toaster position="top-right" reverseOrder={false} />
+                    </BrowserRouter>
+                  </ErrorBoundary>
                 </SupabaseSessionProvider>
               </PrefsProvider>
             </UserPrefsProvider>

@@ -16,15 +16,24 @@
  * and production script execution (CLI Mode)
  */
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
-const express = require("express");
-const cors = require("cors");
-const cookieParser = require("cookie-parser");
-const http = require("http");
-const { WebSocketServer } = require("ws");
-const { spawn } = require("child_process");
-const strategies = require("./services/strategies");
-const loadKeypair = require("./utils/wallet");
-const connection = require("./config/rpc");
+const express = require('express');
+const cookieParser = require('cookie-parser');
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const { spawn } = require('child_process');
+const strategies = require('./services/strategies');
+const loadKeypair = require('./utils/wallet');
+const connection = require('./config/rpc');
+// Load and configure modular middleware.  See backend/middleware for
+// implementation details.  These provide environment validation, CORS,
+// security headers, rate limiting, request IDs and centralised error handling.
+const validateEnv = require('./middleware/validateEnv');
+const createCors = require('./middleware/cors');
+const securityHeaders = require('./middleware/securityHeaders');
+const { createRateLimiter, authLimiter } = require('./middleware/rateLimit');
+const requestId = require('./middleware/requestId');
+const errorHandler = require('./middleware/errorHandler');
+const logger = require('./utils/logger');
 // const { loadWalletsFromLabels } = require("./services/utils/wallet/walletManager"); // 
 const { startNetworthCron } = require("./services/utils/analytics/netWorthSnapshot");
 const cron = require("node-cron");
@@ -34,13 +43,12 @@ const { injectBroadcast } = require("./services/strategies/logging/strategyLogge
 require("./loadEnv");
 const { startBackgroundJobs } = require("./services/backgroundJobs");
 
+// Ensure critical environment variables are present before proceeding.  This
+// throws early if misconfigured, preventing undefined behaviour at runtime.
+validateEnv();
+
 // -----------------------------------------------------------------------------
-// Additional security modules. These help harden the server against common
-// vulnerabilities by adding sane HTTP headers and limiting request rates.
-// Helmet sets various headers like X‑Frame‑Options, X‑Content‑Type‑Options, etc.
-// Rate limiting mitigates brute force attacks and DoS by capping request volume.
-const helmet = require("helmet");
-const rateLimit = require("express-rate-limit");
+// Additional security modules are provided via middleware under ./middleware.
 
 // If a mode is passed via CLI, run strategy directly.
 const modeFromCLI = process.argv[2];
@@ -99,20 +107,21 @@ if (modeFromCLI) {
   // Server hardening: remove X-Powered-By header and apply security middleware.
   app.disable('x-powered-by');
 
-  // Apply Helmet to set a broad set of security-related HTTP headers. We disable
-  // the built-in CSP here to avoid conflicts with dynamic scripts in the frontend.
-  app.use(helmet({
-    contentSecurityPolicy: false,
-  }));
+  // Assign a unique ID to each request for log correlation.
+  app.use(requestId);
 
-  // Apply a global rate limiter to protect against abuse. The maximum number of
-  // requests per window can be tuned via RATE_LIMIT_MAX_REQUESTS env var. We skip
-  // Stripe webhooks to avoid interfering with third-party callbacks.
-  const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '300', 10),
-    standardHeaders: true,
-    legacyHeaders: false,
+  // Apply security headers.  Content Security Policy can be enabled in
+  // report-only mode via ENABLE_CSP_REPORT_ONLY env var.  See
+  // middleware/securityHeaders.js for details.
+  app.use(securityHeaders());
+
+  // Enforce strict CORS with an allow-list derived from env vars and sensible
+  // development defaults.  Credentials are enabled to allow cookie-based auth.
+  app.use(createCors());
+
+  // Apply a global rate limiter to protect against abuse.  Limits can be tuned
+  // via RATE_LIMIT_WINDOW_MS and RATE_LIMIT_MAX_REQUESTS environment variables.
+  const globalLimiter = createRateLimiter({
     skip: (req) => req.originalUrl === '/api/payment/webhook',
   });
   app.use(globalLimiter);
@@ -124,52 +133,7 @@ if (modeFromCLI) {
 
   let currentModeProcess = null; // Track current running strategy (if spawned via API)
 
-  // ✅ Allow frontend to send credentials (cookies) on cross‑origin requests.
-  // In practice CORS errors often occur when the expected FRONTEND_URL is not
-  // defined or the client is served from an unexpected origin (e.g. using a
-  // different port during development).  To make CORS behaviour more
-  // predictable we derive an allow‑list from either CORS_ALLOWED_ORIGINS
-  // (comma‑separated) or FRONTEND_URL.  If neither are set we simply allow
-  // any origin.  This prevents sudden “CORS policy” failures if env vars are
-  // missing or misconfigured.  The callback signature follows the express‑cors
-  // docs: callback(err, allow).  Requests without an Origin header (e.g.
-  // server‑to‑server or curl) are always allowed.
-  let allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || process.env.FRONTEND_URL || "")
-    .split(",")
-    .map((o) => o.trim())
-    .filter(Boolean);
-
-  // During local development, many developers run the frontend on port 5173
-  // (the default Vite dev server port) or 5174. To avoid unexpected CORS
-  // failures when these origins are not specified in environment variables,
-  // automatically allow localhost origins commonly used in dev. This does
-  // not affect production deployments when environment variables are
-  // configured correctly.
-  const devOrigins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5174",
-  ];
-  allowedOrigins = [...new Set([...allowedOrigins, ...devOrigins])];
-
-  app.use(
-    cors({
-      origin: (origin, callback) => {
-        // allow requests with no origin like mobile apps or curl
-        if (!origin) return callback(null, true);
-        // no allow list configured → allow all origins
-        if (allowedOrigins.length === 0) return callback(null, true);
-        // check against allow list
-        if (allowedOrigins.includes(origin)) {
-          return callback(null, true);
-        }
-        // otherwise reject
-        return callback(new Error("Not allowed by CORS"));
-      },
-      credentials: true,
-    })
-  );
+  // CORS is enforced via createCors() above.  See middleware/cors.js for details.
 
 // ✅ Required to read cookies like access_token from incoming requests
 app.use(cookieParser());
@@ -182,6 +146,20 @@ app.use((req, res, next) => {
     express.json()(req, res, next);
   }
 });
+
+  // ---------------------------------------------------------------------------
+  // Liveness & readiness probes.  These endpoints allow external monitors
+  // (Kubernetes, load balancers, uptime checks) to verify that the service is
+  // running and ready to handle requests.  Do not perform heavy work or
+  // disclose sensitive information here.
+  app.get('/health', (req, res) => {
+    res.status(200).json({ status: 'ok' });
+  });
+  app.get('/ready', (req, res) => {
+    // In a more complete implementation you might test DB or dependency
+    // connectivity here.  Keep it lightweight to avoid blocking.
+    res.status(200).json({ status: 'ready' });
+  });
 
 
 
@@ -199,10 +177,9 @@ app.use((req, res, next) => {
 }, apiRouter);
 
 
-app.use((err, req, res, next) => {           // <‑‑ catch every uncaught error
-  console.error("💥 Unhandled error:", err);  // this still prints full stack
-  res.status(500).json({ error: err.message }); // browser now sees the real msg
-});
+// Centralised error handler.  Logs the error and returns a sanitized
+// response.  Must be registered after all other middleware and routes.
+app.use(errorHandler);
 
   // Create HTTP + WebSocket server (for logsConsole)
   const server = http.createServer(app);
