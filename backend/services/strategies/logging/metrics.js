@@ -1,89 +1,103 @@
 // backend/services/strategies/logging/metrics.js
-/*
- * metrics.js – Lightweight metrics recorder for strategy events.
+//
+// Lightweight metrics collector used throughout the Turbo Sniper strategy.
+//
+// This module exports simple counter and histogram helpers that can be
+// hooked into your existing telemetry pipeline (e.g. Prometheus or
+// Datadog). Each metric is stored in memory and exposed via getters
+// for scraping or exporting. The intent is to keep the hot path
+// extremely lightweight – incrementing a counter or observing a
+// histogram adds negligible overhead. Heavy aggregation or remote
+// network calls should be performed asynchronously elsewhere.
+//
+// If you already have a metrics implementation, feel free to proxy
+// these helpers to it rather than using the internal maps. For
+// strategies without an existing metrics backend this module will
+// still collect values which can be logged on exit for debugging.
+
+'use strict';
+
+/**
+ * A simple in‑memory counter implementation. Keys are the metric
+ * names; values are numbers. Labels are flattened into a string
+ * representation so that different label sets are tracked
+ * independently. The flattening scheme is simple and stable to
+ * discourage dynamic label creation on the hot path.
+ */
+const counters = new Map();
+
+/**
+ * A simple histogram implementation. Each entry stores an array
+ * of observed values. In production you might want to keep a
+ * rolling window instead of unbounded arrays; here we leave the
+ * implementation simple and focus on correctness.
+ */
+const histograms = new Map();
+
+/**
+ * Serialize a labels object into a deterministic string. The
+ * resulting string uses ‘|’ as a separator and sorts keys to
+ * guarantee consistent ordering. Undefined labels or null values
+ * are dropped.
  *
- * This module exposes a set of functions for recording timing and
- * outcome information within the Turbo Sniper strategy.  The data is
- * stored in memory for inspection by other modules or exported to
- * external monitoring systems.  Each call simply appends to arrays or
- * increments counters; no aggregation is performed here.  A consumer
- * can snapshot the current state via the `snapshot()` method.
+ * @param {Object} labels
+ * @returns {string}
  */
-
-// Internal state.  Times are stored in milliseconds; inclusion slots
-// are stored as integers.
-const state = {
-  timings: {
-    detectToQuote: [],
-    quoteToBuild: [],
-    buildToSubmit: [],
-  },
-  inclusionSlots: [],
-  retries: 0,
-  fails: {},
-  successes: 0,
-};
+function serializeLabels(labels = {}) {
+  const entries = Object.entries(labels)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length === 0) return '';
+  return entries.map(([k, v]) => `${k}:${v}`).join('|');
+}
 
 /**
- * Record a timing measurement.
+ * Increment a counter by a given amount (default 1).
  *
- * @param {string} phase One of 'detectToQuote', 'quoteToBuild', 'buildToSubmit'
- * @param {number} ms Duration in milliseconds
+ * @param {string} name
+ * @param {Object} [labels]
+ * @param {number} [inc]
  */
-function recordTiming(phase, ms) {
-  if (state.timings[phase]) {
-    state.timings[phase].push(ms);
-  }
+function incCounter(name, labels = {}, inc = 1) {
+  const key = `${name}${serializeLabels(labels)}`;
+  const current = counters.get(key) || 0;
+  counters.set(key, current + inc);
 }
 
 /**
- * Record the difference in slots between submission and inclusion.
+ * Record a value in a histogram.
  *
- * @param {number} slots Difference in slots
+ * @param {string} name
+ * @param {number} value
+ * @param {Object} [labels]
  */
-function recordInclusion(slots) {
-  if (Number.isFinite(slots)) {
-    state.inclusionSlots.push(slots);
-  }
+function observeHistogram(name, value, labels = {}) {
+  const key = `${name}${serializeLabels(labels)}`;
+  const arr = histograms.get(key) || [];
+  arr.push(value);
+  histograms.set(key, arr);
 }
 
 /**
- * Increment the retry counter.
+ * Retrieve all counter values. Useful for exposing aggregated
+ * metrics at process exit or via an HTTP endpoint. Do not call
+ * this on the hot path.
  */
-function recordRetry() {
-  state.retries += 1;
+function getCounters() {
+  return new Map(counters);
 }
 
 /**
- * Record a failure reason.  Reasons are aggregated in a dictionary.
- *
- * @param {string} reason Descriptive failure label
+ * Retrieve all histogram observations. Useful for debugging or
+ * exporting summary statistics. Do not call this on the hot path.
  */
-function recordFail(reason) {
-  const key = String(reason || 'unknown');
-  state.fails[key] = (state.fails[key] || 0) + 1;
-}
-
-/**
- * Increment the success counter.
- */
-function recordSuccess() {
-  state.successes += 1;
-}
-
-/**
- * Return a shallow copy of the current metrics state.  Consumers
- * should treat the returned object as read‑only.
- */
-function snapshot() {
-  return JSON.parse(JSON.stringify(state));
+function getHistograms() {
+  return new Map(histograms);
 }
 
 module.exports = {
-  recordTiming,
-  recordInclusion,
-  recordRetry,
-  recordFail,
-  recordSuccess,
-  snapshot,
+  incCounter,
+  observeHistogram,
+  getCounters,
+  getHistograms,
 };

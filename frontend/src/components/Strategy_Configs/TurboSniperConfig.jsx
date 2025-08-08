@@ -35,6 +35,9 @@ export const OPTIONAL_FIELDS = [
   "postBuyWatch",
   // iceberg & impact
   "iceberg", "impactAbortPct", "dynamicSlippageMaxPct",
+  // new (exposed but summarized elsewhere)
+  "leaderTiming", "quoteTtlMs", "retryPolicy", "idempotencyTtlSec",
+  "parallelWallets", "pumpfun", "airdrops",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -105,12 +108,57 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
     autoRiskManage       : false,
     privateRpcUrl        : "",
 
-    // Jito bundle tuning
+    // Bundle / CU tuning (available regardless of Jito usage)
     bundleStrategy       : "topOfBlock",
     cuAdapt              : false,
     cuPriceMicroLamportsMin: "",
     cuPriceMicroLamportsMax: "",
     tipCurve             : "flat",
+
+    // Leader timing (new)
+    leaderTiming         : {
+      enabled    : false,
+      preflightMs: 220,
+      windowSlots: 2,
+    },
+
+    // Quote cache + idempotency (new)
+    quoteTtlMs           : 600,
+    idempotencyTtlSec    : 60,
+
+    // Retry policy (new)
+    retryPolicy          : {
+      max         : 3,
+      bumpCuStep  : 2000,
+      bumpTipStep : 1000,
+      routeSwitch : true,
+      rpcFailover : true,
+    },
+
+    // Parallel wallets (new)
+    parallelWallets      : {
+      enabled    : false,
+      walletIds  : [],
+      splitPct   : [0.5, 0.5],
+      maxParallel: 2,
+    },
+
+    // Pump.fun listener (new)
+    pumpfun              : {
+      enabled       : false,
+      thresholdPct  : 0.55,
+      minSolLiquidity: 10,
+      cooldownSec   : 120,
+    },
+
+    // Airdrop sniffer (new)
+    airdrops            : {
+      enabled            : false,
+      autoSell           : true,
+      whitelistMints     : [],
+      minUsdValue        : 5,
+      maxSellSlippagePct : 1.0,
+    },
 
     // Direct AMM fallback
     directAmmFallback    : false,
@@ -151,7 +199,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               ? checked
               : value === ''
               ? ''
-              : parseFloat(value),
+              : isNaN(Number(value)) ? value : parseFloat(value),
         },
       }));
       return;
@@ -176,7 +224,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               "bundleStrategy",
             ].includes(name)
           ? value
-          : value === "" ? "" : parseFloat(value),
+          : value === "" ? "" : (isNaN(Number(value)) ? value : parseFloat(value)),
     }));
   };
 
@@ -292,8 +340,146 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         ))}
       </div>
 
-      {/* ——— Advanced Sniper Flags ——— */}
+      {/* ——— Turbo & Risk Options ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
+        {/* Bundle Strategy — now always visible */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Bundle Strategy <StrategyTooltip name="bundleStrategy" />
+          </span>
+          <select
+            name="bundleStrategy"
+            value={merged.bundleStrategy || "topOfBlock"}
+            onChange={change}
+            disabled={disabled}
+            className={`${inp} appearance-none pr-10`}
+          >
+            <option value="topOfBlock">topOfBlock</option>
+            <option value="backrun">backrun</option>
+            <option value="private">private</option>
+          </select>
+        </label>
+
+        {/* Turbo execution toggle */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="turboMode"
+            checked={!!merged.turboMode}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Turbo Mode <StrategyTooltip name="turboMode" />
+        </label>
+      </div>
+
+      {/* Auto risk & Private RPC */}
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        {/* Auto risk management toggle */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="autoRiskManage"
+            checked={!!merged.autoRiskManage}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Auto Risk Manage <StrategyTooltip name="autoRiskManage" />
+        </label>
+        {/* Private RPC URL input */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Private RPC URL <StrategyTooltip name="privateRpcUrl" />
+          </span>
+          <input
+            type="text"
+            name="privateRpcUrl"
+            value={merged.privateRpcUrl ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="https://example-rpc"
+            className={inp}
+          />
+        </label>
+      </div>
+
+      {/* ——— Leader Timing + Quote/Idem TTL ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="leaderTiming.enabled"
+            checked={!!merged.leaderTiming?.enabled}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Leader Timing (pre-slot fire) <StrategyTooltip name="leaderTiming" />
+        </label>
+        {merged.leaderTiming?.enabled && (
+          <div className="grid sm:grid-cols-2 gap-4 w-full">
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Preflight (ms) <StrategyTooltip name="leaderTiming.preflightMs" />
+              </span>
+              <input
+                type="number"
+                name="leaderTiming.preflightMs"
+                value={merged.leaderTiming?.preflightMs ?? 220}
+                onChange={change}
+                disabled={disabled}
+                className={inp}
+              />
+            </label>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Window Slots <StrategyTooltip name="leaderTiming.windowSlots" />
+              </span>
+              <input
+                type="number"
+                name="leaderTiming.windowSlots"
+                value={merged.leaderTiming?.windowSlots ?? 2}
+                onChange={change}
+                disabled={disabled}
+                className={inp}
+              />
+            </label>
+          </div>
+        )}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Quote TTL (ms) <StrategyTooltip name="quoteTtlMs" />
+          </span>
+          <input
+            type="number"
+            name="quoteTtlMs"
+            value={merged.quoteTtlMs ?? 600}
+            onChange={change}
+            disabled={disabled}
+            className={inp}
+          />
+        </label>
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Idempotency TTL (sec) <StrategyTooltip name="idempotencyTtlSec" />
+          </span>
+          <input
+            type="number"
+            name="idempotencyTtlSec"
+            value={merged.idempotencyTtlSec ?? 60}
+            onChange={change}
+            disabled={disabled}
+            className={inp}
+          />
+        </label>
+      </div>
+
+      {/* ——— Advanced Sniper Flags ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         {/* Ghost mode */}
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -387,7 +573,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       </div>
 
       {/* ——— Jito bundle & fee tuning ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -399,28 +585,67 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
           Use Jito Bundle <StrategyTooltip name="useJitoBundle" />
         </label>
-        {merged.useJitoBundle && (
-          <div className="flex flex-col gap-2">
-            <input
-              type="number"
-              name="jitoTipLamports"
-              value={merged.jitoTipLamports ?? ""}
-              onChange={change}
-              disabled={disabled}
-              placeholder="Tip Lamports (e.g. 1000)"
-              className={inp}
-            />
-            <input
-              type="text"
-              name="jitoRelayUrl"
-              value={merged.jitoRelayUrl ?? ""}
-              onChange={change}
-              disabled={disabled}
-              placeholder="Custom Jito Relay URL"
-              className={inp}
-            />
-          </div>
+        {/* removed: bundleStrategy select from inside Jito block; it is now always visible above */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="cuAdapt"
+            checked={!!merged.cuAdapt}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Adaptive CU Price <StrategyTooltip name="cuAdapt" />
+        </label>
+        {merged.cuAdapt && (
+          <>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                CU Price Min (µLAM)
+                <StrategyTooltip name="cuPriceMicroLamportsMin" />
+              </span>
+              <input
+                type="number"
+                name="cuPriceMicroLamportsMin"
+                value={merged.cuPriceMicroLamportsMin ?? ""}
+                onChange={change}
+                disabled={disabled}
+                placeholder="e.g. 100"
+                className={inp}
+              />
+            </label>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                CU Price Max (µLAM)
+                <StrategyTooltip name="cuPriceMicroLamportsMax" />
+              </span>
+              <input
+                type="number"
+                name="cuPriceMicroLamportsMax"
+                value={merged.cuPriceMicroLamportsMax ?? ""}
+                onChange={change}
+                disabled={disabled}
+                placeholder="e.g. 1000"
+                className={inp}
+              />
+            </label>
+          </>
         )}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Tip Curve <StrategyTooltip name="tipCurve" />
+          </span>
+          <select
+            name="tipCurve"
+            value={merged.tipCurve || "flat"}
+            onChange={change}
+            disabled={disabled}
+            className={`${inp} appearance-none pr-10`}
+          >
+            <option value="flat">flat</option>
+            <option value="ramp">ramp</option>
+          </select>
+        </label>
       </div>
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <label className="flex items-center gap-2 text-sm">
@@ -437,7 +662,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       </div>
 
       {/* ——— RPC & Kill Switch ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         <label className="flex flex-col text-sm font-medium gap-1">
           <span className="flex items-center gap-1">
             RPC Endpoints (comma) <StrategyTooltip name="rpcEndpoints" />
@@ -510,7 +735,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       </div>
 
       {/* ——— DEX prefs & split ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         <label className="flex flex-col text-sm font-medium gap-1">
           <span className="flex items-center gap-1">
             Allowed DEXes <StrategyTooltip name="allowedDexes" />
@@ -554,167 +779,87 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         </label>
       </div>
 
-      {/* ——— TP Ladder & Trailing Stop ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
-        <label className="flex flex-col text-sm font-medium gap-1">
-          <span className="flex items-center gap-1">
-            TP Ladder (%) <StrategyTooltip name="tpLadder" />
-          </span>
-          <input
-            type="text"
-            name="tpLadder"
-            value={merged.tpLadder ?? ""}
-            onChange={change}
-            disabled={disabled}
-            placeholder="e.g. 25,25,50"
-            className={inp}
-          />
-        </label>
-        <label className="flex flex-col text-sm font-medium gap-1">
-          <span className="flex items-center gap-1">
-            Trailing Stop (%) <StrategyTooltip name="trailingStopPct" />
-          </span>
-          <input
-            type="number"
-            name="trailingStopPct"
-            value={merged.trailingStopPct ?? ""}
-            onChange={change}
-            disabled={disabled}
-            placeholder="e.g. 10"
-            className={inp}
-          />
-        </label>
-      </div>
-
-      {/* ——— Turbo & Risk Options ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
-        {/* Turbo execution toggle */}
+      {/* ——— Parallel Wallets (new) ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
-            name="turboMode"
-            checked={!!merged.turboMode}
+            name="parallelWallets.enabled"
+            checked={!!merged.parallelWallets?.enabled}
             onChange={change}
             disabled={disabled}
             className="accent-emerald-500"
           />
-          Turbo Mode <StrategyTooltip name="turboMode" />
+          Enable Parallel Filler <StrategyTooltip name="parallelWallets" />
         </label>
-        {/* Auto risk management toggle */}
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            name="autoRiskManage"
-            checked={!!merged.autoRiskManage}
-            onChange={change}
-            disabled={disabled}
-            className="accent-emerald-500"
-          />
-          Auto Risk Manage <StrategyTooltip name="autoRiskManage" />
-        </label>
+        {merged.parallelWallets?.enabled && (
+          <div className="flex flex-col gap-2 w-full">
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Wallet IDs (comma) <StrategyTooltip name="parallelWallets.walletIds" />
+              </span>
+              <input
+                type="text"
+                value={(merged.parallelWallets?.walletIds ?? []).join(",")}
+                onChange={(e) => {
+                  const ids = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                  setConfig((prev) => ({
+                    ...prev,
+                    parallelWallets: {
+                      ...(prev.parallelWallets ?? defaults.parallelWallets),
+                      walletIds: ids,
+                    },
+                  }));
+                }}
+                disabled={disabled}
+                placeholder="id1,id2"
+                className={inp}
+              />
+            </label>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Split Pct (comma) <StrategyTooltip name="parallelWallets.splitPct" />
+              </span>
+              <input
+                type="text"
+                value={(merged.parallelWallets?.splitPct ?? [0.5,0.5]).join(",")}
+                onChange={(e) => {
+                  const parts = e.target.value
+                    .split(',')
+                    .map((s) => parseFloat(s.trim()))
+                    .filter((n) => Number.isFinite(n));
+                  setConfig((prev) => ({
+                    ...prev,
+                    parallelWallets: {
+                      ...(prev.parallelWallets ?? defaults.parallelWallets),
+                      splitPct: parts,
+                    },
+                  }));
+                }}
+                disabled={disabled}
+                placeholder="0.5,0.5"
+                className={inp}
+              />
+            </label>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Max Parallel <StrategyTooltip name="parallelWallets.maxParallel" />
+              </span>
+              <input
+                type="number"
+                name="parallelWallets.maxParallel"
+                value={merged.parallelWallets?.maxParallel ?? 2}
+                onChange={change}
+                disabled={disabled}
+                className={inp}
+              />
+            </label>
+          </div>
+        )}
       </div>
-      {/* Private RPC URL input */}
-      <div className="grid sm:grid-cols-1 gap-4 mt-4">
-        <label className="flex flex-col text-sm font-medium gap-1">
-          <span className="flex items-center gap-1">
-            Private RPC URL <StrategyTooltip name="privateRpcUrl" />
-          </span>
-          <input
-            type="text"
-            name="privateRpcUrl"
-            value={merged.privateRpcUrl ?? ""}
-            onChange={change}
-            disabled={disabled}
-            placeholder="https://example-rpc"
-            className={inp}
-          />
-        </label>
-      </div>
-
-      {/* ——— Jito Bundle Fine Tuning ——— */}
-      {merged.useJitoBundle && (
-        <div className="grid sm:grid-cols-2 gap-4 mt-4">
-          <label className="flex flex-col text-sm font-medium gap-1">
-            <span className="flex items-center gap-1">
-              Bundle Strategy <StrategyTooltip name="bundleStrategy" />
-            </span>
-            <select
-              name="bundleStrategy"
-              value={merged.bundleStrategy || "topOfBlock"}
-              onChange={change}
-              disabled={disabled}
-              className={`${inp} appearance-none pr-10`}
-            >
-              <option value="topOfBlock">topOfBlock</option>
-              <option value="backrun">backrun</option>
-              <option value="private">private</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              name="cuAdapt"
-              checked={!!merged.cuAdapt}
-              onChange={change}
-              disabled={disabled}
-              className="accent-emerald-500"
-            />
-            Adaptive CU Price <StrategyTooltip name="cuAdapt" />
-          </label>
-          {merged.cuAdapt && (
-            <>
-              <label className="flex flex-col text-sm font-medium gap-1">
-                <span className="flex items-center gap-1">
-                  CU Price Min (µLAM)
-                  <StrategyTooltip name="cuPriceMicroLamportsMin" />
-                </span>
-                <input
-                  type="number"
-                  name="cuPriceMicroLamportsMin"
-                  value={merged.cuPriceMicroLamportsMin ?? ""}
-                  onChange={change}
-                  disabled={disabled}
-                  placeholder="e.g. 100"
-                  className={inp}
-                />
-              </label>
-              <label className="flex flex-col text-sm font-medium gap-1">
-                <span className="flex items-center gap-1">
-                  CU Price Max (µLAM)
-                  <StrategyTooltip name="cuPriceMicroLamportsMax" />
-                </span>
-                <input
-                  type="number"
-                  name="cuPriceMicroLamportsMax"
-                  value={merged.cuPriceMicroLamportsMax ?? ""}
-                  onChange={change}
-                  disabled={disabled}
-                  placeholder="e.g. 1000"
-                  className={inp}
-                />
-              </label>
-            </>
-          )}
-          <label className="flex flex-col text-sm font-medium gap-1">
-            <span className="flex items-center gap-1">
-              Tip Curve <StrategyTooltip name="tipCurve" />
-            </span>
-            <select
-              name="tipCurve"
-              value={merged.tipCurve || "flat"}
-              onChange={change}
-              disabled={disabled}
-              className={`${inp} appearance-none pr-10`}
-            >
-              <option value="flat">flat</option>
-              <option value="ramp">ramp</option>
-            </select>
-          </label>
-        </div>
-      )}
 
       {/* ——— Direct AMM Fallback ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -760,23 +905,87 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         )}
       </div>
 
+      {/* ——— Retry Policy (new) ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">Retry Policy</div>
+        <div className="grid sm:grid-cols-3 gap-4">
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Max Attempts
+            <input
+              type="number"
+              name="retryPolicy.max"
+              value={merged.retryPolicy?.max ?? 3}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Bump CU Step
+            <input
+              type="number"
+              name="retryPolicy.bumpCuStep"
+              value={merged.retryPolicy?.bumpCuStep ?? 2000}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Bump Tip Step
+            <input
+              type="number"
+              name="retryPolicy.bumpTipStep"
+              value={merged.retryPolicy?.bumpTipStep ?? 1000}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+        </div>
+        <div className="grid sm:grid-cols-2 gap-4 mt-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="retryPolicy.routeSwitch"
+              checked={merged.retryPolicy?.routeSwitch !== false}
+              onChange={change}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            Route Switch
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="retryPolicy.rpcFailover"
+              checked={merged.retryPolicy?.rpcFailover !== false}
+              onChange={change}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            RPC Failover
+          </label>
+        </div>
+      </div>
+
       {/* ——— Post-Buy Watch ——— */}
-      <div className="grid sm:grid-cols-3 gap-4 mt-4">
+      <div className="grid sm:grid-cols-3 gap-4 mt-6">
         <label className="flex flex-col text-sm font-medium gap-1">
           <span className="flex items-center gap-1">
             Post-Buy Duration (sec)
             <StrategyTooltip name="postBuyWatch.durationSec" />
           </span>
-          <input
-            type="number"
-            name="postBuyWatch.durationSec"
-            min="1"
-            value={merged.postBuyWatch?.durationSec ?? 180}
-            onChange={change}
-            disabled={disabled}
-            className={inp}
-          />
         </label>
+        <input
+          type="number"
+          name="postBuyWatch.durationSec"
+          min="1"
+          value={merged.postBuyWatch?.durationSec ?? 180}
+          onChange={change}
+          disabled={disabled}
+          className={inp}
+        />
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -802,7 +1011,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       </div>
 
       {/* ——— Iceberg Entries & Impact Guard ——— */}
-      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -882,6 +1091,134 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             className={inp}
           />
         </label>
+      </div>
+
+      {/* ——— Pump.fun Listener (new) ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">Pump.fun Listener</div>
+        <div className="grid sm:grid-cols-4 gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="pumpfun.enabled"
+              checked={!!merged.pumpfun?.enabled}
+              onChange={change}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            Enabled
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Threshold (0–1)
+            <input
+              type="number"
+              step="0.01"
+              name="pumpfun.thresholdPct"
+              value={merged.pumpfun?.thresholdPct ?? 0.55}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Min SOL Liquidity
+            <input
+              type="number"
+              name="pumpfun.minSolLiquidity"
+              value={merged.pumpfun?.minSolLiquidity ?? 10}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Cooldown (sec)
+            <input
+              type="number"
+              name="pumpfun.cooldownSec"
+              value={merged.pumpfun?.cooldownSec ?? 120}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* ——— Airdrop Sniffer (new) ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">Airdrop / Dust Sniffer</div>
+        <div className="grid sm:grid-cols-4 gap-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="airdrops.enabled"
+              checked={!!merged.airdrops?.enabled}
+              onChange={change}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            Enabled
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="airdrops.autoSell"
+              checked={merged.airdrops?.autoSell !== false}
+              onChange={change}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            Auto Sell
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Min USD Value
+            <input
+              type="number"
+              name="airdrops.minUsdValue"
+              value={merged.airdrops?.minUsdValue ?? 5}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Max Sell Slippage (%)
+            <input
+              type="number"
+              step="0.1"
+              name="airdrops.maxSellSlippagePct"
+              value={merged.airdrops?.maxSellSlippagePct ?? 1.0}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+        </div>
+        {merged.airdrops?.enabled && (
+          <div className="mt-3">
+            <label className="flex flex-col text-sm font-medium gap-1">
+              Whitelist Mints (comma)
+              <input
+                type="text"
+                value={(merged.airdrops?.whitelistMints ?? []).join(",")}
+                onChange={(e) => {
+                  const mints = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                  setConfig((prev) => ({
+                    ...prev,
+                    airdrops: {
+                      ...(prev.airdrops ?? defaults.airdrops),
+                      whitelistMints: mints,
+                    },
+                  }));
+                }}
+                disabled={disabled}
+                placeholder="mint1,mint2"
+                className={inp}
+              />
+            </label>
+          </div>
+        )}
       </div>
 
       {/* ——— Token feed selector, Advanced, children ——— */}

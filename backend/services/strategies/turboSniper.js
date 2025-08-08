@@ -1,5 +1,114 @@
 // backend/services/strategies/turboSniper.js
-/* turboSniper.js  – Turbo-ready (updated)
+//
+// Entry point for the Turbo Sniper strategy. Wires together
+// configuration, executor, pump.fun listener and airdrop sniffer.
+// Individual components are kept small so that the main strategy
+// file remains easy to audit. All asynchronous work is pushed
+// outside of the synchronous hot path. To start the strategy
+// instantiate TurboSniper with a connection, validator identity
+// and configuration then call `start()`.
+
+'use strict';
+
+const { Connection, clusterApiUrl } = require('@solana/web3.js');
+const TradeExecutorTurbo = require('./core/tradeExecutorTurbo');
+const pumpfunListener = require('./pumpfun/listener');
+const airdropSniffer = require('../airdrops/sniffer');
+const { incCounter, observeHistogram } = require('./logging/metrics');
+
+/**
+ * Lightweight orchestrator wrapping the turbo trade executor, pump.fun
+ * listener and airdrop sniffer. This class is intended for simple
+ * integrations where you want to snipe pump events or auto‑sell
+ * airdrops with minimal configuration. More advanced usage such as
+ * automated token selection, safety checks and iceberg orders can
+ * leverage the `turboSniperStrategy` function exported from this
+ * module.
+ */
+class TurboSniper {
+  /**
+   * Construct a new Turbo Sniper strategy.
+   *
+   * @param {Object} opts
+   * @param {Connection} [opts.connection] Solana connection. If omitted a new connection
+   *   will be created using clusterApiUrl('mainnet-beta').
+   * @param {string} opts.validatorIdentity The public key of your validator for leader scheduling.
+   * @param {Object} opts.config Strategy configuration. See TurboSniperConfig.jsx for defaults.
+   * @param {string[]} opts.walletIds Wallets to sniff for airdrops.
+   */
+  constructor({ connection, validatorIdentity, config, walletIds = [] }) {
+    this.connection = connection || new Connection(clusterApiUrl('mainnet-beta'), 'confirmed');
+    this.config = config || {};
+    this.walletIds = walletIds;
+    this.executor = new TradeExecutorTurbo({ connection: this.connection, validatorIdentity });
+    this.running = false;
+  }
+
+  /**
+   * Start the strategy. Listens for pumpfun events and kicks off
+   * airdrop sniffing. Consumer code is expected to call
+   * `stop()` when finished.
+   */
+  start() {
+    if (this.running) return;
+    this.running = true;
+    const cfg = this.config;
+    // Start pumpfun listener if enabled
+    if (cfg.pumpfun && cfg.pumpfun.enabled) {
+      pumpfunListener.on('snipe', async (event) => {
+        // On pump event, attempt to snipe using our executor. The
+        // trade parameters should be derived from strategy config
+        // (e.g. notional size, slippage). Here we use a simple
+        // example that buys a fixed amount of SOL worth of the mint.
+        const tradeParams = {
+          inputMint: cfg.inputMint || 'So11111111111111111111111111111111111111112',
+          outputMint: event.mint,
+          amount: cfg.notionalAmount || 1 * 10 ** 9, // lamports
+          slippage: cfg.slippage || 0.5,
+        };
+        const userCtx = { userId: cfg.userId || 'pumpfun', walletId: this.walletIds[0] || '0' };
+        try {
+          await this.executor.executeTrade(userCtx, tradeParams, cfg);
+        } catch (e) {
+          // Log and continue
+        }
+      });
+      pumpfunListener.start(cfg.pumpfun);
+    }
+    // Start airdrop sniffer if enabled
+    if (cfg.airdrops && cfg.airdrops.enabled) {
+      airdropSniffer.start({
+        connection: this.connection,
+        walletIds: this.walletIds,
+        config: cfg.airdrops,
+        sellFn: async ({ walletId, mint, amount, idKey, maxSlippage }) => {
+          // Leverage executor to perform safe sell; reuse same userCtx but switch input/output
+          const tradeParams = { inputMint: mint, outputMint: cfg.inputMint || 'So11111111111111111111111111111111111111112', amount, slippage: maxSlippage };
+          const userCtx = { userId: cfg.userId || 'airdrop', walletId };
+          await this.executor.executeTrade(userCtx, tradeParams, Object.assign({}, cfg, { idempotencyTtlSec: 300 }));
+        },
+      });
+    }
+  }
+
+  /**
+   * Stop the strategy and cleanup subscriptions.
+   */
+  stop() {
+    if (!this.running) return;
+    this.running = false;
+    pumpfunListener.stop();
+    airdropSniffer.stop();
+  }
+}
+
+// Export the orchestrator class on module.exports. The heavy
+// strategy runner is attached below as a named export.
+module.exports.TurboSniper = TurboSniper;
+
+/*
+ * ------------------------------------------------------------------
+ * turboSniper.js  – Turbo-ready (updated)
  * ------------------------------------------------------------------
  *  • Keeps swap path ultra-fast (tradeExecutorTurbo)
  *  • Restores advanced flags and plumbs Turbo extras end-to-end:
@@ -52,7 +161,7 @@ const metricsLogger = require("./logging/metrics");
 
 /* Ghost utils + quote for multi-buy */
 const { prewarmTokenAccount }  = require("./core/ghost");
-const { Connection }           = require("@solana/web3.js");
+const { Connection: Web3Connection }           = require("@solana/web3.js");
 const { getSwapQuote }         = require("../../utils/swap");
 
 /* misc utils */
@@ -75,12 +184,12 @@ function normalizeNumber(val, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-module.exports = async function turboSniperStrategy(botCfg = {}) {
+async function turboSniperStrategy(botCfg = {}) {
   const limitBirdeye = pLimit(2);
   const botId = botCfg.botId || "manual";
   const log   = strategyLog("sniper", botId, botCfg);
 
-  /* ── config ───────────────────────────────────────── */
+  /* ── config ──────────────────────────────────────────────────── */
   const BASE_MINT        = botCfg.buyWithUSDC ? USDC_MINT : (botCfg.inputMint || SOL_MINT);
   const LIMIT_USD        = +botCfg.targetPriceUSD || null;
   let   SNIPE_LAMPORTS   = (+botCfg.snipeAmount || +botCfg.amountToSpend || 0) *
@@ -360,7 +469,7 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
       if (PREWARM_ACCS) {
         try {
           // Use the same private RPC as turbo for prewarm to avoid RPC mismatches
-          const conn = new Connection(PRIVATE_RPC_URL || process.env.SOLANA_RPC_URL, "confirmed");
+          const conn = new Web3Connection(PRIVATE_RPC_URL || process.env.SOLANA_RPC_URL, "confirmed");
           const currentWallet = wm.current();
           await prewarmTokenAccount(conn, baseQuote.outputMint, currentWallet);
         } catch (_) {/* ignore */}
@@ -435,7 +544,10 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
 
   /* scheduler */
   const loopHandle = runLoop(tick, INTERVAL_MS, { label: "sniper-turbo", botId });
-};
+}
+
+// Attach the strategy runner to module.exports so consumers can call it
+module.exports.turboSniperStrategy = turboSniperStrategy;
 
 /* CLI helper */
 if (require.main === module) {
@@ -444,5 +556,8 @@ if (require.main === module) {
     console.error("Pass config JSON path");
     process.exit(1);
   }
-  module.exports(JSON.parse(fs.readFileSync(fp, "utf8")));
+  turboSniperStrategy(JSON.parse(fs.readFileSync(fp, "utf8"))).catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
 }

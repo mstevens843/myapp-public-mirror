@@ -1,75 +1,95 @@
 // frontend/src/strategy_configs/validators/turboSniperValidator.js
-// turboSniperValidator.js
 //
-// Performs validation on the Turbo Sniper strategy configuration.  This
-// helper can be used by the UI to enforce sane ranges before sending
-// configs to the backend.  It returns a boolean indicating validity
-// alongside a map of field names to error messages when invalid.
+// Validation logic for the Turbo Sniper configuration. Returns an
+// array of error strings describing invalid fields. An empty array
+// indicates the configuration is valid. Perform as many checks as
+// possible without throwing to provide comprehensive feedback.
 
-/**
- * Validate a Turbo Sniper config object.
- *
- * @param {Object} cfg Configuration to validate
- * @returns {{isValid:boolean, errors:Object}} Validation result
- */
-export default function validateTurboSniperConfig(cfg = {}) {
-  const errors = {};
-  // Bundle strategy validation
-  if (cfg.useJitoBundle) {
-    const allowed = ['topOfBlock', 'backrun', 'private'];
-    if (!allowed.includes(cfg.bundleStrategy)) {
-      errors.bundleStrategy = 'Bundle strategy must be topOfBlock, backrun or private';
+export default function validateTurboSniperConfig(config) {
+  const errors = [];
+  const cfg = config || {};
+  // Leader timing
+  if (cfg.leaderTiming && cfg.leaderTiming.enabled) {
+    if (!(cfg.leaderTiming.preflightMs > 0)) {
+      errors.push('Leader preflightMs must be > 0');
     }
-    if (cfg.cuAdapt) {
-      const min = Number(cfg.cuPriceMicroLamportsMin);
-      const max = Number(cfg.cuPriceMicroLamportsMax);
-      if (!Number.isFinite(min) || !Number.isFinite(max)) {
-        errors.cuPriceMicroLamportsMin = 'CU price min/max must be numbers';
-      } else if (min <= 0 || max <= 0) {
-        errors.cuPriceMicroLamportsMin = 'CU prices must be positive values';
-      } else if (max < min) {
-        errors.cuPriceMicroLamportsMax = 'Max CU price must be greater than or equal to min';
+    if (!(cfg.leaderTiming.windowSlots >= 1)) {
+      errors.push('Leader windowSlots must be >= 1');
+    }
+  }
+  // Quote TTL
+  if (!(cfg.quoteTtlMs > 0)) {
+    errors.push('quoteTtlMs must be positive');
+  }
+  // Idempotency TTL
+  if (!(cfg.idempotencyTtlSec > 0)) {
+    errors.push('idempotencyTtlSec must be positive');
+  }
+  // Retry policy
+  if (cfg.retryPolicy) {
+    const rp = cfg.retryPolicy;
+    if (!(rp.max >= 1)) {
+      errors.push('retryPolicy.max must be >= 1');
+    }
+    if (!(rp.bumpCuStep >= 0)) {
+      errors.push('retryPolicy.bumpCuStep must be >= 0');
+    }
+    if (!(rp.bumpTipStep >= 0)) {
+      errors.push('retryPolicy.bumpTipStep must be >= 0');
+    }
+  }
+  // Parallel wallets
+  if (cfg.parallelWallets && cfg.parallelWallets.enabled) {
+    const { walletIds = [], splitPct = [], maxParallel } = cfg.parallelWallets;
+    if (walletIds.length === 0) {
+      errors.push('parallelWallets.walletIds must not be empty when parallel filler is enabled');
+    }
+    if (splitPct.length !== walletIds.length) {
+      errors.push('parallelWallets.splitPct length must match walletIds length');
+    } else {
+      const sum = splitPct.reduce((a, b) => a + (Number(b) || 0), 0);
+      if (Math.abs(sum - 1) > 0.05) {
+        errors.push('parallelWallets.splitPct values must sum to approximately 1');
       }
+      splitPct.forEach((pct, i) => {
+        if (pct <= 0) {
+          errors.push(`parallelWallets.splitPct[${i}] must be > 0`);
+        }
+      });
     }
-    const tipCurves = ['flat', 'ramp'];
-    if (cfg.tipCurve && !tipCurves.includes(cfg.tipCurve)) {
-      errors.tipCurve = 'Tip curve must be flat or ramp';
-    }
-  }
-  // Direct AMM fallback
-  if (cfg.directAmmFallback) {
-    const pct = Number(cfg.directAmmFirstPct);
-    if (!Number.isFinite(pct) || pct < 0 || pct > 1) {
-      errors.directAmmFirstPct = 'Direct AMM first percentage must be between 0 and 1';
+    if (!(maxParallel >= 1 && maxParallel <= walletIds.length)) {
+      errors.push('parallelWallets.maxParallel must be between 1 and walletIds.length');
     }
   }
-  // Skip preflight is a boolean; no validation needed
-  // Post-buy watcher
-  if (cfg.postBuyWatch) {
-    const dur = Number(cfg.postBuyWatch.durationSec);
-    if (!Number.isFinite(dur) || dur <= 0) {
-      errors.postBuyWatch = 'Post-buy watch duration must be a positive number';
+  // Pump.fun
+  if (cfg.pumpfun && cfg.pumpfun.enabled) {
+    const pf = cfg.pumpfun;
+    if (!(pf.thresholdPct >= 0 && pf.thresholdPct <= 1)) {
+      errors.push('pumpfun.thresholdPct must be between 0 and 1');
+    }
+    if (!(pf.minSolLiquidity >= 0)) {
+      errors.push('pumpfun.minSolLiquidity must be >= 0');
+    }
+    if (!(pf.cooldownSec >= 0)) {
+      errors.push('pumpfun.cooldownSec must be >= 0');
     }
   }
-  // Iceberg config
-  if (cfg.iceberg && cfg.iceberg.enabled) {
-    const tranches = parseInt(cfg.iceberg.tranches, 10);
-    if (!Number.isInteger(tranches) || tranches <= 0) {
-      errors.icebergTranches = 'Iceberg tranches must be an integer greater than zero';
+  // Airdrops
+  if (cfg.airdrops && cfg.airdrops.enabled) {
+    const ad = cfg.airdrops;
+    if (!(ad.minUsdValue >= 0)) {
+      errors.push('airdrops.minUsdValue must be >= 0');
     }
-    const delay = Number(cfg.iceberg.trancheDelayMs);
-    if (!Number.isFinite(delay) || delay < 0) {
-      errors.icebergTrancheDelayMs = 'Iceberg tranche delay must be a non‑negative number';
+    if (!(ad.maxSellSlippagePct >= 0 && ad.maxSellSlippagePct <= 100)) {
+      errors.push('airdrops.maxSellSlippagePct must be between 0 and 100');
     }
-    const abortPct = Number(cfg.impactAbortPct);
-    if (Number.isFinite(abortPct) && abortPct < 0) {
-      errors.impactAbortPct = 'Impact abort percentage must be non‑negative';
-    }
-    const dynSlip = Number(cfg.dynamicSlippageMaxPct);
-    if (Number.isFinite(dynSlip) && dynSlip <= 0) {
-      errors.dynamicSlippageMaxPct = 'Dynamic slippage max percentage must be positive';
+    if (Array.isArray(ad.whitelistMints)) {
+      ad.whitelistMints.forEach((mint, i) => {
+        if (!mint || typeof mint !== 'string') {
+          errors.push(`airdrops.whitelistMints[${i}] must be a non-empty string`);
+        }
+      });
     }
   }
-  const isValid = Object.keys(errors).length === 0;
-  return { isValid, errors };
+  return errors;
 }

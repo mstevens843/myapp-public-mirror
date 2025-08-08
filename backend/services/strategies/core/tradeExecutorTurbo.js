@@ -3,13 +3,16 @@
  * turboTradeExecutor.js – Turbo-path trade executor
  * -------------------------------------------------
  * • Arm-to-Trade envelope decryption (in-memory DEK)
- * • Ultra-fast swap via executeSwapTurbo()
+ * • Ultra-fast swap via executeSwapTurbo() / executeSwapJitoBundle()
+ * • Leader-timed send, warm quote cache, retry matrix, idempotency TTL
  * • Post-trade side-effects (non-blocking):
  *     – TP/SL rule insert
  *     – Telegram alert
  *     – Ghost-mode forwarding
  *     – Auto-rug check & exit
  */
+
+'use strict';
 
 const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
@@ -25,6 +28,10 @@ const getTokenPrice = require("../paid_api/getTokenPrice");
 const getSolPrice = getTokenPrice.getSolPrice;
 const { sendAlert } = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
+
+// 🔧 New infra from “you gave me”
+const LeaderScheduler = require("./leaderScheduler");
+const QuoteWarmCache  = require("./quoteWarmCache");
 
 // Additional helpers for Turbo enhancements
 const JitoFeeController = require("./jitoFeeController");
@@ -52,6 +59,44 @@ const USDC_MINT =
 
 const toNum = (v) =>
   v === undefined || v === null ? null : Number(v);
+
+/* ──────────────────────────────────────────────
+ *  Warm Quote Cache (shared per TTL bucket)
+ * ──────────────────────────────────────────── */
+const _quoteCaches = new Map(); // ttlMs -> QuoteWarmCache
+function getQuoteCache(ttlMs = 600) {
+  const key = Number(ttlMs) || 0;
+  if (!_quoteCaches.has(key)) {
+    _quoteCaches.set(key, new QuoteWarmCache({ ttlMs: key, capacity: 200 }));
+  }
+  return _quoteCaches.get(key);
+}
+
+/* ──────────────────────────────────────────────
+ *  Idempotency TTL Gate (in addition to idempotencyStore)
+ * ──────────────────────────────────────────── */
+const _idTtlGate = new Map(); // idKey -> expiresAtMs
+function idTtlCheckAndSet(idKey, ttlSec = 60) {
+  if (!idKey || !ttlSec) return true;
+  const now = Date.now();
+  const exp = _idTtlGate.get(idKey);
+  if (exp && exp > now) return false;
+  _idTtlGate.set(idKey, now + ttlSec * 1000);
+  return true;
+}
+
+/* ──────────────────────────────────────────────
+ *  Leader Scheduler (lazy singleton by validator+rpc)
+ * ──────────────────────────────────────────── */
+const _leaderSchedulers = new Map(); // rpcUrl|validator -> LeaderScheduler
+function getLeaderScheduler(conn, validatorIdentity) {
+  const rpc = (conn?._rpcEndpoint) || 'default';
+  const key = `${rpc}|${validatorIdentity || 'none'}`;
+  if (!_leaderSchedulers.has(key)) {
+    _leaderSchedulers.set(key, new LeaderScheduler(conn, validatorIdentity));
+  }
+  return _leaderSchedulers.get(key);
+}
 
 /* ──────────────────────────────────────────────
  *  Arm-aware key loader
@@ -131,12 +176,71 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     autoRug,
     tokenName,
     botId,
+
+    // NEW: leader timing + jito fee control + retry matrix
+    validatorIdentity,
+    leaderTiming = { enabled: false, preflightMs: 220, windowSlots: 2 },
+    bundleStrategy = 'topOfBlock',
+    cuAdapt,
+    cuPriceMicroLamportsMin,
+    cuPriceMicroLamportsMax,
+    tipCurve = 'flat',
+
+    // NEW: retry + ttl
+    quoteTtlMs = 600,
+    retryPolicy = { max: 3, bumpCuStep: 2000, bumpTipStep: 1000, routeSwitch: true, rpcFailover: true },
+    idempotencyTtlSec = 60,
+
+    // routing flags remain same
+    multiRoute,
+    splitTrade,
+    allowedDexes,
+    excludedDexes,
+
+    // fallback flags
+    directAmmFallback,
+    impactAbortPct,
+    dynamicSlippageMaxPct,
+
+    // Jito path flags
+    useJitoBundle,
+    jitoTipLamports,
+    jitoRelayUrl,
+
+    // priority fee handling
+    priorityFeeLamports,
+
+    // extra post-buy watcher
+    postBuyWatch,
+
+    // iceberg
+    iceberg,
   } = meta;
 
   if (!userId || !walletId)
     throw new Error("userId and walletId are required in meta");
 
   const wallet = await loadWalletKeypairArmAware(userId, walletId);
+
+  // pick RPC for this attempt; may be rotated by retry loop
+  let currentRpcUrl = privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL;
+  let conn = new Connection(currentRpcUrl, 'confirmed');
+
+  // ---- LEADER TIMING HOLD (pre-send) ----
+  if (leaderTiming?.enabled && bundleStrategy !== 'private' && validatorIdentity) {
+    try {
+      const sched = getLeaderScheduler(conn, validatorIdentity);
+      const { holdMs } = await sched.shouldHoldAndFire(Date.now(), leaderTiming);
+      if (holdMs > 0) {
+        const t0 = Date.now();
+        await new Promise((r) => setTimeout(r, holdMs));
+        metricsLogger.recordTiming('leader_hold_ms', Date.now() - t0);
+        // fired_in_leader_window counted as success path later (implicit)
+      }
+    } catch (e) {
+      // degrade gracefully: no hold
+    }
+  }
 
   /* MEV prefs */
   const prefs = await prisma.userPreference.findUnique({
@@ -148,49 +252,38 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     },
   });
   const mevMode = prefs?.mevMode || "fast";
-  const briberyAmount = prefs?.briberyAmount ?? 0;
+  const briberyAmountBase = prefs?.briberyAmount ?? 0;
   const shared = mevMode === "secure";
-  const priorityFeeLamports =
-    toNum(meta.priorityFeeLamports) ??
+  const basePriorityFeeLamports =
+    toNum(priorityFeeLamports) ??
     toNum(prefs?.defaultPriorityFee) ??
     0;
 
-  /*
-   * 1️⃣ Swap execution with enhancements
-   *
-   * Instead of always calling executeSwapTurbo directly, we first handle
-   * idempotency, impact guards, dynamic slippage and optional Jito
-   * bundle execution.  If the caller has set a unique idempotencyKey
-   * then repeated invocations will return the same tx hash from the
-   * in‑memory idempotency store.  Impact guards abort the trade when
-   * the quoted price impact exceeds a configured threshold.  Dynamic
-   * slippage limits slippage to a maximum value.  When Jito bundling
-   * is enabled the swap is submitted via Jito’s relay with adaptive
-   * compute unit pricing and tip; otherwise the turbo path is used.  A
-   * fallback direct Raydium swap is attempted when aggregator quote
-   * latency is high.
-   */
-  let txHash = null;
-  // Idempotency: return prior result if exists
+  // Idempotency: immediate replay protection (TTL gate)
   const idKey = meta.idempotencyKey;
   if (idKey) {
-    const cached = idempotencyStore.get(idKey);
-    if (cached) {
-      return cached;
+    const pass = idTtlCheckAndSet(idKey, idempotencyTtlSec);
+    if (!pass) {
+      const cached = idempotencyStore.get(idKey);
+      if (cached) return cached;
+      // duplicate within TTL and no cached tx → block
+      metricsLogger.recordFail('dupe-blocked');
+      throw new Error('duplicate attempt blocked');
     }
+    const cached = idempotencyStore.get(idKey);
+    if (cached) return cached;
   }
 
   // Dynamic slippage limit
   let effSlippage = slippage;
-  if (meta.dynamicSlippageMaxPct) {
-    const ds = Number(meta.dynamicSlippageMaxPct);
+  if (dynamicSlippageMaxPct) {
+    const ds = Number(dynamicSlippageMaxPct);
     if (Number.isFinite(ds) && ds > 0) {
       effSlippage = Math.min(slippage, ds / 100);
     }
   }
   // Impact guard: abort early if quoted price impact is too high
-  const impactAbortPct = Number(meta.impactAbortPct) || 0;
-  if (impactAbortPct > 0 && quote.priceImpactPct != null) {
+  if (impactAbortPct > 0 && quote?.priceImpactPct != null) {
     const pct = quote.priceImpactPct * 100;
     if (pct > impactAbortPct) {
       metricsLogger.recordFail('impact-abort');
@@ -198,24 +291,38 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     }
   }
 
+  // Helper: warm quote cache wrapper
+  const quoteCache = getQuoteCache(quoteTtlMs);
+  async function getWarmQuote(params) {
+    const key = {
+      inputMint: params.inputMint,
+      outputMint: params.outputMint,
+      amount: String(params.amount),
+      slippage: params.slippage,
+      mode: bundleStrategy,
+    };
+    const cached = quoteCache.get(key);
+    if (cached) return cached;
+    const t0 = Date.now();
+    const fresh = await getSwapQuote({
+      ...params,
+      multiRoute,
+      splitTrade,
+      allowedDexes,
+      excludedDexes,
+    });
+    metricsLogger.recordTiming('quote_latency_ms', Date.now() - t0);
+    if (fresh) quoteCache.set(key, fresh);
+    return fresh;
+  }
+
   /*
-   * Iceberg splitting
-   *
-   * When configured to use iceberg entries we subdivide the total input
-   * amount into N tranches and execute them sequentially.  Between
-   * tranches an optional delay may be applied.  Before each tranche
-   * executes we request a fresh quote; if the resulting price impact
-   * exceeds the configured `impactAbortPct` the remainder of the
-   * iceberg is aborted.  Each tranche uses its own idempotency key
-   * suffix to prevent cache collisions.  Recursion is used to reuse
-   * the existing execution logic; the `iceberg.enabled` flag is
-   * temporarily disabled on the nested call to avoid infinite
-   * splitting.
+   * Iceberg splitting – unchanged core behavior, but switch to warm quotes
    */
-  if (!simulated && meta.iceberg && meta.iceberg.enabled && Number(meta.iceberg.tranches) > 1) {
+  if (!simulated && iceberg && iceberg.enabled && Number(iceberg.tranches) > 1) {
     try {
-      const tranches = Math.max(1, parseInt(meta.iceberg.tranches, 10));
-      const delayMs = Number(meta.iceberg.trancheDelayMs) || 0;
+      const tranches = Math.max(1, parseInt(iceberg.tranches, 10));
+      const delayMs = Number(iceberg.trancheDelayMs) || 0;
       const totalIn = Number(quote.inAmount);
       const per = Math.floor(totalIn / tranches);
       let remaining = totalIn;
@@ -223,160 +330,166 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       for (let i = 0; i < tranches; i++) {
         const thisAmount = i === tranches - 1 ? remaining : per;
         remaining -= thisAmount;
-        // Fresh quote per tranche
-        const qRes = await getSwapQuote({
+        const qRes = await getWarmQuote({
           inputMint: quote.inputMint,
           outputMint: quote.outputMint,
           amount: String(thisAmount),
           slippage: effSlippage,
-          multiRoute: meta.multiRoute,
-          splitTrade: meta.splitTrade,
-          allowedDexes: meta.allowedDexes,
-          excludedDexes: meta.excludedDexes,
         });
         if (!qRes) {
           metricsLogger.recordFail('iceberg-quote');
           break;
         }
-        // Abort on high impact
         if (impactAbortPct > 0 && qRes.priceImpactPct != null && qRes.priceImpactPct * 100 > impactAbortPct) {
           metricsLogger.recordFail('iceberg-impact-abort');
           break;
         }
-        // Disable further splitting for nested execution and set a unique idempotency key suffix
         const nestedMeta = {
           ...meta,
-          iceberg: { ...meta.iceberg, enabled: false },
-          idempotencyKey: meta.idempotencyKey ? `${meta.idempotencyKey}:${i}` : undefined,
+          iceberg: { ...iceberg, enabled: false },
+          idempotencyKey: idKey ? `${idKey}:${i}` : undefined,
         };
         try {
           lastTx = await execTrade({ quote: qRes, mint, meta: nestedMeta, simulated });
-        } catch (e) {
-          // If a tranche fails, abort the remainder
-          break;
-        }
-        // Wait between tranches if configured
+        } catch (_) { break; }
         if (delayMs > 0 && i < tranches - 1) {
           await new Promise((r) => setTimeout(r, delayMs));
         }
       }
       return lastTx;
     } catch (ie) {
-      // If iceberg fails unexpectedly fall through to normal execution
       console.warn('Iceberg execution error:', ie.message);
     }
   }
 
-  // Swap execution (only when not simulated)
-  if (!simulated) {
-    // Optionally fallback to a direct Raydium swap when quote latency is high
-    let usedDirect = false;
-    if (meta.directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200) {
-      try {
-        const startSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+  /*
+   * RETRY MATRIX AROUND SEND:
+   * - attempt 0: chosen path (Jito if enabled else Turbo; Direct only on fallback condition)
+   * - on each retry:
+   *    * bump CU/priority fee (lamports) and bribery tip
+   *    * optional route switch (toggle jito<->turbo OR try direct)
+   *    * RPC failover (rotate RPC endpoint)
+   *    * optionally refresh quote (warm cache)
+   */
+  let txHash = null;
+  let attempt = 0;
+  const maxAttempts = Math.max(1, Number(retryPolicy?.max ?? 3));
+  let briberyAmount = Number(briberyAmountBase) || 0;
+  let priorityFee = Number(basePriorityFeeLamports) || 0;
+  let jitoMode = !!useJitoBundle;
+  let usedDirect = false;
+
+  while (attempt < maxAttempts && !txHash) {
+    try {
+      // Direct fallback if requested by meta and quoteLatency hints (priority on first attempt)
+      if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200 && attempt === 0) {
+        const startSlot = await conn.getSlot();
         txHash = await directSwap({
           wallet,
           inputMint: quote.inputMint,
           outputMint: quote.outputMint,
           amount: String(quote.inAmount),
           slippage: effSlippage,
-          privateRpcUrl,
+          privateRpcUrl: currentRpcUrl,
         });
+        const endSlot = await conn.getSlot();
         if (txHash) {
-          const endSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
           metricsLogger.recordInclusion(endSlot - startSlot);
           metricsLogger.recordSuccess();
           usedDirect = true;
+          break;
         } else {
           metricsLogger.recordFail('direct-swap-fail');
         }
-      } catch (e) {
-        metricsLogger.recordFail(e.code || e.message || 'direct-swap-error');
       }
-    }
-    // Standard or Jito swap when not using direct fallback
-    if (!usedDirect) {
+
+      // Choose path (Jito or Turbo)
+      if (jitoMode) {
+        const controller = new JitoFeeController({
+          cuAdapt,
+          cuPriceMicroLamportsMin,
+          cuPriceMicroLamportsMax,
+          tipCurve,
+          baseTipLamports: jitoTipLamports || 1000,
+        });
+        // Controller can be static or bumped via attempt count
+        const fees = controller.getFee(attempt);
+        const startSlot = await conn.getSlot();
+        txHash = await executeSwapJitoBundle({
+          quote,
+          wallet,
+          shared,
+          priorityFee: fees.computeUnitPriceMicroLamports, // Jito expects CU price μLamports
+          briberyAmount: 0,
+          jitoRelayUrl,
+        });
+        const endSlot = await conn.getSlot();
+        if (txHash) {
+          metricsLogger.recordInclusion(endSlot - startSlot);
+          metricsLogger.recordSuccess();
+        }
+      } else {
+        const startSlot = await conn.getSlot();
+        txHash = await executeSwapTurbo({
+          quote,
+          wallet,
+          shared,
+          priorityFee,       // lamports
+          briberyAmount,     // lamports
+          privateRpcUrl: currentRpcUrl,
+          skipPreflight,
+        });
+        const endSlot = await conn.getSlot();
+        if (txHash) {
+          metricsLogger.recordInclusion(endSlot - startSlot);
+          metricsLogger.recordSuccess();
+        }
+      }
+
+      if (!txHash) throw new Error('swap-failed');
+    } catch (err) {
+      attempt += 1;
+      if (attempt >= maxAttempts) {
+        metricsLogger.recordFail(err?.code || err?.message || 'swap-error');
+        throw err;
+      }
+      // Bump CU / tip (we only have lamport priority/ tip here)
+      priorityFee += Number(retryPolicy.bumpCuStep || 2000);
+      briberyAmount += Number(retryPolicy.bumpTipStep || 1000);
+      metricsLogger.recordRetry();
+
+      // Route switch on 2nd try
+      if (retryPolicy.routeSwitch && attempt === 2) {
+        // toggle Jito <-> Turbo; if already Turbo, consider direct on next round
+        jitoMode = !jitoMode;
+      }
+
+      // RPC failover on last retry step before final
+      if (retryPolicy.rpcFailover && attempt === (maxAttempts - 1)) {
+        const endpoints = Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : [];
+        if (endpoints.length > 1) {
+          const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
+          currentRpcUrl = endpoints[idx];
+          conn = new Connection(currentRpcUrl, 'confirmed');
+        }
+      }
+
+      // Refresh quote if warm cache expired or after route change
       try {
-        if (meta.useJitoBundle) {
-          // Adaptive Jito bundle: try several attempts with ramping CU price and tip
-          const controller = new JitoFeeController({
-            cuAdapt: meta.cuAdapt,
-            cuPriceMicroLamportsMin: meta.cuPriceMicroLamportsMin,
-            cuPriceMicroLamportsMax: meta.cuPriceMicroLamportsMax,
-            tipCurve: meta.tipCurve || 'flat',
-            baseTipLamports: meta.jitoTipLamports || 1000,
-          });
-          let success = false;
-          let attempt = 0;
-          while (!success && attempt < 5) {
-            attempt++;
-            const fees = controller.getFee();
-            try {
-              const startSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
-              txHash = await executeSwapJitoBundle({
-                quote,
-                wallet,
-                shared,
-                priorityFee: fees.computeUnitPriceMicroLamports,
-                briberyAmount: 0,
-                jitoRelayUrl: meta.jitoRelayUrl,
-                jitoTipLamports: fees.tipLamports,
-              });
-              if (txHash) {
-                const endSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
-                metricsLogger.recordInclusion(endSlot - startSlot);
-                metricsLogger.recordSuccess();
-                success = true;
-                break;
-              }
-            } catch (e) {
-              metricsLogger.recordRetry();
-            }
-          }
-          if (!txHash) {
-            // Fallback to turbo path if Jito fails
-            const startSlotFallback = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
-            txHash = await executeSwapTurbo({
-              quote,
-              wallet,
-              shared,
-              priorityFee: priorityFeeLamports,
-              briberyAmount,
-              privateRpcUrl,
-              skipPreflight,
-            });
-            const endSlotFallback = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
-            metricsLogger.recordInclusion(endSlotFallback - startSlotFallback);
-          }
-        } else {
-          // Standard turbo path
-          const startSlotTurbo = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
-          txHash = await executeSwapTurbo({
-            quote,
-            wallet,
-            shared,
-            priorityFee: priorityFeeLamports,
-            briberyAmount,
-            privateRpcUrl,
-            skipPreflight,
-          });
-          const endSlotTurbo = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
-          metricsLogger.recordInclusion(endSlotTurbo - startSlotTurbo);
-        }
-        if (!txHash) {
-          throw new Error('swap-failed');
-        }
-        // Track pending for aggregator/turbo paths
-        trackPendingTrade(txHash, mint, strategy);
-      } catch (e) {
-        metricsLogger.recordFail(e.code || e.message || 'swap-error');
-        throw e;
-      }
+        const qRes = await getWarmQuote({
+          inputMint: quote.inputMint,
+          outputMint: quote.outputMint,
+          amount: String(quote.inAmount),
+          slippage: effSlippage,
+        });
+        if (qRes) quote = qRes;
+      } catch (_) { /* keep last */ }
     }
-    // Cache idempotency key on success
-    if (idKey && txHash) {
-      idempotencyStore.set(idKey, txHash);
-    }
+  }
+
+  // Cache idempotency key on success
+  if (!simulated && idKey && txHash) {
+    idempotencyStore.set(idKey, txHash);
   }
 
   /* ——— 2️⃣  Enrichment ——— */
@@ -420,7 +533,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       createdAt: { gte: new Date(Date.now() - 60_000) },
     },
   });
-  if (!dup) {
+  if (!dup && txHash) {
     await prisma.trade.create({
       data: {
         id: uuid(),
@@ -449,7 +562,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         side: "buy",
         slippage,
         mevMode,
-        priorityFee: priorityFeeLamports,
+        priorityFee: priorityFee,
         briberyAmount,
         mevShared: shared,
         inputMint: quote.inputMint,
@@ -460,7 +573,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
   /* ——— 4️⃣  Post-trade side-effects (non-blocking) ——— */
   (async () => {
-    const conn = new Connection(
+    const connPost = new Connection(
       process.env.SOLANA_RPC_URL,
       "confirmed"
     );
@@ -494,15 +607,14 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
     /* Telegram alert */
     try {
-      const amountFmt = (
-        quote.outAmount /
-        10 ** decimals
-      ).toFixed(4);
+      const amountFmt = txHash ? (quote.outAmount / 10 ** (decimals || 9)).toFixed(4) : "0";
       const impactFmt =
         (quote.priceImpactPct * 100).toFixed(2) + "%";
       const header = simulated
         ? `🧪 *Dry-Run ${category} Triggered!*`
-        : `🤖 *${category} Buy Executed!*`;
+        : txHash
+        ? `🤖 *${category} Buy Executed!*`
+        : `⚠️ *${category} Attempt Failed*`;
       const msg =
         `${header}\n` +
         `• *Token:* [${mint}](https://birdeye.so/token/${mint})\n` +
@@ -510,14 +622,16 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         `• *Impact:* ${impactFmt}\n` +
         (simulated
           ? "• *Simulated:* ✅"
-          : `• *Tx:* [↗️ View](https://solscan.io/tx/${txHash})`);
+          : txHash
+          ? `• *Tx:* [↗️ View](https://solscan.io/tx/${txHash})`
+          : "");
       await sendAlert("ui", msg, category);
     } catch (e) {
       console.warn("Alert failed:", e.message);
     }
 
     /* Ghost mode */
-    if (ghostMode && coverWalletId) {
+    if (txHash && ghostMode && coverWalletId) {
       try {
         const coverRow = await prisma.wallet.findUnique({
           where: { id: coverWalletId },
@@ -527,7 +641,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           const dest = new PublicKey(coverRow.publicKey);
           const amt = BigInt(quote.outAmount);
           await forwardTokens(
-            conn,
+            connPost,
             quote.outputMint,
             wallet,
             dest,
@@ -540,20 +654,20 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     }
 
     /* Auto-rug detection */
-    if (autoRug) {
+    if (txHash && autoRug) {
       try {
         const freezeAuth = await checkFreezeAuthority(
-          conn,
+          connPost,
           quote.outputMint
         );
         if (freezeAuth) {
           console.warn(
             `🚨 Honeypot detected (freezeAuthority: ${freezeAuth})`
           );
-          const sellQuote = await getSwapQuote({
+          const sellQuote = await getWarmQuote({
             inputMint: quote.outputMint,
             outputMint: quote.inputMint,
-            amount: quote.outAmount,
+            amount: String(quote.outAmount),
             slippage: slippage || 5.0,
           });
           if (sellQuote) {
@@ -561,9 +675,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
               quote: sellQuote,
               wallet,
               shared,
-              priorityFee: priorityFeeLamports,
+              priorityFee,
               briberyAmount,
-              privateRpcUrl,
+              privateRpcUrl: currentRpcUrl,
               skipPreflight,
             });
           }
@@ -573,9 +687,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       }
     }
 
-    /* Post-buy watcher: monitor LP pulls or authority flips and exit quickly */
-    if (meta.postBuyWatch) {
-      const { durationSec = 180, lpPullExit = true, authorityFlipExit = true } = meta.postBuyWatch;
+    /* Post-buy watcher */
+    if (txHash && postBuyWatch) {
+      const { durationSec = 180, lpPullExit = true, authorityFlipExit = true } = postBuyWatch;
       const startTime = Date.now();
       const endTime = startTime + Math.max(0, durationSec) * 1000;
       const intervalMs = 5000;
@@ -591,44 +705,40 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         try {
           // LP pull: if quote fails or output drastically smaller, exit
           if (lpPullExit) {
-            const sq = await getSwapQuote({
+            const sq = await getWarmQuote({
               inputMint: sellInputMint,
               outputMint: sellOutputMint,
-              amount: sellAmount,
+              amount: String(sellAmount),
               slippage: 5.0,
             });
             const outAmt = sq?.outAmount ? BigInt(sq.outAmount) : null;
             if (!sq || outAmt === null || outAmt < BigInt(sellAmount) / 2n) {
-              // Attempt to exit using last known quote or skip if none
-              const exitQuote = sq;
-              if (exitQuote) {
+              if (sq) {
                 try {
                   await executeSwapTurbo({
-                    quote: exitQuote,
+                    quote: sq,
                     wallet,
                     shared,
-                    priorityFee: priorityFeeLamports,
+                    priorityFee,
                     briberyAmount,
-                    privateRpcUrl,
+                    privateRpcUrl: currentRpcUrl,
                     skipPreflight,
                   });
-                } catch (e) {
-                  /* ignore */
-                }
+                } catch { /* ignore */ }
               }
               active = false;
               clearInterval(intervalId);
               return;
             }
           }
-          // Authority flip: freeze authority becomes non-null
+          // Authority flip
           if (authorityFlipExit) {
-            const freeze = await checkFreezeAuthority(conn, sellInputMint);
+            const freeze = await checkFreezeAuthority(connPost, sellInputMint);
             if (freeze) {
-              const exitQuote = await getSwapQuote({
+              const exitQuote = await getWarmQuote({
                 inputMint: sellInputMint,
                 outputMint: sellOutputMint,
-                amount: sellAmount,
+                amount: String(sellAmount),
                 slippage: 5.0,
               });
               if (exitQuote) {
@@ -637,14 +747,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
                     quote: exitQuote,
                     wallet,
                     shared,
-                    priorityFee: priorityFeeLamports,
+                    priorityFee,
                     briberyAmount,
-                    privateRpcUrl,
+                    privateRpcUrl: currentRpcUrl,
                     skipPreflight,
                   });
-                } catch (e) {
-                  /* ignore */
-                }
+                } catch { /* ignore */ }
               }
               active = false;
               clearInterval(intervalId);
