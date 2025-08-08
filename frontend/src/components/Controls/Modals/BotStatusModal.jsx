@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from "react";
+import useBotHealth from "../hooks/useBotHealth";
 import RunningBotCard from "./RunningBotCard";
 import ViewFullRunningModal from "./ViewFullRunningModal";
 import { Listbox } from "@headlessui/react"; 
 import {
-    XCircle,
+  XCircle,
   PauseCircle,
   PlayCircle,
   Trash2,
@@ -15,6 +16,56 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { toast } from "sonner"; 
+
+/**
+ * A simple modal displaying bot health telemetry for a single bot.
+ *
+ * This component subscribes to the health feed for the given botId and
+ * renders a coloured pulse indicator along with humanised timing
+ * information. It disables the “Start” button when the bot is already
+ * running and offers a “Restart” button when the health level is
+ * yellow or red.
+ */
+export function SingleBotHealthModal({ botId, onRestart, onStart, onClose }) {
+  const health = useBotHealth(botId);
+
+  if (!health) return null;
+
+  const colour = health.healthLevel || "green";
+  const pulseClass = `pulse-${colour}`;
+
+  const age = health.lastTickAgoMs != null
+    ? Math.round(health.lastTickAgoMs / 1000)
+    : null;
+  const ageLabel = age != null ? `${age}s ago` : "–";
+
+  return (
+    <div className="bot-status-modal">
+      <div className="header">
+        <h3>{botId}</h3>
+        <span className={pulseClass} />
+      </div>
+      <div className="metrics">
+        <div>
+          <strong>Last tick:</strong> {ageLabel}
+        </div>
+        <div>
+          <strong>Loop duration:</strong> {health.loopDurationMs != null ? `${health.loopDurationMs}ms` : "–"}
+        </div>
+        <div>
+          <strong>Restart count:</strong> {health.restartCount}
+        </div>
+      </div>
+      <div className="actions">
+        <button onClick={onStart} disabled={health.status === "running"}>Start</button>
+        {health.healthLevel && health.healthLevel !== "green" && (
+          <button onClick={onRestart}>Restart</button>
+        )}
+        <button onClick={onClose}>Close</button>
+      </div>
+    </div>
+  );
+}
 
 /* (emoji list unchanged) */
 const STRATEGY_OPTIONS = [
@@ -28,14 +79,13 @@ const STRATEGY_OPTIONS = [
   { value: "paperTrader",    label: "📝 Paper Trader" },
   { value: "rebalancer",     label: "⚖️ Rebal     ancer" },
   { value: "rotationBot",    label: "🔁 Rotation Bot" },
-    { value: "stealthBot",    label: "🥷 Stealth Bot" },
-
+  { value: "stealthBot",     label: "🥷 Stealth Bot" },
 ];
 const getStrategyLabel = (m) =>
   STRATEGY_OPTIONS.find((s) => s.value === m)?.label ?? m;
 
 export default function BotStatusModal({
-    open,
+  open,
   onClose,
   data,
   onPause,
@@ -46,32 +96,27 @@ export default function BotStatusModal({
 }) {
   if (!open || !data) return null;
 
-  /* 🍱 new shape */
   const { botIds = [], botCfgs = {} } = data;
 
   const [viewingBot, setViewingBot] = useState(null);
-
-  /* ─── sort helpers ─── */
-  const [sortBy, setSortBy] = useState("name"); // name | uptime
-  const [asc, setAsc]       = useState(true);
+  const [sortBy, setSortBy] = useState("name");
+  const [asc, setAsc] = useState(true);
 
   const sortedIds = useMemo(() => {
-  const arr = [...botIds];
+    const arr = [...botIds];
     arr.sort((a, b) => {
-      if (sortBy === "name") {                 // name = mode label
-      return asc
-        ? botCfgs[a].mode.localeCompare(botCfgs[b].mode)
-        : botCfgs[b].mode.localeCompare(botCfgs[a].mode);
-     }
-     const ua = botCfgs[a]?.uptimeRaw ?? 0;
-     const ub = botCfgs[b]?.uptimeRaw ?? 0;
+      if (sortBy === "name") {
+        return asc
+          ? botCfgs[a].mode.localeCompare(botCfgs[b].mode)
+          : botCfgs[b].mode.localeCompare(botCfgs[a].mode);
+      }
+      const ua = botCfgs[a]?.uptimeRaw ?? 0;
+      const ub = botCfgs[b]?.uptimeRaw ?? 0;
       return asc ? ua - ub : ub - ua;
     });
     return arr;
   }, [botIds, sortBy, asc, botCfgs]);
 
-
-  /* ─── UI ─── */
   return (
     <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center">
       <motion.div
@@ -86,65 +131,42 @@ export default function BotStatusModal({
             <BarChart3 size={18} className="text-emerald-400" />
             Active Bot Status
           </h2>
-
           <div className="flex items-center gap-2 text-xs">
-            {/* sort / order */}
             <div className="flex items-center gap-1 text-green-400">
               <Filter size={14} />
               <div className="relative text-left">
-              <Listbox value={sortBy} onChange={setSortBy}>
-                <div className="relative">
-                  <Listbox.Button className="flex items-center gap-1 bg-zinc-800 px-2 py-1 text-sm rounded-md hover:bg-zinc-700 border border-zinc-600 text-zinc-200">
-                    {sortBy === "name" ? "Name" : "Uptime"}
-                  </Listbox.Button>
-
-                  <Listbox.Options className="absolute z-10 mt-1 w-32 bg-zinc-800 border border-zinc-600 rounded-md shadow-lg text-sm text-zinc-200">
-                    <Listbox.Option
-                      value="name"
-                      className={({ active }) =>
-                        `px-3 py-1 cursor-pointer ${
-                          active ? "bg-zinc-700 text-white" : "text-zinc-200"
-                        }`
-                      }
-                    >
-                      Name
-                    </Listbox.Option>
-                    <Listbox.Option
-                      value="uptime"
-                      className={({ active }) =>
-                        `px-3 py-1 cursor-pointer ${
-                          active ? "bg-zinc-700 text-white" : "text-zinc-200"
-                        }`
-                      }
-                    >
-                      Uptime
-                    </Listbox.Option>
-                  </Listbox.Options>
-                </div>
-              </Listbox>
-            </div>
-
-              <button
-                onClick={() => setAsc((v) => !v)}
-                className="hover:text-white"
-                title="Toggle sort order"
-              >
+                <Listbox value={sortBy} onChange={setSortBy}>
+                  <div className="relative">
+                    <Listbox.Button className="flex items-center gap-1 bg-zinc-800 px-2 py-1 text-sm rounded-md hover:bg-zinc-700 border border-zinc-600 text-zinc-200">
+                      {sortBy === "name" ? "Name" : "Uptime"}
+                    </Listbox.Button>
+                    <Listbox.Options className="absolute z-10 mt-1 w-32 bg-zinc-800 border border-zinc-600 rounded-md shadow-lg text-sm text-zinc-200">
+                      <Listbox.Option value="name" className={({ active }) =>
+                        `px-3 py-1 cursor-pointer ${active ? "bg-zinc-700 text-white" : "text-zinc-200"}`
+                      }>
+                        Name
+                      </Listbox.Option>
+                      <Listbox.Option value="uptime" className={({ active }) =>
+                        `px-3 py-1 cursor-pointer ${active ? "bg-zinc-700 text-white" : "text-zinc-200"}`
+                      }>
+                        Uptime
+                      </Listbox.Option>
+                    </Listbox.Options>
+                  </div>
+                </Listbox>
+              </div>
+              <button onClick={() => setAsc((v) => !v)} className="hover:text-white" title="Toggle sort order">
                 {asc ? <ArrowUp01 size={14} /> : <ArrowDown01 size={14} />}
               </button>
             </div>
-
-            {/* pause-all */}
-             {botIds.length > 0 && (
-               <button onClick={() => onPauseAll?.(botIds)}
+            {botIds.length > 0 && (
+              <button onClick={() => onPauseAll?.(botIds)}
                 className="flex items-center gap-1 text-yellow-400 hover:text-yellow-500"
-                title="Pause all running bots"
-              >
+                title="Pause all running bots">
                 <PauseCircle size={16} />
                 Pause&nbsp;All
               </button>
             )}
-
-            {/* refresh */}
             <button
               onClick={async () => {
                 try {
@@ -159,12 +181,7 @@ export default function BotStatusModal({
             >
               <RefreshCw size={16} />
             </button>
-
-            <button
-              onClick={onClose}
-              className="text-red-400 hover:text-white"
-              aria-label="Close"
-            >
+            <button onClick={onClose} className="text-red-400 hover:text-white" aria-label="Close">
               <XCircle size={20} />
             </button>
           </div>
@@ -189,27 +206,18 @@ export default function BotStatusModal({
                   tickRaw={cfg.lastTickAgoRaw}
                   config={cfg.config}
                   onStop={() => onStop(mode)}
-                  isPaused={cfg.isPaused}       
+                  isPaused={cfg.isPaused}
                   onPause={() => onPause(botId)}
                   onResume={() => onResume(botId)}
-                  onDelete={() => onDelete(botId)}  
+                  onDelete={() => onDelete(botId)}
                   tradesExecuted={cfg.tradesExecuted}
-                  maxTrades={cfg.maxTrades} 
-                  onView={() =>
-                    setViewingBot({ mode, config: cfg.config })
-                  }
+                  maxTrades={cfg.maxTrades}
+                  onView={() => setViewingBot({ mode, config: cfg.config })}
                   onViewLogs={() => {
-                      if (cfg.botId) {
-                       window.dispatchEvent(
-                         new CustomEvent("setLogsTarget", {
-                           detail: {
-                             botId   : cfg.botId,
-                             strategy: cfg.mode,
-                             config  : cfg.config,
-                             returnAfter: true,        // 🆕 tell App we came from the modal
-                           },
-                         }),
-                       );
+                    if (cfg.botId) {
+                      window.dispatchEvent(new CustomEvent("setLogsTarget", {
+                        detail: { botId: cfg.botId, strategy: cfg.mode, config: cfg.config, returnAfter: true },
+                      }));
                       toast.success(`🧠 Switched logs to ${getStrategyLabel(mode)}`);
                     }
                     onClose();
