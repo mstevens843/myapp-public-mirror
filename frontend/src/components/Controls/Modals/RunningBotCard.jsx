@@ -1,5 +1,6 @@
 import React from "react";
 import { PauseCircle, PlayCircle, Trash2, Eye, TerminalSquare  } from "lucide-react";
+import useBotHealth from "@/hooks/useBotHealth";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 
@@ -34,20 +35,33 @@ export default function RunningBotCard({
   onView,
  onViewLogs, 
  tradesExecuted,
- maxTrades,
+  maxTrades,
+  botId,
 
 }) {
   const fieldCount = Object.values(config).filter(
     (v) => v !== null && v !== undefined && v !== ""
   ).length;
 
+  // Fetch health metrics for this bot. If unavailable, fall back to
+  // timing-based calculations from tickRaw.
+  const health = useBotHealth(botId);
   const pulseClass = isPaused
-  ? "bg-zinc-500"
-  : tickRaw < 60
-  ? "bg-green-400 animate-pulse"
-  : tickRaw < 180
-  ? "bg-yellow-400 animate-pulse"
-  : "bg-red-500";
+    ? "bg-zinc-500"
+    : health?.healthLevel === "green"
+    ? "bg-green-400 animate-pulse"
+    : health?.healthLevel === "yellow"
+    ? "bg-yellow-400 animate-pulse"
+    : health?.healthLevel === "red"
+    ? "bg-red-500"
+    : tickRaw < 60
+    ? "bg-green-400 animate-pulse"
+    : tickRaw < 180
+    ? "bg-yellow-400 animate-pulse"
+    : "bg-red-500";
+
+  // Prefer restart count from health telemetry if available
+  const effectiveRestartCount = health?.restartCount ?? restartCount;
 
   return (
     <motion.div
@@ -96,7 +110,7 @@ export default function RunningBotCard({
             <>
               <span>{tickRaw < 60 ? "🟢" : tickRaw < 180 ? "🟡" : "🔴"} {uptime}</span>
               <span>⏱️ {tickAgo}</span>
-              <span>🔁 {restartCount}x</span>
+              <span>🔁 {effectiveRestartCount}x</span>
               {Number.isFinite(maxTrades) && (
                 <span className="text-emerald-300">
                   🛒 {tradesExecuted}/{maxTrades}

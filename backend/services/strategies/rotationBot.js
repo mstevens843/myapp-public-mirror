@@ -19,6 +19,7 @@ const SOL_MINT                  = getTokenPrice.SOL_MINT;
 
 /* infra ----------------------------------------------------------- */
 const { strategyLog }           = require("./logging/strategyLogger");
+const { emitHealth }            = require("./logging/emitHealth");
 const { createSummary, tradeExecuted }         = require("./core/alerts");
 const wm                        = require("./core/walletManager");
 const guards                    = require("./core/tradeGuards");
@@ -55,6 +56,11 @@ module.exports = async function rotationBot(cfg = {}) {
   const botId = cfg.botId || "manual";
   const log   = strategyLog("rotationbot", botId, cfg);
   const sum   = createSummary("RotationBot",  log, cfg.userId);
+
+  // Report a stopped status when the process exits.
+  process.on('exit', () => {
+    emitHealth(botId, { status: 'stopped' });
+  });
 
   /* map: label → token-list */
 const labelToTokens = Object.fromEntries(
@@ -114,6 +120,8 @@ const MIN_MOM = cfg.minMomentum != null ? +cfg.minMomentum / 100 : 0.02;
   const rotationsByWallet = {};
   /* ───────────────── main loop ───────────────── */
   async function tick() {
+    // Capture the start time for health metrics
+    const _healthStart = Date.now();
     log("loop", `Tick @ ${new Date().toLocaleTimeString()}`);
     lastTickTimestamps[botId] = Date.now();
     let rotatedThisTick = false;
@@ -287,7 +295,15 @@ if (rotatedThisTick) {
   log("info", "…awaiting next rotation interval");
 }
 
-reschedule();
+      // Emit health update before scheduling the next tick
+      const _duration = Date.now() - _healthStart;
+      emitHealth(botId, {
+        lastTickAt: new Date().toISOString(),
+        loopDurationMs: _duration,
+        restartCount: 0,
+        status: 'running',
+      });
+      reschedule();
   }
 
   const reschedule = () => {

@@ -7,6 +7,7 @@ const { Connection, PublicKey } = require("@solana/web3.js");
 const prisma                   = require("../../prisma/prisma");
 const fs                       = require("fs");
 const { strategyLog }          = require("./logging/strategyLogger");
+const { emitHealth }           = require("./logging/emitHealth");
 const { createSummary, tradeExecuted }        = require("./core/alerts");
 const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
@@ -36,6 +37,12 @@ module.exports = async function stealthBot(cfg = {}) {
   const log          = strategyLog("stealthbot", botId, cfg);
   const summary      = createSummary("StealthBot", log, cfg.userId);
 
+  // Report a stopped status when the process exits so the health
+  // monitor knows this bot is no longer running.
+  process.on('exit', () => {
+    emitHealth(botId, { status: 'stopped' });
+  });
+
   /* ── load & decrypt wallets from DB (post‑migration) ── */
   const walletIdByLabel = {};
   try {
@@ -47,12 +54,12 @@ module.exports = async function stealthBot(cfg = {}) {
     await wm.initRotationWallets(cfg.userId, walletRows.map(w => w.id));
     walletRows.forEach(w => walletIdByLabel[w.label] = w.id);
   } catch (err) {
-    console.error("❌ stealthBot wallet bootstrap failed:", err.message);
+    console.error("❌ stealthBot wallet bootstrap failed:", err.message);
     return;
   }
 
   const loadedWallets = wm.all();
-  console.log(`✅ Loaded ${loadedWallets.length} wallets`);
+  console.log(`✅ Loaded ${loadedWallets.length} wallets`);
 
   const conn         = new Connection(
     process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
@@ -80,6 +87,8 @@ module.exports = async function stealthBot(cfg = {}) {
       rounds = 0;
 
   async function tick() {
+    // Capture loop start for health metrics
+    const _healthStart = Date.now();
     try {
       const loaded = wm.all(); // get all loaded Keypairs
       log("info", `🧰 Loaded ${loaded.length} wallets:`);
@@ -210,10 +219,40 @@ module.exports = async function stealthBot(cfg = {}) {
       fails++;
       summary.inc("errors");
       log("error", err.message);
-      if (fails >= HALT_FAILS) return hardStop("error limit reached");
+      if (fails >= HALT_FAILS) {
+        // Emit health before halting due to too many errors
+        const _duration = Date.now() - _healthStart;
+        emitHealth(botId, {
+          lastTickAt: new Date().toISOString(),
+          loopDurationMs: _duration,
+          restartCount: 0,
+          status: 'running',
+        });
+        return hardStop("error limit reached");
+      }
     }
 
-    if (cfg.loop === false || ROT_MS === 0) return hardStop("completed");
+    if (cfg.loop === false || ROT_MS === 0) {
+      // Emit health before completing single-shot run
+      const _duration = Date.now() - _healthStart;
+      emitHealth(botId, {
+        lastTickAt: new Date().toISOString(),
+        loopDurationMs: _duration,
+        restartCount: 0,
+        status: 'running',
+      });
+      return hardStop("completed");
+    }
+    // Emit health before scheduling next iteration
+    {
+      const _duration = Date.now() - _healthStart;
+      emitHealth(botId, {
+        lastTickAt: new Date().toISOString(),
+        loopDurationMs: _duration,
+        restartCount: 0,
+        status: 'running',
+      });
+    }
     setTimeout(tick, ROT_MS);
   }
 

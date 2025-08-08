@@ -5,6 +5,7 @@
 const fs                     = require("fs");
 const prisma                 = require("../../prisma/prisma");
 const { strategyLog }        = require("./logging/strategyLogger");
+const { emitHealth }         = require("./logging/emitHealth");
 const { createSummary, tradeExecuted }      = require("./core/alerts");
 const wm                     = require("./core/walletManager");
 const guards                 = require("./core/tradeGuards");
@@ -22,6 +23,13 @@ module.exports = async function chadMode(cfg = {}) {
   const botId = cfg.botId || "manual";
   const log   = strategyLog("chadmode", botId, cfg);
   const sum   = createSummary("ChadMode", log, cfg.userId);
+
+  // Report when this bot exits.  Without this hook the health monitor
+  // would not know that the bot has stopped and could display stale
+  // status.
+  process.on('exit', () => {
+    emitHealth(botId, { status: 'stopped' });
+  });
 
   /* ╭─ static config ────────────────────────────────────── */
   const BASE_MINT = "So11111111111111111111111111111111111111112";
@@ -83,6 +91,9 @@ module.exports = async function chadMode(cfg = {}) {
 
   /* ╭─ main loop ───────────────────────────────────────── */
   async function tick() {
+    // Capture the start time for this iteration so we can report
+    // loop duration back to the health registry.
+    const _healthStart = Date.now();
     if (processing) return;
     processing = true;
 
@@ -249,6 +260,15 @@ module.exports = async function chadMode(cfg = {}) {
       }
     } finally {
       processing = false;
+      // Emit health telemetry for this iteration.  A static restartCount
+      // of 0 is used here; restart counts are managed by the supervisor.
+      const _duration = Date.now() - _healthStart;
+      emitHealth(botId, {
+        lastTickAt: new Date().toISOString(),
+        loopDurationMs: _duration,
+        restartCount: 0,
+        status: 'running',
+      });
     }
   }
 

@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import useBotHealth from "../hooks/useBotHealth";
+import useBotHealth from "@/hooks/useBotHealth";
 import RunningBotCard from "./RunningBotCard";
 import ViewFullRunningModal from "./ViewFullRunningModal";
 import { Listbox } from "@headlessui/react"; 
@@ -196,10 +196,10 @@ export default function BotStatusModal({
               const cfg = botCfgs[botId] || {};
               const mode = cfg.mode;
               return (
-                <RunningBotCard
+                  <RunningBotCard
                   key={botId}
                   mode={mode}
-                  botId={cfg.botId}
+                  botId={botId}
                   uptime={cfg.uptime}
                   restartCount={cfg.restartCount}
                   tickAgo={cfg.lastTickAgo}

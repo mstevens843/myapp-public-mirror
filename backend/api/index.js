@@ -18,6 +18,7 @@ const paymentRoutes = require('./payment');
 const accountsRoute = require("./accounts");
 const schedulerRoutes = require("./schedulerRoutes");
 const internalRouter = require("./internalJobs"); // 👈 add require here
+const healthRouter   = require("./health");
 const requireAuth = require("../middleware/requireAuth");
 const armEncryptionRouter = require("./armSessions")
 console.log("✅ API router loaded.");
@@ -83,6 +84,8 @@ router.use("/account", accountsRoute);
 console.log("✅ /account router loaded");
 router.use("/internalJobs", internalRouter);
 router.use("/arm-encryption", armEncryptionRouter);
+// Health API for bot liveness and metrics
+router.use("/health", healthRouter);
 
 console.log("✅ /internalJobs router loaded");
 
