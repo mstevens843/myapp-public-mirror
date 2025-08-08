@@ -530,6 +530,51 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         </label>
       </div>
 
+      {/* ——— Turbo & Risk Options ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        {/* Turbo execution toggle */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="turboMode"
+            checked={!!merged.turboMode}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Turbo Mode <StrategyTooltip name="turboMode" />
+        </label>
+        {/* Auto risk management toggle */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="autoRiskManage"
+            checked={!!merged.autoRiskManage}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Auto Risk Manage <StrategyTooltip name="autoRiskManage" />
+        </label>
+      </div>
+      {/* Private RPC URL input */}
+      <div className="grid sm:grid-cols-1 gap-4 mt-4">
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Private RPC URL <StrategyTooltip name="privateRpcUrl" />
+          </span>
+          <input
+            type="text"
+            name="privateRpcUrl"
+            value={merged.privateRpcUrl ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="https://example-rpc"
+            className={inp}
+          />
+        </label>
+      </div>
+
       {/* ——— Token feed selector, Advanced, children ——— */}
       <TokenSourceSelector config={config} setConfig={setConfig} disabled={disabled}/>
       <AdvancedFields      config={merged} setConfig={setConfig} disabled={disabled}/>

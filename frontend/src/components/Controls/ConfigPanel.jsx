@@ -75,6 +75,13 @@ import { REQUIRED_FIELDS as REBALANCER_FIELDS }      from "../Strategy_Configs/R
 import { REQUIRED_FIELDS as STEALTH_FIELDS }      from "../Strategy_Configs/StealthBotConfig";
 import { REQUIRED_FIELDS as TURBO_SNIPER_FIELDS }    from "../Strategy_Configs/TurboSniperConfig";
 
+// Import optional fields for enhanced completeness calculation
+import { OPTIONAL_FIELDS as SNIPER_OPTIONAL_FIELDS }       from "../Strategy_Configs/SniperConfig";
+import { OPTIONAL_FIELDS as BREAKOUT_OPTIONAL_FIELDS }     from "../Strategy_Configs/BreakoutConfig";
+import { OPTIONAL_FIELDS as TREND_OPTIONAL_FIELDS }        from "../Strategy_Configs/TrendFollowerConfig";
+import { OPTIONAL_FIELDS as DELAYED_SNIPER_OPTIONAL_FIELDS } from "../Strategy_Configs/DelayedSniperConfig";
+import { OPTIONAL_FIELDS as TURBO_SNIPER_OPTIONAL_FIELDS }   from "../Strategy_Configs/TurboSniperConfig";
+
 
 
 
@@ -206,6 +213,49 @@ const [confirmMeta, setConfirmMeta] = useState(null);
    if (!running) setInitialSnapshot(JSON.stringify(config));
  }, [running, config]);
 const { prefs } = useUserPrefs();
+
+  // ---------------------------------------------------------------------------
+  // Apply‑all toggle
+  //
+  // Let users optionally copy their current strategy configuration across all
+  // selected wallets.  This state is persisted to localStorage so the
+  // preference survives page reloads.  When enabled, any change to the
+  // configuration will mirror the updated values into a per‑wallet config
+  // cache stored in localStorage under the "walletConfigs" key.  A toast
+  // warning is shown the moment this option is turned on to make it clear
+  // that enabling it will overwrite any existing per‑wallet settings.
+  const [applyAllWallets, setApplyAllWallets] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("applyAllWallets")) || false;
+    } catch {
+      return false;
+    }
+  });
+
+  // Persist toggle state
+  useEffect(() => {
+    localStorage.setItem("applyAllWallets", JSON.stringify(applyAllWallets));
+  }, [applyAllWallets]);
+
+  // Whenever config changes and apply‑all is enabled, mirror the current
+  // configuration into a simple key/value map keyed by wallet label.  This
+  // implementation intentionally avoids renaming any fields so that
+  // CONFIG_BUILDERS can consume the values unchanged.  Downstream code can
+  // read these per‑wallet configs from localStorage if needed.
+  useEffect(() => {
+    if (!applyAllWallets) return;
+    try {
+      const existing = JSON.parse(localStorage.getItem("walletConfigs")) || {};
+      if (Array.isArray(selectedWallets)) {
+        selectedWallets.forEach((w) => {
+          if (w) existing[w] = { ...config };
+        });
+        localStorage.setItem("walletConfigs", JSON.stringify(existing));
+      }
+    } catch (err) {
+      console.warn("⚠️ Failed to mirror config across wallets:", err);
+    }
+  }, [config, applyAllWallets, selectedWallets]);
 
 const resolved = useRef(false); 
 
@@ -341,6 +391,44 @@ const REQUIRED_KEYS = {
   paperTrader: [...BASE_FIELDS, "entryThreshold", "volumeThreshold"],
 };
 
+/*
+ * Optional field lists for each strategy.  These lists are sourced
+ * directly from the strategy config files via named imports above.  They
+ * correspond to fields that are rendered in the UI but are not strictly
+ * required for execution.  We combine these with the required fields
+ * and a set of common advanced fields to compute the "field completeness"
+ * indicator shown in the strategy rail.  Strategies that do not export
+ * an OPTIONAL_FIELDS array (e.g. scalper, chadMode, dipBuyer, rebalancer,
+ * rotationBot, stealthBot, paperTrader) are mapped to an empty list.
+ */
+const ADVANCED_FIELD_NAMES = [
+  "minMarketCap",
+  "maxMarketCap",
+  "haltOnFailures",
+  "cooldown",
+  "maxSlippage",
+  "priorityFeeLamports",
+  "briberyAmount",
+  "mevMode",
+  "tpPercent",
+  "slPercent",
+];
+
+const OPTIONAL_KEYS = {
+  sniper: SNIPER_OPTIONAL_FIELDS || [],
+  scalper: [],
+  breakout: BREAKOUT_OPTIONAL_FIELDS || [],
+  dipBuyer: [],
+  chadMode: [],
+  delayedSniper: DELAYED_SNIPER_OPTIONAL_FIELDS || [],
+  trendFollower: TREND_OPTIONAL_FIELDS || [],
+  paperTrader: [],
+  rebalancer: [],
+  rotationBot: [],
+  stealthBot: [],
+  turboSniper: TURBO_SNIPER_OPTIONAL_FIELDS || [],
+};
+
 /* ───── helper: list whatever is still blank ───── */
 const getMissingFields = () => {
   if (multiModeEnabled) {
@@ -436,35 +524,52 @@ useEffect(() => {
 
 
     const requiredFieldStatus = useMemo(() => {
+  /*
+   * Helper to assemble all relevant keys for a given strategy.  We
+   * combine required fields, optional fields, and the set of
+   * common advanced fields.  Duplicates are removed via a Set.
+   */
+  const getAllKeysForStrategy = (strat) => {
+    const req = REQUIRED_KEYS[strat] || [];
+    const opt = OPTIONAL_KEYS[strat] || [];
+    return Array.from(new Set([...req, ...opt, ...ADVANCED_FIELD_NAMES]));
+  };
+
   if (multiModeEnabled) {
-    let requiredSet = new Set();
+    // Multi-mode: aggregate across all enabled strategies
+    let allKeys = new Set();
     let filledCount = 0;
 
     for (const strat of enabledStrategies) {
-      const required = REQUIRED_KEYS[strat] || [];
-      const configBlock = multiConfigs[strat] || {};
-
-      for (const field of required) {
-        requiredSet.add(field);
-      }
-
-      for (const field of required) {
-        const val = configBlock?.[field];
-        if (val !== "" && val !== null && val !== undefined) {
+      const keys = getAllKeysForStrategy(strat);
+      keys.forEach((k) => allKeys.add(k));
+      const cfg = multiConfigs[strat] || {};
+      keys.forEach((field) => {
+        const val = cfg?.[field];
+        if (Array.isArray(val)) {
+          if (val.length > 0) filledCount += 1;
+        } else if (val !== "" && val !== null && val !== undefined) {
           filledCount += 1;
         }
-      }
+      });
     }
 
-    const uniqueRequired = Array.from(requiredSet);
-    return `${filledCount}/${uniqueRequired.length} required fields set`;
+    const total = Array.from(allKeys).length;
+    return `${filledCount}/${total} fields set`;
   } else {
-    const strat = selectedMode;
-    const required = REQUIRED_KEYS[strat] || [];
-    const configBlock = config || {};
-    const filled = countFilledFields(configBlock, required);
-
-    return `${filled}/${required.length} required fields set`;
+    // Single-mode: count fields for the selected strategy
+    const keys = getAllKeysForStrategy(selectedMode);
+    const cfg = config || {};
+    let filled = 0;
+    keys.forEach((field) => {
+      const val = cfg?.[field];
+      if (Array.isArray(val)) {
+        if (val.length > 0) filled += 1;
+      } else if (val !== "" && val !== null && val !== undefined) {
+        filled += 1;
+      }
+    });
+    return `${filled}/${keys.length} fields set`;
   }
 }, [multiModeEnabled, config, selectedMode, multiConfigs, enabledStrategies]);
 
@@ -1074,6 +1179,29 @@ backdrop-blur-md";
   {getStrategyHint(selectedMode)}
 </div>
     )}
+
+    {/* Apply‑all‑wallets toggle – sits beneath the strategy hint.  When
+        enabled, any changes to this strategy’s configuration will be
+        replicated to all selected wallets.  A toast warns the user
+        about overwriting per‑wallet settings when turning it on. */}
+    <div className="flex items-center gap-2 mt-2">
+      <input
+        type="checkbox"
+        id="applyAllWallets"
+        checked={applyAllWallets}
+        onChange={(e) => {
+          const checked = e.target.checked;
+          setApplyAllWallets(checked);
+          if (checked) {
+            toast.warning("This overwrites per-wallet config");
+          }
+        }}
+        className="accent-emerald-500"
+      />
+      <label htmlFor="applyAllWallets" className="text-xs text-zinc-300">
+        Apply to all wallets
+      </label>
+    </div>
   </div>
     {/*  <p className="text-xs text-zinc-500 italic mt-[2px]">
         {getStrategyHint(selectedMode)}

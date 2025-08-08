@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import logo from "@/assets/solpulse-logo.png";
 import AccountMenu from "@/components/Dashboard/Account/AccountMenu";
+import WhatsNew from "@/components/WhatsNew";
 
 /* 🔐 Global Arm chip helpers */
 import { toast } from "sonner";
@@ -227,8 +228,17 @@ export default function Layout() {
           ))}
         </div>
 
-        {/* Account Menu */}
-        <div className="fixed top-4 right-6 z-50">
+        {/* Account Menu & What's New link */}
+        <div className="fixed top-4 right-6 z-50 flex items-center gap-3">
+          {/* What's New button opens the dismissible release notes panel.  It
+              dispatches a custom event that our WhatsNew component listens
+              for.  Styling keeps it subtle in the header. */}
+          <button
+            onClick={() => window.dispatchEvent(new Event('openWhatsNew'))}
+            className="text-xs text-emerald-300 underline hover:text-emerald-100"
+          >
+            What's New?
+          </button>
           <AccountMenu onAccountClick={() => handleTabChange("account")} />
         </div>
 
@@ -292,6 +302,12 @@ export default function Layout() {
           )}
         </div>
       ) : null}
+
+      {/* What's New modal – always include at root so it can
+          overlay any page.  It self‑manages its visibility based on
+          localStorage and will show only after a version bump or when
+          triggered via the header link. */}
+      <WhatsNew />
     </div>
   );
 }
