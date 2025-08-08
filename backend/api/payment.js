@@ -5,8 +5,8 @@
  * for accepting subscription and credit payments in USD Coin (USDC) on the
  * Solana blockchain. Users can now choose to pay for plans or compute unit
  * credits via a USDC transfer in addition to the existing Stripe-based
- * checkout. The Solana integration uses an in‑memory session store to
- * generate unique deposit addresses per purchase and verifies on‑chain
+ * checkout. The Solana integration uses an in-memory session store to
+ * generate unique deposit addresses per purchase and verifies on-chain
  * payments using the configured RPC endpoint. When a payment is detected,
  * the user’s plan or credit balance is updated accordingly.
  */
@@ -21,6 +21,9 @@ const requireAuth = require('../middleware/requireAuth');
 // const { nanoid } = require('nanoid');
 const nacl = require('tweetnacl');
 const bs58 = require('bs58');
+
+// ⬇️ NEW: resilient fetch wrapper (timeout + exponential backoff + jitter)
+const retryFetch = require('../services/utils/http/retryFetch');
 
 // Initialise Stripe for card payments
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
@@ -46,7 +49,7 @@ const PLAN_LIMITS = {
 const USDC_MINT = process.env.SOLANA_USDC_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
-// In‑memory store of pending solana payment sessions keyed by sessionId
+// In-memory store of pending solana payment sessions keyed by sessionId
 // Each entry holds: { userId, plan, amountUSD, publicKey, secretKey, status }
 const solanaSessions = new Map();
 
@@ -56,7 +59,7 @@ const solanaSessions = new Map();
  * This function calls the RPC method `getTokenAccountsByOwner` to retrieve
  * all SPL token accounts owned by the provided address filtered by the USDC
  * mint. It then sums the `uiAmount` of each account to compute the total
- * balance in USDC. A JSON‑RPC request is used instead of the `@solana/web3.js`
+ * balance in USDC. A JSON-RPC request is used instead of the `@solana/web3.js`
  * library to avoid adding large dependencies.
  *
  * @param {string} ownerPublicKey base58 encoded owner address
@@ -74,11 +77,21 @@ async function getUsdcBalance(ownerPublicKey) {
     ]
   };
 
-  const response = await fetch(SOLANA_RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
+  // ⬇️ CHANGED: use retryFetch instead of bare fetch
+  const response = await retryFetch(
+    SOLANA_RPC_URL,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    },
+    {
+      retries: 3,
+      timeout: 10_000,
+      backoff: 500,
+      jitter: 250,
+    }
+  );
 
   if (!response.ok) {
     throw new Error(`RPC request failed with status ${response.status}`);
@@ -166,7 +179,7 @@ router.post('/create-solana-session', requireAuth, async (req, res) => {
  * Verify that the user has sent the required amount of USDC to the deposit
  * address associated with the given session ID. If the payment is found,
  * the user’s subscription plan or credit balance is updated accordingly. The
- * session status is then marked as paid and removed from the in‑memory store.
+ * session status is then marked as paid and removed from the in-memory store.
  *
  * Request body: { sessionId: string }
  * Response: { success: true, message }
@@ -231,7 +244,7 @@ router.post('/verify-solana-session', requireAuth, async (req, res) => {
       console.log(`✅ Added ${creditsToAdd} CU credits to user ${userId} via Solana payment`);
     }
 
-    // Optionally, mark session as paid and remove from the store
+    // Mark session as paid and remove from the store
     solanaSessions.delete(sessionId);
     return res.json({ success: true, message: 'Payment verified and account updated.' });
   } catch (err) {
@@ -245,8 +258,7 @@ router.post('/verify-solana-session', requireAuth, async (req, res) => {
  *  Existing Stripe and subscription endpoints
  *
  * The remainder of this file retains the original Stripe subscription and
- * payment logic provided in the earlier implementation. Only minimal edits
- * were made to integrate with the Solana endpoints. These routes manage
+ * payment logic provided in the earlier implementation. These routes manage
  * subscription creation, plan changes, payment method management, credit
  * purchases and webhook handling.
  */
@@ -332,7 +344,7 @@ router.post('/create-checkout-session', requireAuth, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // Handle one‑time credit purchases separately
+    // Handle one-time credit purchases separately
     if (plan === 'credits') {
       const amountNumber = Number(amount);
       if (!amountNumber || isNaN(amountNumber) || amountNumber <= 0) {
@@ -531,6 +543,7 @@ router.post('/purchase-credits', requireAuth, async (req, res) => {
     success_url: `${process.env.FRONTEND_URL}/payment-success`,
     cancel_url: `${process.env.FRONTEND_URL}/payment-cancel`,
   });
+  console.log(`✅ Credit session created: ${session.id} for user ${userId} ($${amount})`);
   res.json({ sessionId: session.id });
 });
 
