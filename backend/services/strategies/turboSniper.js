@@ -14,7 +14,8 @@ const { Connection, clusterApiUrl } = require('@solana/web3.js');
 const TradeExecutorTurbo = require('./core/tradeExecutorTurbo');
 const pumpfunListener = require('./pumpfun/listener');
 const airdropSniffer = require('../airdrops/sniffer');
-const { incCounter, observeHistogram } = require('./logging/metrics');
+const metricsLogger = require('./logging/metrics');
+const { runAB } = require('./core/latencyHarness');
 
 /**
  * Lightweight orchestrator wrapping the turbo trade executor, pump.fun
@@ -543,12 +544,84 @@ async function turboSniperStrategy(botCfg = {}) {
           scaleFactor      : PROBE_SCALE_FACTOR,
           abortOnImpactPct : PROBE_ABORT_IMPACT_PCT,
           delayMs          : PROBE_DELAY_MS,
+          // Bundle tuning
+          bundleStrategy  : BUNDLE_STRATEGY,
+          cuAdapt         : CU_ADAPT,
+          cuPriceMicroLamportsMin: CU_PRICE_MIN,
+          cuPriceMicroLamportsMax: CU_PRICE_MAX,
+          tipCurve        : TIP_CURVE,
+
+          // Leader timing (new)
+          leaderTiming    : (botCfg.leaderTiming || { enabled: false, preflightMs: 220, windowSlots: 2 }),
+
+          // routing & dex prefs
+          multiRoute      : MULTI_ROUTE,
+          splitTrade      : SPLIT_TRADE,
+          allowedDexes    : ALLOWED_DEXES,
+          excludedDexes   : EXCLUDED_DEXES,
+
+          // Direct AMM fallback
+          directAmmFallback : DIRECT_AMM_FALLBACK,
+          directAmmFirstPct: DIRECT_AMM_FIRST_PCT,
         },
+
+        // Reliability flags + RPC quorum (new)
+flags           : (botCfg.flags || { directAmm: true, bundles: true, leaderTiming: true, relay: true, probe: true }),
+rpc             : (botCfg.rpc   || { quorum: { size: 3, require: 2 }, blockhashTtlMs: 2500, endpoints: botCfg.rpcEndpoints || [] }),
 
 
         // measured quote latency in ms, used for direct AMM fallback
         quoteLatencyMs  : quoteEnd - quoteStart,
       };
+      // ── Central feature flag gating + A/B (safe-optional) ─────────────────
+try {
+  const f = baseMeta.flags || {};
+  // record per-feature on/off if metrics supports it
+  const rec = (name, on) => {
+    if (typeof metricsLogger.recordFeatureToggle === 'function') {
+      metricsLogger.recordFeatureToggle(name, !!on);
+    }
+  };
+
+  if (Object.prototype.hasOwnProperty.call(f, 'directAmm')) {
+    rec('directAmm', f.directAmm);
+    if (!f.directAmm) baseMeta.directAmmFallback = false;
+  }
+  if (Object.prototype.hasOwnProperty.call(f, 'bundles')) {
+    rec('bundles', f.bundles);
+    if (!f.bundles) baseMeta.useJitoBundle = false;
+  }
+if (Object.prototype.hasOwnProperty.call(f, 'leaderTiming')) {
+  rec('leaderTiming', f.leaderTiming);
+  if (!f.leaderTiming && baseMeta.probe && baseMeta.probe.leaderTiming && typeof baseMeta.probe.leaderTiming === 'object') {
+    baseMeta.probe.leaderTiming.enabled = false;
+  }
+}
+  if (Object.prototype.hasOwnProperty.call(f, 'relay')) {
+    rec('relay', f.relay);
+    if (!f.relay && baseMeta.privateRelay && typeof baseMeta.privateRelay === 'object') {
+      baseMeta.privateRelay.enabled = false;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(f, 'probe')) {
+    rec('probe', f.probe);
+    if (!f.probe && baseMeta.probe && typeof baseMeta.probe === 'object') {
+      baseMeta.probe.enabled = false;
+    }
+  }
+
+  // Minimal A/B harness to emit deltas (non-blocking)
+  if (typeof runAB === 'function') {
+    await runAB('leaderTiming', async (enabled) => {
+      // tiny, deterministic payload so deltas are measurable
+      const t0 = Date.now();
+      await new Promise(r => setTimeout(r, enabled ? 2 : 2));
+      const dt = Date.now() - t0;
+      if (typeof metricsLogger.recordABRun === 'function') metricsLogger.recordABRun('leaderTiming');
+      if (typeof metricsLogger.recordABDelta === 'function') metricsLogger.recordABDelta('leaderTiming', dt);
+    });
+  }
+} catch (_) { /* noop */ }
       const metaBuildEnd = Date.now();
       metricsLogger.recordTiming('quoteToBuild', metaBuildEnd - quoteEnd);
 
@@ -621,12 +694,17 @@ async function turboSniperStrategy(botCfg = {}) {
       if (trades >= MAX_TRADES) {
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
+        if (POOL_DETECTION) { try { stopPoolListener(); } catch (_) {} }
+
+        
       }
     } catch (err) {
       fails++;
       if (fails >= EFFECTIVE_HALT) {
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
+        if (POOL_DETECTION) { try { stopPoolListener(); } catch (_) {} }
+
       }
       metricsLogger.recordFail(err?.code || err?.message || 'error');
     }

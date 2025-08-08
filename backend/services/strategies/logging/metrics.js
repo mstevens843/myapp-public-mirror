@@ -1,103 +1,127 @@
 // backend/services/strategies/logging/metrics.js
-//
-// Lightweight metrics collector used throughout the Turbo Sniper strategy.
-//
-// This module exports simple counter and histogram helpers that can be
-// hooked into your existing telemetry pipeline (e.g. Prometheus or
-// Datadog). Each metric is stored in memory and exposed via getters
-// for scraping or exporting. The intent is to keep the hot path
-// extremely lightweight – incrementing a counter or observing a
-// histogram adds negligible overhead. Heavy aggregation or remote
-// network calls should be performed asynchronously elsewhere.
-//
-// If you already have a metrics implementation, feel free to proxy
-// these helpers to it rather than using the internal maps. For
-// strategies without an existing metrics backend this module will
-// still collect values which can be logged on exit for debugging.
-
+/*
+ * metrics.js – Lightweight metrics recorder for strategy events.
+ * Stores timings, counters, and histograms in-memory.
+ * Expose helpers for reliability features (flags, A/B, quorum RPC).
+ */
 'use strict';
 
-/**
- * A simple in‑memory counter implementation. Keys are the metric
- * names; values are numbers. Labels are flattened into a string
- * representation so that different label sets are tracked
- * independently. The flattening scheme is simple and stable to
- * discourage dynamic label creation on the hot path.
- */
-const counters = new Map();
+// ── Internal state ──────────────────────────────────────────────────────────
+const state = {
+  // phase timings (ms)
+  timings: {
+    detectToQuote: [],
+    quoteToBuild: [],
+    buildToSubmit: [],
+  },
+  // inclusion distance (slots)
+  inclusionSlots: [],
+  // legacy tallies
+  retries: 0,
+  fails: {},
+  successes: 0,
 
-/**
- * A simple histogram implementation. Each entry stores an array
- * of observed values. In production you might want to keep a
- * rolling window instead of unbounded arrays; here we leave the
- * implementation simple and focus on correctness.
- */
-const histograms = new Map();
+  // generic instruments
+  counters: Object.create(null),   // "name|k:v|k2:v2" -> number
+  histograms: Object.create(null), // "name|k:v|..." -> number[]
+};
 
-/**
- * Serialize a labels object into a deterministic string. The
- * resulting string uses ‘|’ as a separator and sorts keys to
- * guarantee consistent ordering. Undefined labels or null values
- * are dropped.
- *
- * @param {Object} labels
- * @returns {string}
- */
-function serializeLabels(labels = {}) {
-  const entries = Object.entries(labels)
+// ── helpers ─────────────────────────────────────────────────────────────────
+function _labelsKey(labels = {}) {
+  const parts = Object.entries(labels)
     .filter(([, v]) => v !== undefined && v !== null)
-    .sort(([a], [b]) => a.localeCompare(b));
-  if (entries.length === 0) return '';
-  return entries.map(([k, v]) => `${k}:${v}`).join('|');
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${k}:${String(v)}`);
+  return parts.length ? `|${parts.join('|')}` : '';
+}
+function _ctrKey(name, labels) { return `${name}${_labelsKey(labels)}`; }
+
+function increment(name, by = 1, labels = {}) {
+  const k = _ctrKey(name, labels);
+  state.counters[k] = (state.counters[k] || 0) + Number(by || 1);
+}
+function observe(name, value, labels = {}) {
+  const k = _ctrKey(name, labels);
+  if (!state.histograms[k]) state.histograms[k] = [];
+  state.histograms[k].push(Number(value) || 0);
 }
 
-/**
- * Increment a counter by a given amount (default 1).
- *
- * @param {string} name
- * @param {Object} [labels]
- * @param {number} [inc]
- */
-function incCounter(name, labels = {}, inc = 1) {
-  const key = `${name}${serializeLabels(labels)}`;
-  const current = counters.get(key) || 0;
-  counters.set(key, current + inc);
+// ── legacy API (kept) ───────────────────────────────────────────────────────
+function recordTiming(name, ms, labels = {}) {
+  const n = String(name);
+  const v = Number(ms) || 0;
+  if (state.timings[n]) state.timings[n].push(v);   // keep legacy buckets: detectToQuote, quoteToBuild, buildToSubmit
+  observe(n, v, labels);                            // ALSO record arbitrary timings as a histogram
+}
+function recordInclusion(slots, labels = {}) {
+  if (Number.isFinite(slots)) state.inclusionSlots.push(slots);
+  observe('tx_inclusion_slots', Number(slots) || 0, labels);
+}
+function recordRetry(labels = {}) {
+  state.retries += 1;
+  increment('tx_retry_total', 1, labels);
+}
+function recordFail(reason, labels = {}) {
+  const key = String(reason || 'unknown');
+  state.fails[key] = (state.fails[key] || 0) + 1;
+  increment('tx_fail_total', 1, { ...labels, code: key });
+}
+function recordSuccess(labels = {}) {
+  state.successes += 1;
+  increment('tx_success_total', 1, labels);
 }
 
-/**
- * Record a value in a histogram.
- *
- * @param {string} name
- * @param {number} value
- * @param {Object} [labels]
- */
-function observeHistogram(name, value, labels = {}) {
-  const key = `${name}${serializeLabels(labels)}`;
-  const arr = histograms.get(key) || [];
-  arr.push(value);
-  histograms.set(key, arr);
+// ── new API for Prompt 3 ────────────────────────────────────────────────────
+// Feature flags + A/B
+function recordFeatureToggle(name, enabled) {
+  increment('feature_enabled_total', 1, { name, enabled: !!enabled });
+}
+function recordABRun(name) {
+  increment('ab_run_total', 1, { name });
+}
+function recordABDelta(name, deltaMs) {
+  observe('ab_delta_ms', Number(deltaMs) || 0, { name });
 }
 
-/**
- * Retrieve all counter values. Useful for exposing aggregated
- * metrics at process exit or via an HTTP endpoint. Do not call
- * this on the hot path.
- */
-function getCounters() {
-  return new Map(counters);
+// RPC quorum + blockhash refresh
+function recordRpcQuorumSent(endpoint) {
+  increment('rpc_quorum_sent_total', 1, { endpoint: endpoint || 'unknown' });
+}
+function recordRpcQuorumWin(endpoint) {
+  increment('rpc_quorum_win_total', 1, { endpoint: endpoint || 'unknown' });
+}
+function recordBlockhashRefresh(endpoint) {
+  increment('blockhash_refresh_total', 1, { endpoint: endpoint || 'primary' });
 }
 
-/**
- * Retrieve all histogram observations. Useful for debugging or
- * exporting summary statistics. Do not call this on the hot path.
- */
-function getHistograms() {
-  return new Map(histograms);
+// ── snapshot/export ─────────────────────────────────────────────────────────
+function snapshot() {
+  // shallow clone enough for inspection/export
+  return JSON.parse(JSON.stringify(state));
 }
+function getCounters() { return { ...state.counters }; }
+function getHistograms() { return JSON.parse(JSON.stringify(state.histograms)); }
 
 module.exports = {
-  incCounter,
-  observeHistogram,
+  // legacy
+  recordTiming,
+  recordInclusion,
+  recordRetry,
+  recordFail,
+  recordSuccess,
+  snapshot,
+
+  // generic instruments (opt-in)
+  increment,
+  observe,
   getCounters,
   getHistograms,
+
+  // new metrics for reliability + measurement
+  recordFeatureToggle,
+  recordABRun,
+  recordABDelta,
+  recordRpcQuorumSent,
+  recordRpcQuorumWin,
+  recordBlockhashRefresh,
 };

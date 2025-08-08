@@ -251,6 +251,42 @@ if (cfg.probe && cfg.probe.enabled) {
     if (pt.ensureQueued !== undefined && typeof pt.ensureQueued !== 'boolean') {
       errors.push('postTx.ensureQueued must be a boolean');
     }
+      // basic
+  if (!(cfg.entryThreshold >= 0)) errors.push('entryThreshold must be >= 0');
+  if (!(cfg.volumeThreshold >= 0)) errors.push('volumeThreshold must be >= 0');
+
+  // leader timing
+  if (cfg.leaderTiming?.enabled) {
+    if (!(cfg.leaderTiming.preflightMs > 0)) errors.push('leaderTiming.preflightMs must be > 0');
+    if (!(cfg.leaderTiming.windowSlots >= 1)) errors.push('leaderTiming.windowSlots must be >= 1');
+  }
+
+  // quote ttl
+  if (!(cfg.quoteTtlMs > 0)) errors.push('quoteTtlMs must be positive');
+
+  // retry policy
+  if (cfg.retryPolicy) {
+    if (!(cfg.retryPolicy.max >= 1)) errors.push('retryPolicy.max must be >= 1');
+    if (!(cfg.retryPolicy.bumpCuStep >= 0)) errors.push('retryPolicy.bumpCuStep must be >= 0');
+    if (!(cfg.retryPolicy.bumpTipStep >= 0)) errors.push('retryPolicy.bumpTipStep must be >= 0');
+  }
+
+  // rpc quorum
+  if (cfg.rpc) {
+    const q = cfg.rpc.quorum || {};
+    if (!(q.size >= 1)) errors.push('rpc.quorum.size must be >= 1');
+    if (!(q.require >= 1 && q.require <= q.size)) errors.push('rpc.quorum.require must be between 1 and quorum.size');
+    if (!(cfg.rpc.blockhashTtlMs > 0)) errors.push('rpc.blockhashTtlMs must be > 0');
+  }
+
+  // flags
+  if (cfg.flags) {
+    ['directAmm','bundles','leaderTiming','relay','probe'].forEach((k) => {
+      if (cfg.flags[k] !== undefined && typeof cfg.flags[k] !== 'boolean') {
+        errors.push(`flags.${k} must be boolean`);
+      }
+    });
+  }
   }
 
   return errors;

@@ -67,6 +67,9 @@ const {
   checkFreezeAuthority,
 } = require("./ghost");
 
+// NEW (Prompt 3): Quorum RPC / Blockhash TTL
+const RpcQuorumClient = require('./rpcQuorumClient');
+
 const SOL_MINT =
   "So11111111111111111111111111111111111111112";
 const USDC_MINT =
@@ -88,7 +91,7 @@ function inc(counter, value = 1, labels) {
 function observe(name, value) {
   try {
     if (typeof metricsLogger.observe === 'function') {
-      metricsLogger.observe(name, value);
+      metricsLogger.observe(name, value, labels);
     }
   } catch (_) {}
 }
@@ -303,7 +306,11 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     sizing,      // { maxImpactPct, maxPoolPct, minUsd }
     probe,       // { enabled, usd, scaleFactor, abortOnImpactPct, delayMs }
     slippageAuto,
-    postTx
+    postTx,
+
+    // Prompt 3: RPC quorum config (optional)
+    rpc,         // { quorum: {size, require}, blockhashTtlMs, endpoints? }
+    rpcEndpoints // legacy array/string (failover)
   } = meta;
 
   if (!_coreIdemInited) {
@@ -319,6 +326,32 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   // pick RPC for this attempt; may be rotated by retry loop
   let currentRpcUrl = privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL;
   let conn = new Connection(currentRpcUrl, 'confirmed');
+
+  // ---- Quorum RPC client (for blockhash TTL prewarm) ----
+  let endpoints = [];
+  if (rpc && (Array.isArray(rpc.endpoints) || typeof rpc.endpoints === 'string')) {
+    endpoints = Array.isArray(rpc.endpoints) ? rpc.endpoints.slice() : String(rpc.endpoints).split(',').map(s => s.trim());
+  } else if (Array.isArray(rpcEndpoints)) {
+    endpoints = rpcEndpoints.slice();
+  }
+  endpoints = endpoints.filter(Boolean);
+  const quorumCfg = (rpc && rpc.quorum) || { size: Math.max(1, endpoints.length), require: Math.min(2, Math.max(1, endpoints.length)) };
+  const blockhashTtlMs = (rpc && rpc.blockhashTtlMs) || 2500;
+  const quorumClient = endpoints.length ? new RpcQuorumClient({ endpoints, quorum: quorumCfg, blockhashTtlMs, commitment: 'confirmed' }) : null;
+
+  // helper: refresh recent blockhash on primary + peers (before send / retries)
+  async function _preSendRefresh() {
+    try {
+      await conn.getLatestBlockhash('confirmed');
+      metricsLogger.recordBlockhashRefresh?.(conn._rpcEndpoint || 'primary');
+    } catch (_) { /* ignore */ }
+    if (quorumClient) {
+      try {
+        const conns = quorumClient.getConnections();
+        await Promise.allSettled(conns.map(c => quorumClient.refreshIfExpired(c)));
+      } catch (_) { /* ignore */ }
+    }
+  }
 
   // ---- LEADER TIMING HOLD (pre-send) ----
   if (leaderTiming?.enabled && bundleStrategy !== 'private' && validatorIdentity) {
@@ -386,25 +419,18 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     }
   }
 
-  // Auto slippage governor: optionally adjust slippage further based
-  // on recent spreads and configured bounds.  The governor is
-  // instantiated per trade to avoid cross‑trade state bleed.  If
-  // slippageAuto.enabled is false or undefined the base value is
-  // returned unchanged.  Errors inside the governor are ignored.
+  // Auto slippage governor
   if (slippageAuto && typeof slippageAuto === 'object' && slippageAuto.enabled) {
     try {
       const gov = new SlippageGovernor(slippageAuto);
-      // Use the current quote's price impact as a proxy for spread
       if (quote && quote.priceImpactPct != null) {
         gov.observeSpread((quote.priceImpactPct || 0) * 100);
       }
       effSlippage = gov.getAdjusted(effSlippage);
-    } catch (_) {
-      // swallow errors – governor should never throw
-    }
+    } catch (_) {}
   }
 
-  // Impact guard: abort early if quoted price impact is too high
+  // Impact guard
   if (impactAbortPct > 0 && quote?.priceImpactPct != null) {
     const pct = quote.priceImpactPct * 100;
     if (pct > impactAbortPct) {
@@ -413,7 +439,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     }
   }
 
-  // Helper: warm quote cache wrapper
+  // Warm quote cache wrapper
   const quoteCache = getQuoteCache(quoteTtlMs);
   async function getWarmQuote(params) {
     const key = {
@@ -438,7 +464,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     return fresh;
   }
 
-  // ── Liquidity-aware sizing BEFORE retries/probe ────────────────────────────
+  // Liquidity-aware sizing
   const sizedQuote = await applyLiquiditySizing({
     baseQuote: { ...quote, slippage: effSlippage },
     sizingCfg: sizing,
@@ -449,7 +475,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         amount: String(a),
         slippage: effSlippage,
       });
-      // q.priceImpactPct is in fraction (e.g., 0.012 => 1.2%)
       return (q?.priceImpactPct ?? 0) * 100;
     },
   }).catch(() => quote);
@@ -460,14 +485,13 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     const reduced = Number(sizedQuote.inAmount);
     const reducedPct = original > 0 ? ((original - reduced) / original) * 100 : 0;
     observe('sizing_reduced_pct', reducedPct);
-    // Also emit impact histogram for the final sized amount
     try {
       const finalImpactPct = (sizedQuote.priceImpactPct ?? 0) * 100;
       observe('price_impact_pct', finalImpactPct);
     } catch (_) {}
   }
 
-  // ── Private Relay: prepare client and fire shadow submit ───────────────────
+  // Private Relay
   const walletPubkeyStr =
     (wallet.publicKey && wallet.publicKey.toBase58) ? wallet.publicKey.toBase58() :
     (wallet.publicKey && wallet.publicKey.toString) ? wallet.publicKey.toString() :
@@ -481,7 +505,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     amount: sizedQuote.inAmount,
   });
 
-  // ── Sender (single send attempt loop) abstracted so we can reuse for probe ─
+  // Sender
   async function sendOnce(localQuote) {
     let txHash = null;
     let attempt = 0;
@@ -491,7 +515,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     let jitoMode = !!useJitoBundle;
     let usedDirect = false;
 
-    // note: race a tiny early-ack from relay if available (does not block)
     const earlyAck = (async () => {
       try {
         const a = await Promise.race([
@@ -502,9 +525,15 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       } catch { return null; }
     })();
 
+    // Pre-send blockhash prewarm for first attempt
+    await _preSendRefresh();
+
     while (attempt < maxAttempts && !txHash) {
       try {
-        // Direct fallback if requested by meta and quoteLatency hints (priority on first attempt)
+        // Also refresh before each attempt if TTL expired
+        await _preSendRefresh();
+
+        // Direct AMM fallback
         if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200 && attempt === 0) {
           const startSlot = await conn.getSlot();
           txHash = await directSwap({
@@ -587,16 +616,17 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
         // RPC failover on last retry step before final
         if (retryPolicy.rpcFailover && attempt === (maxAttempts - 1)) {
-          const endpoints = Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : [];
-          if (endpoints.length > 1) {
-            const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
-            currentRpcUrl = endpoints[idx];
+          const endpointsList = endpoints.length ? endpoints : (Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : []);
+          if (endpointsList.length > 1) {
+            const idx = (endpointsList.indexOf(currentRpcUrl) + 1) % endpointsList.length;
+            currentRpcUrl = endpointsList[idx] || currentRpcUrl;
             conn = new Connection(currentRpcUrl, 'confirmed');
           }
         }
 
-        // Refresh quote if warm cache expired or after route change
+        // Refresh quote (and blockhash) after changes
         try {
+          await _preSendRefresh();
           const qRes = await getWarmQuote({
             inputMint: localQuote.inputMint,
             outputMint: localQuote.outputMint,
@@ -608,22 +638,18 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       }
     }
 
-    // mark relay winner if its ack resolved first (bookkeeping)
     try { await earlyAck; } catch {}
     return txHash;
   }
 
-  // ── Probe Buy then Scale (optional) ────────────────────────────────────────
+  // Probe Buy then Scale
   let txHash = null;
   if (probe?.enabled) {
     inc('probe_sent_total', 1);
 
-    // Derive a probe size (fraction). We avoid USD lookups to keep hot-path minimal.
-    // If scaleFactor provided → probe = total/scaleFactor; else fallback to 1/4th.
     const scale = Number(probe.scaleFactor || 4);
     const probeIn = Math.max(1, Math.floor(Number(sizedQuote.inAmount) / Math.max(2, scale)));
 
-    // Probe quote
     const probeQuote = await getWarmQuote({
       inputMint: sizedQuote.inputMint,
       outputMint: sizedQuote.outputMint,
@@ -631,25 +657,21 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       slippage: effSlippage,
     });
 
-    // Execute probe
+    await _preSendRefresh();
     const probeTx = await sendOnce(probeQuote);
 
-    // Check live impact and decide scale
     const liveImpactPct = (probeQuote?.priceImpactPct ?? 0) * 100;
     if (probe.abortOnImpactPct != null && liveImpactPct > Number(probe.abortOnImpactPct)) {
       inc('probe_abort_total', 1);
-      // cache idempotency as "done" to avoid double-buys if user retries immediately
       try { idempotencyStore.set(stableIdKey, probeTx || 'probe-aborted'); } catch {}
       return probeTx || null;
     }
 
-    // Optional short delay before scaling
     const delayMs = Number(probe.delayMs || 250);
     if (delayMs > 0) {
       await new Promise((r) => setTimeout(r, delayMs));
     }
 
-    // Remaining amount
     const remaining = Math.max(0, Number(sizedQuote.inAmount) - probeIn);
     if (remaining > 0) {
       const scaleQuote = await getWarmQuote({
@@ -658,6 +680,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         amount: String(remaining),
         slippage: effSlippage,
       });
+      await _preSendRefresh();
       const scaleTx = await sendOnce(scaleQuote);
       txHash = scaleTx || probeTx || null;
       if (scaleTx) inc('probe_scale_success_total', 1);
@@ -666,11 +689,11 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       inc('probe_scale_success_total', 1);
     }
   } else {
-    // Single-shot send
+    await _preSendRefresh();
     txHash = await sendOnce(sizedQuote);
   }
 
-  // Cache idempotency key on success (both caches)
+  // Cache idempotency key on success
   if (!simulated && stableIdKey && txHash) {
     try { idempotencyStore.set(stableIdKey, txHash); } catch {}
     try { coreIdem.markSuccess?.(stableIdKey); } catch {}
@@ -746,7 +769,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         side: "buy",
         slippage: effSlippage,
         mevMode,
-        priorityFee: undefined, // varies inside retries; omit precise
+        priorityFee: undefined,
         briberyAmount: undefined,
         mevShared: shared,
         inputMint: sizedQuote.inputMint,
@@ -874,10 +897,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     /* Post-trade chain (TP/Trail/Alerts) */
     if (txHash && postTx && Array.isArray(postTx.chain) && postTx.chain.length) {
       try {
-        // Enqueue the specified actions.  Pass along minimal
-        // context required by postTradeQueue.  The meta fields
-        // include ladder/trailing parameters so that the queue
-        // can build appropriate rules.
         postTradeQueue.enqueue({
           chain: postTx.chain,
           mint,
@@ -892,8 +911,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             trailingStopPct: meta.trailingStopPct,
           },
         });
-        // Kick off processing asynchronously.  Errors are
-        // handled internally.
         postTradeQueue.process().catch(() => {});
       } catch (e) {
         console.warn('tradeExecutorTurbo: post-trade queue enqueue failed', e.message);

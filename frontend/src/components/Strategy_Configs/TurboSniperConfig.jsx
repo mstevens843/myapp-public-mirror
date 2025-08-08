@@ -40,6 +40,7 @@ export const OPTIONAL_FIELDS = [
   "parallelWallets", "pumpfun", "airdrops",
   // risk alpha extensions
   "devWatch", "feeds", "slippageAuto", "postTx",
+   "flags", "rpc",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -234,10 +235,53 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       abortOnImpactPct: 2.0,
       delayMs: 250,
     },
+
+    flags: {
+      directAmm: true,
+      bundles: true,
+      leaderTiming: true,
+      relay: true,
+      probe: true,
+    },
+
+    // Reliability: RPC quorum + blockhash TTL (Prompt 3)
+    rpc: {
+      quorum: { size: 3, require: 2 },
+      blockhashTtlMs: 2500,
+      // we normalize endpoints below so existing `rpcEndpoints` still works
+      endpoints: [],
+    }
   };
   
 
-  const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
+  const merged = useMemo(() => {
+    const base = { ...defaults, ...(config ?? {}) };
+
+    // normalize flags with defaults
+    base.flags = { ...defaults.flags, ...(base.flags || {}) };
+
+    // keep existing csv input (`rpcEndpoints`) and map it into rpc.endpoints
+    const csv = (base.rpcEndpoints || "").trim();
+    const endpointsFromCsv = csv
+      ? csv.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    const currentRpcEndpoints = Array.isArray(base.rpc?.endpoints)
+      ? base.rpc.endpoints
+      : endpointsFromCsv;
+
+    base.rpc = {
+      quorum: { ...(defaults.rpc.quorum), ...((base.rpc || {}).quorum || {}) },
+      blockhashTtlMs:
+        (base.rpc && base.rpc.blockhashTtlMs != null)
+          ? base.rpc.blockhashTtlMs
+          : defaults.rpc.blockhashTtlMs,
+      endpoints: currentRpcEndpoints,
+    };
+
+    return base;
+  }, [config]);
+
+
 
   /* generic change handler */
   const change = (e) => {
@@ -282,6 +326,32 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           : value === "" ? "" : (isNaN(Number(value)) ? value : parseFloat(value)),
     }));
   };
+
+    // simple nested-section updater (1-level deep)
+  const onChangeSection = (section, key, value) => {
+    setConfig((prev) => ({
+      ...prev,
+      [section]: {
+        ...(prev[section] ?? defaults[section] ?? {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  // RPC quorum needs 2-level deep update: rpc.quorum.size / require
+  const onChangeRpcQuorum = (key, value) => {
+    setConfig((prev) => ({
+      ...prev,
+      rpc: {
+        ...(prev.rpc ?? defaults.rpc),
+        quorum: {
+          ...((prev.rpc ?? {}).quorum ?? defaults.rpc.quorum),
+          [key]: value,
+        },
+      },
+    }));
+  };
+
 
   /* select options */
   const priceWins  = ["", "1m","5m","15m","30m","1h","2h","4h","6h"];
@@ -764,6 +834,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         )}
       </section>
 
+        
 
       {/* ——— Advanced Sniper Flags ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
@@ -947,6 +1018,62 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           Auto Priority Fee <StrategyTooltip name="autoPriorityFee" />
         </label>
       </div>
+        {/* ——— Feature Flags (Prompt 3) ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">Feature Flags</div>
+        <div className="grid sm:grid-cols-3 gap-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={merged.flags?.directAmm ?? true}
+              onChange={(e) => onChangeSection('flags', 'directAmm', e.target.checked)}
+              className="accent-emerald-500"
+              disabled={disabled}
+            />
+            directAmm
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={merged.flags?.bundles ?? true}
+              onChange={(e) => onChangeSection('flags', 'bundles', e.target.checked)}
+              className="accent-emerald-500"
+              disabled={disabled}
+            />
+            bundles
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={merged.flags?.leaderTiming ?? true}
+              onChange={(e) => onChangeSection('flags', 'leaderTiming', e.target.checked)}
+              className="accent-emerald-500"
+              disabled={disabled}
+            />
+            leaderTiming
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={merged.flags?.relay ?? true}
+              onChange={(e) => onChangeSection('flags', 'relay', e.target.checked)}
+              className="accent-emerald-500"
+              disabled={disabled}
+            />
+            relay
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={merged.flags?.probe ?? true}
+              onChange={(e) => onChangeSection('flags', 'probe', e.target.checked)}
+              className="accent-emerald-500"
+              disabled={disabled}
+            />
+            probe
+          </label>
+        </div>
+      </div>
 
       {/* ——— RPC & Kill Switch ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
@@ -980,6 +1107,54 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
       </div>
+            {/* ——— Reliability: RPC Quorum & Blockhash TTL (Prompt 3) ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">Reliability (RPC Quorum)</div>
+        <div className="grid sm:grid-cols-3 gap-4">
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Quorum Size
+            <input
+              type="number"
+              min="1"
+              value={merged.rpc?.quorum?.size ?? 3}
+              onChange={(e) => onChangeRpcQuorum('size', Number(e.target.value || 0))}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Quorum Require
+            <input
+              type="number"
+              min="1"
+              value={merged.rpc?.quorum?.require ?? 2}
+              onChange={(e) => onChangeRpcQuorum('require', Number(e.target.value || 0))}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            Blockhash TTL (ms)
+            <input
+              type="number"
+              min="500"
+              step="50"
+              value={merged.rpc?.blockhashTtlMs ?? 2500}
+              onChange={(e) => onChangeSection('rpc', 'blockhashTtlMs', Number(e.target.value || 0))}
+              disabled={disabled}
+              className={inp}
+            />
+          </label>
+        </div>
+        {/* endpoints are normalized from the legacy csv field above */}
+        {merged.rpc?.endpoints?.length ? (
+          <div className="text-xs text-zinc-400 mt-2">
+            Using {merged.rpc.endpoints.length} endpoint{merged.rpc.endpoints.length > 1 ? "s" : ""} from RPC CSV.
+          </div>
+        ) : null}
+      </div>
+
+
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <label className="flex items-center gap-2 text-sm">
           <input
