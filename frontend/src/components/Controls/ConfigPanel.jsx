@@ -1185,6 +1185,13 @@ backdrop-blur-md";
         replicated to all selected wallets.  A toast warns the user
         about overwriting per‑wallet settings when turning it on. */}
     <div className="flex items-center gap-2 mt-2">
+      {/*
+        The apply‑all‑wallets toggle previously lacked a visible label, which
+        caused screen readers to announce it generically as “checkbox”.  Adding
+        both `aria-label` and a `<label>` tied to the input ensures the
+        purpose is conveyed to assistive technologies while preserving the
+        layout.  The `accent-emerald-500` class retains the green theme.
+      */}
       <input
         type="checkbox"
         id="applyAllWallets"
@@ -1193,7 +1200,7 @@ backdrop-blur-md";
           const checked = e.target.checked;
           setApplyAllWallets(checked);
           if (checked) {
-            toast.warning("This overwrites per-wallet config");
+            toast.warning("This overwrites per‑wallet config");
           }
         }}
         className="accent-emerald-500"
@@ -1403,6 +1410,9 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
           <input
             type="text"
             name={name}
+            /* Provide a label for accessibility; fall back to the field
+               name since labels are defined in STRATEGY_META maps. */
+            aria-label={name}
             step={name === "amountToSpend" ? "0.001" : "1"}
             placeholder={placeholder}
             value={
@@ -1479,8 +1489,11 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
      <input
         id="bot-amount"
         type="text"
-            inputMode="decimal"
+        inputMode="decimal"
         name="amountToSpend"
+        /* Provide an explicit label for screen readers so this field
+           is announced correctly when navigating via keyboard. */
+        aria-label="Amount to spend"
         value={config.amountToSpend || ""}
         onChange={handleChange}
         placeholder={

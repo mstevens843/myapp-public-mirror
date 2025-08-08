@@ -36,7 +36,10 @@ body {
  * Provide a clearly visible focus ring for keyboard navigation.  Dark
  * backgrounds can obscure default outlines, so we use a bright
  * emerald colour with an offset to avoid clipping.  This rule will
- * apply to any element that supports the focus-visible pseudo-class.
+ * apply to any element that supports the `:focus-visible` pseudo-class.
+ * When the site is viewed in light mode (via prefers-color-scheme) the
+ * default outlines suffice; in dark mode the custom ring improves
+ * accessibility considerably.
  */
 :focus-visible {
   outline: 2px solid #34d399; /* emerald-400 */

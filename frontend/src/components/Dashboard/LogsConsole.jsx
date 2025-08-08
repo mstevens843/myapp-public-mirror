@@ -12,7 +12,18 @@
  * - Used in dashboard to monitor backend activity (trades, alerts, errors)
  */
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
+// Import the fixed size list from react-window for virtualisation.  Only
+// the visible portion of the log stream will be rendered at any given
+// time, dramatically reducing DOM churn.  Note: react-window is already
+// a dependency elsewhere in the project (e.g. StrategyConsoleSheet).
+import { FixedSizeList } from "react-window";
+// Import a lightweight virtualization helper.  FixedSizeList only
+// renders the visible portion of a long list which keeps our DOM
+// footprint small and prevents memory leaks when the log stream is
+// active for hours.  react-window is already a project dependency
+// used elsewhere (e.g. in the strategy console).
+import { FixedSizeList } from "react-window";
 import { toast } from "react-toastify";
 import "@/styles/components/LogsConsole.css";
 
@@ -22,6 +33,21 @@ import "@/styles/components/LogsConsole.css";
  */
 const LogsConsole = () => {
   const [logs, setLogs] = useState([]);
+
+  // A ref to the virtualised list.  When new log entries arrive we
+  // scroll to the bottom so the latest message is visible.  Without
+  // this effect the user would have to manually scroll down.
+  const listRef = useRef(null);
+
+  useEffect(() => {
+    if (listRef.current && logs.length > 0) {
+      try {
+        listRef.current.scrollToItem(logs.length - 1);
+      } catch {
+        // ignore if list hasn't been initialised
+      }
+    }
+  }, [logs.length]);
 
   useEffect(() => {
     // Dynamically derive the WebSocket endpoint.  When running behind a
@@ -97,16 +123,48 @@ const LogsConsole = () => {
     }
   };
 
+  // Row renderer for the virtualised log list.  react‑window passes
+  // a `style` prop which must be applied to the outer element to
+  // correctly position each item.  We sanitise the raw log text
+  // here instead of during render to avoid repeated regex calls.
+  const Row = ({ index, style }) => {
+    const line = logs[index];
+    return (
+      <div style={style} className="log-line">
+        {sanitizeLog(line)}
+      </div>
+    );
+  };
+
   return (
     <div className="logs-console">
       <h3>📜 Live Logs</h3>
-
-      <div className="logs-output">
-        {logs.map((line, i) => (
-          <div key={i} className="log-line">
-            {sanitizeLog(line)}
-          </div>
-        ))}
+      {/*
+        Replace the simple map with a virtualised list.  FixedSizeList
+        only renders the visible subset of rows which dramatically
+        reduces DOM churn when thousands of log lines accumulate.  We
+        align the height with the previous CSS max-height (16rem = 256px) and
+        set each row to approximately 20px.  The surrounding div
+        retains the styling from Tailwind but overrides overflow so
+        react-window controls scrolling.
+      */}
+      <div
+        className="logs-output"
+        style={{ height: "16rem", overflow: "hidden" }}
+      >
+        {logs.length === 0 ? (
+          <div className="text-zinc-400 italic">Waiting for log messages…</div>
+        ) : (
+          <FixedSizeList
+            height={256}
+            width="100%"
+            itemCount={logs.length}
+            itemSize={20}
+            ref={listRef}
+          >
+            {Row}
+          </FixedSizeList>
+        )}
       </div>
 
       <div className="clear-logs-button">

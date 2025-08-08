@@ -34,6 +34,13 @@
 
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
 
+// Load metrics instrumentation early.  This patches Prisma globally and
+// exposes helpers used later in this file.  Importing here ensures that
+// Prisma clients instantiated in downstream modules receive middleware
+// automatically.  METRICS_ENABLED controls whether metrics are collected
+// and whether the /metrics endpoint is exposed.
+const metrics = require('./utils/metrics');
+
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const http = require('http');
@@ -191,6 +198,15 @@ if (modeFromCLI) {
   // Required to read cookies like access_token from incoming requests
   app.use(cookieParser());
 
+  // -------------------------------------------------------------------------
+  // Metrics middleware – record timing and errors for every request.  Only
+  // attach when metrics are explicitly enabled via METRICS_ENABLED env var to
+  // avoid any measurable overhead in production unless desired.  Place this
+  // ahead of route handlers so that all downstream middleware is timed.
+  if (process.env.METRICS_ENABLED === 'true') {
+    app.use(metrics.httpMetricsMiddleware);
+  }
+
   // Parse JSON unless Stripe webhook
   app.use((req, res, next) => {
     if (req.originalUrl === '/api/payment/webhook') {
@@ -213,6 +229,24 @@ if (modeFromCLI) {
     // connectivity here.  Keep it lightweight to avoid blocking.
     res.status(200).json({ status: 'ready' });
   });
+
+  // -------------------------------------------------------------------------
+  // Metrics endpoint – returns Prometheus formatted metrics for scraping.
+  // Exposed only when METRICS_ENABLED is set to 'true'.  If disabled the
+  // route is omitted entirely (resulting in a 404).  The registry is
+  // exported from metrics.js and includes the request/DB/WebSocket metrics.
+  if (process.env.METRICS_ENABLED === 'true') {
+    app.get('/metrics', async (req, res) => {
+      try {
+        res.set('Content-Type', metrics.register.contentType);
+        const payload = await metrics.register.metrics();
+        res.status(200).end(payload);
+      } catch (err) {
+        // if gathering metrics fails return 500 for clarity
+        res.status(500).end(`# Metrics collection failed: ${err.message}\n`);
+      }
+    });
+  }
 
   /**
    * API Router Injection
@@ -299,6 +333,14 @@ if (modeFromCLI) {
       wsHealth.disconnections++;
       clients.delete(ws);
       console.log('🔌 WebSocket disconnected');
+
+      // Record the disconnect for Prometheus and log ratio breaches.  A safe
+      // ratio is computed relative to the number of connections seen so far.
+      try {
+        metrics.recordWsDisconnect(wsHealth.connections, wsHealth.disconnections);
+      } catch (e) {
+        // ignore if metrics disabled or unavailable
+      }
     });
   });
 
@@ -314,6 +356,11 @@ if (modeFromCLI) {
         } catch (err) {
           console.warn('⚠️  Failed to terminate stale client:', err.message);
         }
+
+        // Update metrics for the stale disconnect
+        try {
+          metrics.recordWsDisconnect(wsHealth.connections, wsHealth.disconnections);
+        } catch {}
         continue;
       }
       ws.isAlive = false;
