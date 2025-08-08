@@ -10,6 +10,9 @@ const getTokenPrice     = require("../services/strategies/paid_api/getTokenPrice
 
 const router = express.Router();
 
+// Import job runner for idempotent rule creation
+const { runJob } = require("../services/jobs/jobRunner");
+
 const validate = require("../middleware/validate");
 const { csrfProtection } = require("../middleware/csrf");
 const { ruleSchema } = require("./schemas/tpsl.schema");
@@ -69,7 +72,8 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 /* ───────────────────────── PUT /:mint ───────────────────────── */
-router.put("/:mint", requireAuth, csrfProtection, validate({ body: ruleSchema }), async (req, res) => {
+// Legacy non‑idempotent TP/SL rule endpoint. Use PUT /api/tpsl/:mint instead for idempotent behaviour.
+router.put("/:mint-old", requireAuth, csrfProtection, validate({ body: ruleSchema }), async (req, res) => {
   const { mint } = req.params;
   const {
     tp, sl, tpPercent, slPercent,
@@ -209,6 +213,99 @@ router.delete("/by-id/:id", requireAuth, async (req, res) => {
   } catch (err) {
     console.error(`❌ Failed to delete TP/SL rule by id ${id}:`, err.message);
     res.status(500).json({ error: "Failed to delete TP/SL rule." });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Idempotent TP/SL rule creation. This handler wraps the legacy logic in the
+// job runner so that repeated requests with the same Idempotency-Key do not
+// create duplicate TP/SL rules. The legacy handler remains available at
+// `PUT /tpsl/:mint-old`.
+router.put("/:mint", requireAuth, csrfProtection, validate({ body: ruleSchema }), async (req, res) => {
+  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  try {
+    const jobResult = await runJob(idKey, async () => {
+      const { mint } = req.params;
+      const {
+        tp,
+        sl,
+        tpPercent,
+        slPercent,
+        walletId,
+        force = false,
+        strategy = "manual",
+      } = req.body;
+      const newRuleAllocation = Math.max(tpPercent || 0, slPercent || 0);
+      if (newRuleAllocation <= 0 || newRuleAllocation > 100) {
+        return { status: 400, response: { error: "Must set at least one TP or SL percentage between 1-100." } };
+      }
+      try {
+        const wallet = await resolveWallet(req.user.id, walletId);
+        // Aggregate existing TP/SL rules to ensure allocation doesn’t exceed 100%
+        const existingRules = await prisma.tpSlRule.findMany({
+          where: {
+            userId: req.user.id,
+            walletId: wallet.id,
+            mint,
+            strategy,
+          },
+          select: { tpPercent: true, slPercent: true, sellPct: true }
+        });
+        const currentAllocated = existingRules.reduce((total, r) => {
+          const max = Math.max(r.tpPercent || 0, r.slPercent || 0, r.sellPct || 0);
+          return total + max;
+        }, 0);
+        if (currentAllocated + newRuleAllocation > 100) {
+          return { status: 400, response: { error: `Total TP/SL allocation would exceed 100%. Currently used: ${currentAllocated}%.` } };
+        }
+        // Determine entry price from last trade or fallback to paid API
+        let entryPrice = null;
+        const lastTrade = await prisma.trade.findFirst({
+          where: {
+            mint,
+            walletId: wallet.id,
+            strategy,
+            type: "buy",
+          },
+          orderBy: { timestamp: "desc" },
+          select: { entryPrice: true }
+        });
+        if (lastTrade?.entryPrice && lastTrade.entryPrice > 0) {
+          entryPrice = lastTrade.entryPrice;
+        }
+        if (!entryPrice || entryPrice <= 0) {
+          entryPrice = await getTokenPrice(mint);
+        }
+        if (!entryPrice || entryPrice <= 0) {
+          return { status: 500, response: { error: "Failed to determine entry price from trades or paid API." } };
+        }
+        const created = await prisma.tpSlRule.create({
+          data: {
+            id: uuid(),
+            mint,
+            walletId: wallet.id,
+            userId: req.user.id,
+            strategy,
+            tp,
+            sl,
+            tpPercent: tpPercent || null,
+            slPercent: slPercent || null,
+            sellPct: null,
+            entryPrice,
+            force,
+            enabled: true,
+          }
+        });
+        return { status: 200, response: { success: true, data: created } };
+      } catch (err) {
+        console.error("❌ Failed to update TP/SL:", err.message);
+        return { status: 500, response: { error: "Failed to update TP/SL rule." } };
+      }
+    });
+    res.status(jobResult.status || 200).json(jobResult.response || {});
+  } catch (err) {
+    console.error("❌ Error in idempotent TP/SL handler:", err);
+    res.status(500).json({ error: err.message || "Failed to update TP/SL rule." });
   }
 });
 

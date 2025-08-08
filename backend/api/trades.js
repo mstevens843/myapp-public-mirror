@@ -13,6 +13,8 @@ const { getTokenName }  = require("../services/utils/analytics/getTokenName");
 const { getCachedPrice } = require("../utils/priceCache.static");
 const getTokenPrice     = require("../services/strategies/paid_api/getTokenPrice");
 const { closePositionFIFO }  = require("../services/utils/analytics/fifoReducer");
+// Import job runner to enforce idempotency on FIFO sells
+const { runJob } = require("../services/jobs/jobRunner");
 const { getCurrentWallet, getWalletBalance } = require("../services/utils/wallet/walletManager");
 const { getTokenAccountsAndInfo, getMintDecimals } = require("../utils/tokenAccounts");
 const getTokenMetadata = require("../services/strategies/paid_api/getTokenMetadata")
@@ -498,7 +500,8 @@ router.post("/open", async (req,res)=>{
 /* (very simplified – closes the *oldest* blocks first, like FIFO) */
 // PATCH /api/trades/open/:mint   – FIFO partial / full close
 
-router.patch("/open/:mint", requireAuth, async (req,res)=>{
+// Legacy FIFO close endpoint. Use the idempotent version defined below.
+router.patch("/open-old/:mint", requireAuth, async (req,res)=>{
   try {
     const { user } = req;               // requireAuth injects user
     const mint = req.params.mint;
@@ -511,6 +514,35 @@ router.patch("/open/:mint", requireAuth, async (req,res)=>{
   } catch(err){
     console.error("❌ FIFO sell error:", err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Idempotent FIFO close endpoint. This wraps the legacy close logic in the
+// job runner so repeated requests with the same Idempotency-Key will not
+// perform duplicate sells. See `/open-old/:mint` for the original behaviour.
+router.patch("/open/:mint", requireAuth, async (req, res) => {
+  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  try {
+    const jobResult = await runJob(idKey, async () => {
+      try {
+        const { user } = req;
+        const mint = req.params.mint;
+        const result = await closePositionFIFO({
+          userId : user.id,
+          mint,
+          ...req.body
+        });
+        return { status: 200, response: { message: "FIFO sell complete", ...result } };
+      } catch (err) {
+        // Pass through domain errors as 400
+        return { status: 400, response: { error: err.message } };
+      }
+    });
+    res.status(jobResult.status || 200).json(jobResult.response || {});
+  } catch (err) {
+    console.error("❌ FIFO sell error:", err);
+    res.status(500).json({ error: err.message || "FIFO sell failed." });
   }
 });
 

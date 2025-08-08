@@ -15,6 +15,9 @@ const getCachedPrice = require("../utils/priceCache.static").getCachedPrice;
 
 const router = express.Router();
 
+// Import the job runner to enforce idempotency on state‑changing endpoints.
+const { runJob } = require("../services/jobs/jobRunner");
+
 // Additional middleware for validation and CSRF protection
 const validate = require("../middleware/validate");
 const { csrfProtection } = require("../middleware/csrf");
@@ -123,7 +126,9 @@ router.get("/pending-dca", requireAuth, async (req, res) => {
 });
 /* ───────────────────────── POST /limit ─────────────────────── */
 // Apply requireAuth, CSRF protection and schema validation before executing
-router.post("/limit", requireAuth, csrfProtection, validate({ body: limitOrderSchema }), async (req, res) => {
+// Legacy non‑idempotent limit order creation endpoint. Use `/limit` instead for
+// idempotent behaviour. This route is kept for backwards compatibility.
+router.post("/limit-old", requireAuth, csrfProtection, validate({ body: limitOrderSchema }), async (req, res) => {
   log("➡️  POST /limit", req.body)
   const { mint, side = "buy", targetPrice, amount,
           force = false, walletLabel, walletId } = req.body;
@@ -272,7 +277,8 @@ router.post("/limit", requireAuth, csrfProtection, validate({ body: limitOrderSc
 
 /* ───────────────────────── POST /dca ────────────────────────── */
 /* ───────────────────────── POST /dca ────────────────────────── */
-router.post("/dca", requireAuth, csrfProtection, validate({ body: dcaOrderSchema }), async (req, res) => {
+// Legacy non‑idempotent DCA order endpoint. Use `/dca` defined below for idempotent behaviour.
+router.post("/dca-old", requireAuth, csrfProtection, validate({ body: dcaOrderSchema }), async (req, res) => {
   log("➡️  POST /dca", req.body);
 
   const {
@@ -450,6 +456,269 @@ if (limit && limit.userId === req.user.id) {
   }
 
   res.status(404).json({ error: "Order not found" });
+});
+
+// -----------------------------------------------------------------------------
+// Idempotent limit order creation. This handler uses the job runner to ensure
+// that duplicate requests with the same Idempotency-Key result in only a
+// single order being created. If the header is omitted each call is treated
+// independently. For backwards compatibility the legacy handler remains
+// available at `/limit-old`.
+router.post("/limit", requireAuth, csrfProtection, validate({ body: limitOrderSchema }), async (req, res) => {
+  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  try {
+    const jobResult = await runJob(idKey, async () => {
+      log("➡️  POST /limit", req.body);
+      const { mint, side = "buy", targetPrice, amount, force = false, walletLabel, walletId } = req.body;
+      if (!mint || !targetPrice || !amount) {
+        return { status: 400, response: { error: "mint, targetPrice, amount required" } };
+      }
+      let finalWalletId = walletId;
+      let finalLabel    = walletLabel;
+      try {
+        // Resolve wallet
+        if (!finalWalletId) {
+          const user = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { activeWalletId: true }
+          });
+          if (!user?.activeWalletId) {
+            return { status: 400, response: { error: "No walletId provided and no active wallet set." } };
+          }
+          finalWalletId = user.activeWalletId;
+        }
+        const wallet = await prisma.wallet.findUnique({
+          where: { id: finalWalletId },
+          select: { id: true, label: true, publicKey: true }
+        });
+        if (!wallet) {
+          return { status: 404, response: { error: "Wallet not found." } };
+        }
+        finalLabel = finalLabel || wallet.label;
+
+        // Balance checks
+        if (side === "buy" && !force) {
+          const { _sum } = await prisma.limitOrder.aggregate({
+            _sum: { amount: true },
+            where: {
+              userId     : req.user.id,
+              walletLabel: finalLabel,
+              walletId   : wallet.id,
+              side       : "buy",
+              status     : "open"
+            }
+          });
+          const pendingBudget = _sum.amount ?? 0;
+          if (await getUsdcBalance(wallet.publicKey) < (pendingBudget + +amount) * 0.95) {
+            return { status: 403, response: { error: "Not enough USDC to fund this order." } };
+          }
+        }
+        if (side === "sell" && !force) {
+          if (await getSplBalance(wallet.publicKey, mint) === 0) {
+            return { status: 403, response: { error: "You don’t own this token – tick ‘force queue’ to override.", needForce: true } };
+          }
+        }
+
+        // Fetch live price
+        const live  = await getTokenPrice(req.user.id, mint);
+        // Build order
+        const order = {
+          id          : uuid(),
+          type        : "limit",
+          token       : mint,
+          mint,
+          price       : typeof live === "number" && Number.isFinite(live) ? live : null,
+          targetPrice : +targetPrice,
+          side,
+          amount      : +amount,
+          force,
+          walletLabel : finalLabel,
+          walletId    : wallet.id,
+          userId      : req.user.id,
+          status      : "open",
+          createdAt   : new Date()
+        };
+
+        // Determine if price hit triggers immediate execution
+        const liveOk = typeof live === "number" && Number.isFinite(live);
+        const hit = liveOk && ((side === "buy" && live <= order.targetPrice) || (side === "sell" && live >= order.targetPrice));
+        if (hit) {
+          const { data } = await axios.post(`${API_BASE}/api/manual/${side}`, {
+            mint,
+            amountInUSDC : amount,
+            walletLabel  : finalLabel,
+            walletId     : wallet.id,
+            slippage     : 1.0,
+            force        : true,
+            strategy     : "limit",
+            skipLog      : true,
+          }, {
+            headers: {
+              Authorization: req.headers.authorization || "",
+              ...(idKey ? { "Idempotency-Key": idKey } : {}),
+            },
+          });
+          const swap = data.result || {};
+          if (!swap.tx) throw new Error("Swap returned no tx");
+          await prisma.limitOrder.create({
+            data: { ...order, status: "executed" }
+          });
+          return { status: 200, response: { success: true, order: { ...order, status: "executed" } } };
+        }
+        // Otherwise, insert open order
+        const dbOrder = await prisma.limitOrder.create({ data: order });
+        return { status: 200, response: { success: true, order: dbOrder } };
+      } catch (e) {
+        err("❌ limit order failed:", e);
+        return { status: 500, response: { error: e.message || String(e) } };
+      }
+    });
+    res.status(jobResult.status || 200).json(jobResult.response || {});
+  } catch (err) {
+    console.error("❌ Error in idempotent /limit handler:", err);
+    res.status(500).json({ error: err.message || "Failed to create limit order" });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// Idempotent DCA order creation. This handler wraps the legacy logic in a
+// job runner to prevent duplicate order creation on repeated requests.
+router.post("/dca", requireAuth, csrfProtection, validate({ body: dcaOrderSchema }), async (req, res) => {
+  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  try {
+    const jobResult = await runJob(idKey, async () => {
+      log("➡️  POST /dca", req.body);
+      const {
+        mint,
+        side = "buy",
+        amount,
+        unit,
+        numBuys,
+        freqHours,
+        stopAbove,
+        stopBelow,
+        force = false,
+        walletLabel,
+        walletId
+      } = req.body;
+      if (!mint || !amount || !unit || !numBuys || !freqHours) {
+        return { status: 400, response: { error: "mint, amount, unit, numBuys, freqHours required" } };
+      }
+      let finalWalletId = walletId;
+      let finalLabel = walletLabel;
+      // Resolve wallet
+      try {
+        if (!finalWalletId) {
+          const { activeWalletId } = await prisma.user.findUnique({
+            where: { id: req.user.id },
+            select: { activeWalletId: true },
+          });
+          if (!activeWalletId) {
+            return { status: 400, response: { error: "No walletId provided and no active wallet set." } };
+          }
+          finalWalletId = activeWalletId;
+        }
+        const wallet = await prisma.wallet.findUnique({
+          where: { id: finalWalletId },
+          select: { id: true, label: true, publicKey: true },
+        });
+        if (!wallet) {
+          return { status: 404, response: { error: "Wallet not found." } };
+        }
+        finalLabel = finalLabel || wallet.label;
+        // Funding check
+        let needsFunding = false;
+        try {
+          const chunk = +amount / +numBuys;
+          if (side === "buy") {
+            if (unit === "usdc") {
+              needsFunding = (await getUsdcBalance(wallet.publicKey)) < chunk * 0.95;
+            } else {
+              const solBal = await getCachedPrice(SOL_MINT);
+              needsFunding = (solBal < chunk * 0.95);
+            }
+          } else {
+            needsFunding = (await getSplBalance(wallet.publicKey, mint)) < (+amount / +numBuys) * 0.95;
+          }
+        } catch (e) {
+          return { status: 500, response: { error: "Balance check failed", detail: e.message } };
+        }
+        if (needsFunding && !force) {
+          return { status: 403, response: { error: "Insufficient funds to start this DCA.", needForce: true } };
+        }
+        const chunk = +amount / +numBuys;
+        const id = uuid();
+        const order = {
+          id,
+          type: "dca",
+          side,
+          mint,
+          tokenMint: mint,
+          amount: +amount,
+          unit,
+          numBuys: +numBuys,
+          totalBuys: +numBuys,
+          frequency: +freqHours,
+          freqHours: +freqHours,
+          stopAbove: stopAbove == null ? null : +stopAbove,
+          stopBelow: stopBelow == null ? null : +stopBelow,
+          walletLabel: finalLabel,
+          walletId: wallet.id,
+          userId: req.user.id,
+          force,
+          amountPerBuy: chunk,
+          completedBuys: 0,
+          executedCount: 0,
+          missedCount: 0,
+          needsFunding,
+          status: "active",
+          tx: null,
+          createdAt: new Date()
+        };
+        await prisma.dcaOrder.create({ data: order });
+        console.log(`✅ DCA order stored: ${order.id}`);
+        let swapTx = null, swapFailed = false;
+        if (side === "buy" && (!needsFunding || force)) {
+          try {
+            const authHeader = req.headers.authorization;
+            const result = await executeImmediateDcaBuy(req.user.id, { ...order, amountPerBuy: chunk }, authHeader);
+            swapTx = result?.tx || null;
+            if (swapTx) {
+              await prisma.dcaOrder.update({
+                where: { id },
+                data: { tx: swapTx, completedBuys: 1 }
+              });
+            }
+          } catch (err) {
+            swapFailed = true;
+            console.error(`❌ DCA buy failed for order ${order.id}:`, err.message);
+            await prisma.dcaOrder.updateMany({
+              where: { id },
+              data: { missedCount: { increment: 1 } }
+            });
+          }
+        }
+        return {
+          status: 200,
+          response: {
+            success: true,
+            order: { ...order, tx: swapTx },
+            warn: needsFunding && !force
+              ? "⚠️ Balance low – will execute when funded."
+              : swapFailed
+                ? "⚠️ First buy failed – will retry."
+                : undefined
+          }
+        };
+      } catch (e) {
+        return { status: 500, response: { error: e.message || String(e) } };
+      }
+    });
+    res.status(jobResult.status || 200).json(jobResult.response || {});
+  } catch (err) {
+    console.error("❌ Error in idempotent /dca handler:", err);
+    res.status(500).json({ error: err.message || "Failed to create dca order" });
+  }
 });
 
 
