@@ -1,0 +1,14 @@
+/* Inherits most rules from trade-table.css */
+
+.status-badge {
+    @apply px-2 py-1 text-xs rounded flex items-center justify-center gap-1;
+  }
+  .status-complete  { @apply bg-green-700 text-white; }
+  .status-progress  { @apply bg-yellow-600 text-white; }
+  .status-canceled  { @apply bg-red-700   text-white; }
+  
+  /* optional subtle hover accent for pending rows */
+  .trade-table tbody tr:hover {
+    box-shadow: 0 0 4px rgba(0,0,0,0.3);
+  }
+  

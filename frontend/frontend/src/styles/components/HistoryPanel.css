@@ -1,0 +1,117 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Container */
+.history-panel {
+  @apply bg-zinc-900 p-5 rounded-lg mb-6 shadow-md border border-zinc-700 text-white;
+}
+
+.history-panel h3 {
+  @apply text-xl font-semibold mb-4;
+}
+
+/* Table layout */
+.history-panel table {
+  @apply w-full table-auto text-sm bg-black text-white;
+}
+
+.history-panel th {
+  @apply border border-zinc-800 px-2 py-1 text-left font-semibold bg-zinc-800 text-cyan-300;
+}
+
+.history-panel td {
+  @apply border border-zinc-800 px-2 py-1 text-left;
+}
+
+
+.history-panel {
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.history-panel table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.history-panel th,
+.history-panel td {
+  padding: 0.5rem;
+  text-align: center;
+  border-bottom: 1px solid #444;
+}
+
+.history-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.history-panel::-webkit-scrollbar-thumb {
+  background-color: #555;
+  border-radius: 4px;
+}
+
+
+/* ╭─────────────────────────────╮
+   │  Shared card style helpers  │
+   ╰─────────────────────────────╯*/
+   .chart-container,
+   .portfolio-chart-container,
+   .trade-table-container {   /* table card */
+     @apply w-full bg-[#111827] p-4 rounded-lg shadow-md;
+   }
+   
+   /* make the chart cards a little taller */
+   .chart-container              { min-height: 380px; }   /* Trade */
+   .portfolio-chart-container    { min-height: 420px; }   /* Portfolio */
+   
+
+
+   .chart-header > div { @apply flex-wrap gap-2; }
+
+
+
+   /* ─────────── flat header style ─────────── */
+.panel-header { @apply bg-zinc-900/70 px-4 py-2 rounded-lg border border-zinc-800; }
+
+/* tabs */
+.tab-btn       { @apply px-5 py-1 rounded-md text-sm text-zinc-300 hover:text-white transition; }
+.tab-btn.active{ @apply bg-zinc-800 text-white; }
+
+/* right-hand actions */
+.action-btn{
+  @apply px-4 py-1 rounded-md border border-zinc-600 text-zinc-300
+         hover:bg-zinc-800 hover:text-white transition;
+}
+
+/* styles/components/HistoryPanel.css */
+.panel-card {
+  @apply bg-zinc-900/70 border border-zinc-800 rounded-lg p-5;
+}
+.panel-header {
+  @apply border-none px-0 py-0;
+}
+
+/* Sleek translucent blue outer card */
+.panel-card-glass {
+  @apply bg-gradient-to-br from-[#0f172a]/60 to-[#1e293b]/70
+         border border-blue-900/50 rounded-xl p-6 shadow-lg backdrop-blur;
+}
+
+.panel-header-glass {
+  @apply relative h-10;
+}
+
+.tab-btn {
+  @apply px-4 py-1.5 rounded-md border border-zinc-500 text-sm text-zinc-300 hover:text-white transition;
+}
+.tab-btn.active {
+  @apply bg-zinc-700 text-white border-zinc-600;
+}
+
+.action-btn {
+  @apply px-4 py-1.5 rounded-md border border-zinc-600 text-sm text-zinc-300 hover:text-white hover:bg-zinc-800 transition;
+}

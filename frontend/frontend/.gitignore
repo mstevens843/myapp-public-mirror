@@ -1,0 +1,88 @@
+# === Node Modules ===
+node_modules/
+
+# === Logs ===
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+backend/logs/
+backend/telegram/logs/
+
+# === OS / Editor Files ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.idea/
+*.vscode/
+
+# === Env Config ===
+.env
+.env.*.local
+
+# === Build Output ===
+dist/
+build/
+.out/
+.cache/
+.next/
+*.tsbuildinfo
+
+# === Frontend Build ===
+dist/
+build/
+.out/
+.cache/
+.next/
+frontend/.vite/
+frontend/dist/
+
+# === Secrets / Wallets ===
+.env
+.env.*.local
+*.key
+*.txt
+*.json
+backend/wallets/
+wallets/
+
+# === Backend Runtime ===
+runtime/
+open-trades.json
+paper_trades.log
+backend/wallets/default
+backend/wallets/*.json
+backend/wallets/*.txt
+backend/logs/
+backend/runtime/
+backend/wallets/*
+
+
+# === SQLite (if used) ===
+*.sqlite
+*.sqlite3
+*.db
+
+
+# === Runtime / Output ===
+runtime/
+backend/runtime/
+open-trades.json
+paper_trades.log
+*.tsbuildinfo
+*.pid
+*.seed
+*.tgz
+
+# === Mac/Linux Swap ===
+*.pid
+*.seed
+*.tgz
+
+# === VSCode Workspace Backup ===
+.vscode/
+
+
+backend/telegram/mintMemory.json

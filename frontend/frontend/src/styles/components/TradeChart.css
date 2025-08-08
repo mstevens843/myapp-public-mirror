@@ -1,0 +1,47 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.chart-container h3 {
+  @apply text-xl font-semibold mb-4;
+}
+
+/* Toggle Full/Recent View */
+.toggle-view {
+  @apply mb-4;
+}
+
+.toggle-view label {
+  @apply flex items-center gap-2 font-medium;
+}
+
+.toggle-view input[type="checkbox"] {
+  @apply accent-emerald-500 w-4 h-4;
+}
+/* Filter controls row (strategy, chart mode, toggles) */
+
+
+.filter-controls label {
+  @apply flex items-center gap-2;
+}
+
+.filter-controls select {
+  @apply bg-gray-100 dark:bg-gray-800 text-black dark:text-white rounded px-2 py-1;
+}
+
+
+.chart-container {
+  @apply bg-zinc-900 p-5 rounded-lg mb-6 shadow-md border border-zinc-700 text-white;
+}
+
+/* Control row */
+.filter-controls {
+  @apply flex flex-col lg:flex-row lg:justify-between gap-4 mb-4 text-sm;
+}
+
+.chart-mode-button {
+  @apply px-3 py-1 rounded-full transition font-medium;
+}
+.chart-mode-button.active   { @apply bg-sky-600 text-white shadow-md; }
+.chart-mode-button.inactive { @apply bg-zinc-800 text-zinc-300 hover:bg-zinc-700; }
+
