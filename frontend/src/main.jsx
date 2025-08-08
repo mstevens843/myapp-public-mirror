@@ -5,7 +5,8 @@ import { useEffect } from "react";
 import { supabase } from "./lib/supabase";
 
 import LandingPage from "./components/Dashboard/LandingPage";
-import App from "./App";
+// Use the wrapper component that includes the feature flag provider
+import App from "./AppWithFlags";
 import WalletsTab from "./components/Dashboard/WalletsTab";
 import PaymentsTab from "./components/Dashboard/PaymentsTab";
 import MyAccountTab from "./components/Dashboard/MyAccountTab";
@@ -64,54 +65,46 @@ if (!endpoint || !endpoint.startsWith("http")) {
 const wallets = [ new PhantomWalletAdapter() ];
 
 ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode>
-    <ConnectionProvider endpoint={endpoint}>
-      <WalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>
-          <UserProvider>
-            <UserPrefsProvider>
-              <PrefsProvider>
-                <SupabaseSessionProvider>
+  <BrowserRouter>
+    <SupabaseSessionProvider>
+      <PrefsProvider>
+        <UserProvider>
+          <UserPrefsProvider>
+            <ConnectionProvider endpoint={endpoint} config={{ commitment: "confirmed" }}>
+              <WalletProvider wallets={wallets} autoConnect={true}>
+                <WalletModalProvider>
                   <ErrorBoundary>
-                    <BrowserRouter>
-                      <AuthHandler />
-                      <Routes>
+                    <Routes>
                       <Route path="/" element={<LandingPage />} />
-                      <Route path="/verify-2fa" element={<Verify2FA />} />
-                      <Route path="/forgot-password" element={<ForgotPassword />} />
-                      <Route path="/reset-password" element={<ResetPassword />} />
-                      <Route path="/auth/reset-password" element={<ResetPassword />} />
-                      <Route path="/confirm-email" element={<ConfirmEmail />} />
-                      <Route path="/email-confirmed" element={<EmailConfirmed />} />
-
-                      <Route element={<Layout />}>
-                        <Route path="/app" element={<App />} />
-                        <Route path="/wallets" element={<WalletsTab />} />
-                        <Route path="/settings" element={<SettingsPanel />} />
-                        <Route path="/payments" element={<PaymentsTab />} />
-                        <Route path="/account" element={<MyAccountTab />} />
-                        <Route path="/telegram" element={<TelegramTab />} />
-                        <Route path="/watchlist" element={<Watchlist />} />
-                        <Route path="/open-trades" element={<OpenTradesTab />} />
-                        <Route path="/portfolio" element={<ChartPanelRoute />} />
-                        <Route path="/metrics" element={<ChartPanelRoute />} />
-                        <Route path="/trades" element={<ChartPanelRoute />} />
-                      </Route>
-
-                      <Route path="/terms" element={<TermsOfService />} />
-                      <Route path="/privacy" element={<PrivacyPolicy />} />
+                      <Route path="/app" element={<App />} />
+                      <Route path="/wallets" element={<WalletsTab />} />
+                      <Route path="/payments" element={<PaymentsTab />} />
+                      <Route path="/account" element={<MyAccountTab />} />
+                      <Route path="/settings" element={<SettingsPanel />} />
+                      <Route path="/telegram" element={<TelegramTab />} />
+                      <Route path="/watchlist" element={<Watchlist />} />
+                      <Route path="/open-trades" element={<OpenTradesTab />} />
+                      <Route path="/2fa" element={<Verify2FA />} />
+                      <Route path="/forgot" element={<ForgotPassword />} />
+                      <Route path="/reset" element={<ResetPassword />} />
                       <Route path="/payment-success" element={<PaymentSuccess />} />
                       <Route path="/payment-cancel" element={<PaymentCancel />} />
-                      </Routes>
-                      <Toaster position="top-right" reverseOrder={false} />
-                    </BrowserRouter>
+                      <Route path="/confirm-email" element={<ConfirmEmail />} />
+                      <Route path="/terms" element={<TermsOfService />} />
+                      <Route path="/privacy" element={<PrivacyPolicy />} />
+                      <Route path="/email-confirmed" element={<EmailConfirmed />} />
+                      <Route path="/history" element={<HistoryPanelRoute />} />
+                      <Route path="/charts" element={<ChartPanelRoute />} />
+                    </Routes>
+                    {/* Global Toaster for Sonner */}
+                    <Toaster position="top-right" richColors />
                   </ErrorBoundary>
-                </SupabaseSessionProvider>
-              </PrefsProvider>
-            </UserPrefsProvider>
-          </UserProvider>
-        </WalletModalProvider>
-      </WalletProvider>
-    </ConnectionProvider>
-  </React.StrictMode>
+                </WalletModalProvider>
+              </WalletProvider>
+            </ConnectionProvider>
+          </UserPrefsProvider>
+        </UserProvider>
+      </PrefsProvider>
+    </SupabaseSessionProvider>
+  </BrowserRouter>
 );
