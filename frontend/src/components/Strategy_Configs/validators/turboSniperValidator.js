@@ -1,4 +1,4 @@
-// frontend/src/strategy_configs/validators/turboSniperValidator.js
+// frontend/src/components/Strategy_Configs/validators/turboSniperValidator.js
 //
 // Validation logic for the Turbo Sniper configuration. Returns an
 // array of error strings describing invalid fields. An empty array
@@ -138,6 +138,120 @@ if (cfg.probe && cfg.probe.enabled) {
     errors.push('probe.delayMs must be >= 0');
   }
 }
+
+  // Developer/Creator heuristics
+  if (cfg.devWatch) {
+    const dw = cfg.devWatch;
+    if (dw.whitelist !== undefined) {
+      if (!Array.isArray(dw.whitelist)) {
+        errors.push('devWatch.whitelist must be an array');
+      } else {
+        dw.whitelist.forEach((m, i) => {
+          if (typeof m !== 'string' || !m.trim()) {
+            errors.push(`devWatch.whitelist[${i}] must be a non-empty string`);
+          }
+        });
+      }
+    }
+    if (dw.blacklist !== undefined) {
+      if (!Array.isArray(dw.blacklist)) {
+        errors.push('devWatch.blacklist must be an array');
+      } else {
+        dw.blacklist.forEach((m, i) => {
+          if (typeof m !== 'string' || !m.trim()) {
+            errors.push(`devWatch.blacklist[${i}] must be a non-empty string`);
+          }
+        });
+      }
+    }
+    if (dw.holderTop5MaxPct !== undefined) {
+      const v = Number(dw.holderTop5MaxPct);
+      if (!(v >= 0 && v <= 100)) {
+        errors.push('devWatch.holderTop5MaxPct must be between 0 and 100');
+      }
+    }
+    if (dw.lpBurnMinPct !== undefined) {
+      const v = Number(dw.lpBurnMinPct);
+      if (!(v >= 0 && v <= 100)) {
+        errors.push('devWatch.lpBurnMinPct must be between 0 and 100');
+      }
+    }
+  }
+
+  // Cross‑feed token resolver
+  if (cfg.feeds) {
+    const feeds = cfg.feeds;
+    if (feeds.order !== undefined) {
+      if (!Array.isArray(feeds.order) || feeds.order.length === 0) {
+        errors.push('feeds.order must be a non-empty array');
+      } else {
+        const allowed = ['ws', 'birdeye', 'onchain'];
+        feeds.order.forEach((s, i) => {
+          if (!allowed.includes(s)) {
+            errors.push(`feeds.order[${i}] must be one of ${allowed.join(', ')}`);
+          }
+        });
+      }
+    }
+    if (feeds.ttlMs !== undefined) {
+      const v = Number(feeds.ttlMs);
+      if (!(v > 0)) {
+        errors.push('feeds.ttlMs must be positive');
+      }
+    }
+    if (feeds.timeoutMs !== undefined) {
+      const v = Number(feeds.timeoutMs);
+      if (!(v > 0)) {
+        errors.push('feeds.timeoutMs must be positive');
+      }
+    }
+  }
+
+  // Auto Slippage Governor
+  if (cfg.slippageAuto) {
+    const sa = cfg.slippageAuto;
+    if (sa.floorPct !== undefined) {
+      const v = Number(sa.floorPct);
+      if (!(v >= 0)) {
+        errors.push('slippageAuto.floorPct must be >= 0');
+      }
+    }
+    if (sa.ceilPct !== undefined) {
+      const v = Number(sa.ceilPct);
+      const floor = Number(sa.floorPct);
+      if (!(v >= 0)) {
+        errors.push('slippageAuto.ceilPct must be >= 0');
+      } else if (sa.floorPct !== undefined && v < floor) {
+        errors.push('slippageAuto.ceilPct must be >= floorPct');
+      }
+    }
+    if (sa.sensitivity !== undefined) {
+      const v = Number(sa.sensitivity);
+      if (!(v >= 0 && v <= 1)) {
+        errors.push('slippageAuto.sensitivity must be between 0 and 1');
+      }
+    }
+  }
+
+  // Post‑trade chain
+  if (cfg.postTx) {
+    const pt = cfg.postTx;
+    if (pt.chain !== undefined) {
+      if (!Array.isArray(pt.chain) || pt.chain.length === 0) {
+        errors.push('postTx.chain must be a non-empty array');
+      } else {
+        const allowed = ['tp', 'trail', 'alerts'];
+        pt.chain.forEach((c, i) => {
+          if (!allowed.includes(c)) {
+            errors.push(`postTx.chain[${i}] must be one of ${allowed.join(', ')}`);
+          }
+        });
+      }
+    }
+    if (pt.ensureQueued !== undefined && typeof pt.ensureQueued !== 'boolean') {
+      errors.push('postTx.ensureQueued must be a boolean');
+    }
+  }
 
   return errors;
 }

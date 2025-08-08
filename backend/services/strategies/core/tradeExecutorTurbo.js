@@ -34,6 +34,10 @@ const getSolPrice = getTokenPrice.getSolPrice;
 const { sendAlert } = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 
+// Auto slippage governor and post-trade queue
+const { SlippageGovernor } = require('./slippageGovernor');
+const postTradeQueue = require('./postTradeQueue');
+
 // 🔧 Existing infra
 const LeaderScheduler = require("./leaderScheduler");
 const QuoteWarmCache  = require("./quoteWarmCache");
@@ -298,6 +302,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     idempotency, // { ttlSec, salt, resumeFromLast, slotBucket? }
     sizing,      // { maxImpactPct, maxPoolPct, minUsd }
     probe,       // { enabled, usd, scaleFactor, abortOnImpactPct, delayMs }
+    slippageAuto,
+    postTx
   } = meta;
 
   if (!_coreIdemInited) {
@@ -377,6 +383,24 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     const ds = Number(dynamicSlippageMaxPct);
     if (Number.isFinite(ds) && ds > 0) {
       effSlippage = Math.min(slippage, ds / 100);
+    }
+  }
+
+  // Auto slippage governor: optionally adjust slippage further based
+  // on recent spreads and configured bounds.  The governor is
+  // instantiated per trade to avoid cross‑trade state bleed.  If
+  // slippageAuto.enabled is false or undefined the base value is
+  // returned unchanged.  Errors inside the governor are ignored.
+  if (slippageAuto && typeof slippageAuto === 'object' && slippageAuto.enabled) {
+    try {
+      const gov = new SlippageGovernor(slippageAuto);
+      // Use the current quote's price impact as a proxy for spread
+      if (quote && quote.priceImpactPct != null) {
+        gov.observeSpread((quote.priceImpactPct || 0) * 100);
+      }
+      effSlippage = gov.getAdjusted(effSlippage);
+    } catch (_) {
+      // swallow errors – governor should never throw
     }
   }
 
@@ -844,6 +868,35 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         }
       } catch (e) {
         console.warn("Auto-rug failed:", e.message);
+      }
+    }
+
+    /* Post-trade chain (TP/Trail/Alerts) */
+    if (txHash && postTx && Array.isArray(postTx.chain) && postTx.chain.length) {
+      try {
+        // Enqueue the specified actions.  Pass along minimal
+        // context required by postTradeQueue.  The meta fields
+        // include ladder/trailing parameters so that the queue
+        // can build appropriate rules.
+        postTradeQueue.enqueue({
+          chain: postTx.chain,
+          mint,
+          userId,
+          walletId,
+          meta: {
+            strategy,
+            category,
+            tpLadder: meta.tpLadder,
+            tpPercent,
+            slPercent,
+            trailingStopPct: meta.trailingStopPct,
+          },
+        });
+        // Kick off processing asynchronously.  Errors are
+        // handled internally.
+        postTradeQueue.process().catch(() => {});
+      } catch (e) {
+        console.warn('tradeExecutorTurbo: post-trade queue enqueue failed', e.message);
       }
     }
 

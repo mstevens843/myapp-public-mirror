@@ -38,6 +38,8 @@ export const OPTIONAL_FIELDS = [
   // new (exposed but summarized elsewhere)
   "leaderTiming", "quoteTtlMs", "retryPolicy", "idempotencyTtlSec",
   "parallelWallets", "pumpfun", "airdrops",
+  // risk alpha extensions
+  "devWatch", "feeds", "slippageAuto", "postTx",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -180,6 +182,35 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
     },
     impactAbortPct       : "",
     dynamicSlippageMaxPct: "",
+
+    // Developer/creator heuristics
+    devWatch: {
+      whitelist: [],
+      blacklist: [],
+      holderTop5MaxPct: 65,
+      lpBurnMinPct: 50,
+    },
+
+    // Cross‑feed token resolver config
+    feeds: {
+      order: ["ws", "birdeye", "onchain"],
+      ttlMs: 800,
+      timeoutMs: 400,
+    },
+
+    // Auto slippage governor
+    slippageAuto: {
+      enabled: true,
+      floorPct: 0.5,
+      ceilPct: 2.0,
+      sensitivity: 0.6,
+    },
+
+    // Post‑trade chain defaults
+    postTx: {
+      chain: ["tp", "trail", "alerts"],
+      ensureQueued: true,
+    },
       // Extra sections
     privateRelay: {
       enabled: false,

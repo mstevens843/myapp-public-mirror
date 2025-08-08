@@ -156,6 +156,7 @@ const { passes }               = require("./core/passes");
 const { createSummary }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
+const createTokenResolver       = require("./core/tokenResolver");
 
 // New core helpers
 const { startPoolListener, stopPoolListener } = require("./core/poolCreateListener");
@@ -324,6 +325,12 @@ async function turboSniperStrategy(botCfg = {}) {
   await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
   initTxWatcher("Sniper-Turbo");
 
+  // Instantiate a cross‑feed token resolver if configured.  Use
+  // dev‑provided feed ordering/TTLs; default values are encoded in
+  // tokenResolver itself.  The resolver is reused across ticks to
+  // benefit from its internal cache.
+  const tokenResolver = createTokenResolver(botCfg.feeds || {});
+
   // If pool detection is enabled, start the pool listener.  This listener
   // emits events whenever a new liquidity pool is initialised on
   // Raydium (or other configured AMMs).  The callback simply logs
@@ -357,7 +364,18 @@ async function turboSniperStrategy(botCfg = {}) {
       const phaseStart = Date.now();
 
       /* token feed resolution (kept minimal for perf) */
-      const mint = botCfg.mint || (await resolveTokenFeed("sniper", botCfg))[0];
+      let mint;
+      if (botCfg.mint) {
+        mint = botCfg.mint;
+      } else if (botCfg.feeds) {
+        // Use cross‑feed resolver.  It returns an array of candidate
+        // mints; pick the first.  If empty, skip this tick.
+        const mints = await tokenResolver.resolve('sniper', botCfg, botCfg.userId);
+        mint = Array.isArray(mints) && mints.length ? mints[0] : null;
+      } else {
+        const mints = await resolveTokenFeed('sniper', botCfg);
+        mint = Array.isArray(mints) && mints.length ? mints[0] : null;
+      }
       if (!mint) return;
 
       /* filters / passes */
@@ -375,6 +393,7 @@ async function turboSniperStrategy(botCfg = {}) {
           volumeSpikeMult    : null,
           fetchOverview      : (m) =>
             getTokenShortTermChange(null, m, "5m", "1h"),
+          devWatch           : botCfg.devWatch,
         })
       );
       if (!res?.ok) return;
@@ -469,6 +488,18 @@ async function turboSniperStrategy(botCfg = {}) {
 
         // post buy watcher
         postBuyWatch    : POST_BUY_WATCH,
+
+        // Auto slippage governor configuration
+        slippageAuto   : botCfg.slippageAuto || {},
+
+        // Post‑trade action chain
+        postTx         : botCfg.postTx || null,
+
+        // Developer heuristics (for downstream consumption)
+        devWatch       : botCfg.devWatch || null,
+
+        // Cross‑feed token resolver settings
+        feeds          : botCfg.feeds || null,
 
         // iceberg
         iceberg         : {
