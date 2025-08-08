@@ -1,4 +1,5 @@
-/* backend/services/strategies/sniper.js  – Turbo-ready (updated)
+// backend/services/strategies/turboSniper.js
+/* turboSniper.js  – Turbo-ready (updated)
  * ------------------------------------------------------------------
  *  • Keeps swap path ultra-fast (tradeExecutorTurbo)
  *  • Restores advanced flags and plumbs Turbo extras end-to-end:
@@ -45,6 +46,10 @@ const { createSummary }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
 
+// New core helpers
+const { startPoolListener, stopPoolListener } = require("./core/poolCreateListener");
+const metricsLogger = require("./logging/metrics");
+
 /* Ghost utils + quote for multi-buy */
 const { prewarmTokenAccount }  = require("./core/ghost");
 const { Connection }           = require("@solana/web3.js");
@@ -84,8 +89,13 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
                               ? +botCfg.entryThreshold / 100
                               : +botCfg.entryThreshold) || 0.03;
   const VOLUME_THRESHOLD = +botCfg.volumeThreshold || 50_000;
-  const SLIPPAGE         = +botCfg.slippage        || 1.0;
-  const MAX_SLIPPAGE     = +botCfg.maxSlippage     || 0.15;
+  let SLIPPAGE           = +botCfg.slippage        || 1.0;
+  let MAX_SLIPPAGE       = +botCfg.maxSlippage     || 0.15;
+  // Fix slippage fan bug: ensure MAX_SLIPPAGE ≥ SLIPPAGE
+  if (MAX_SLIPPAGE < SLIPPAGE) {
+    // Increase max slippage proportionally; default multiplier 1.5x
+    MAX_SLIPPAGE = SLIPPAGE * 1.5;
+  }
   const INTERVAL_MS      = Math.round((+botCfg.interval || 30) * 1_000);
   const TAKE_PROFIT      = +botCfg.takeProfit      || 0;
   const STOP_LOSS        = +botCfg.stopLoss        || 0;
@@ -109,6 +119,32 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
   const USE_JITO_BUNDLE    = botCfg.useJitoBundle === true;
   const JITO_TIP_LAMPORTS  = normalizeNumber(botCfg.jitoTipLamports, 0);
   const JITO_RELAY_URL     = botCfg.jitoRelayUrl || null;
+
+  // Bundle strategy (topOfBlock | backrun | private) and CU/tip tuning
+  const BUNDLE_STRATEGY    = botCfg.bundleStrategy || 'topOfBlock';
+  const CU_ADAPT           = botCfg.cuAdapt === true;
+  const CU_PRICE_MIN       = normalizeNumber(botCfg.cuPriceMicroLamportsMin, 0);
+  const CU_PRICE_MAX       = normalizeNumber(botCfg.cuPriceMicroLamportsMax, 0);
+  const TIP_CURVE          = botCfg.tipCurve || 'flat';
+
+  // Direct AMM fallback flags
+  const DIRECT_AMM_FALLBACK = botCfg.directAmmFallback === true;
+  const DIRECT_AMM_FIRST_PCT= normalizeNumber(botCfg.directAmmFirstPct, 0.3);
+  const SKIP_PREFLIGHT      = botCfg.skipPreflight === false ? false : true;
+
+  // Post-buy watcher configuration
+  const POST_BUY_WATCH = {
+    durationSec: botCfg.postBuyWatch?.durationSec != null ? +botCfg.postBuyWatch.durationSec : 180,
+    lpPullExit: botCfg.postBuyWatch?.lpPullExit !== false,
+    authorityFlipExit: botCfg.postBuyWatch?.authorityFlipExit !== false,
+  };
+
+  // Iceberg and impact guard configuration
+  const ICEBERG_ENABLED        = botCfg.iceberg?.enabled === true;
+  const ICEBERG_TRANCHES       = botCfg.iceberg?.tranches ? Math.max(1, parseInt(botCfg.iceberg.tranches)) : 1;
+  const ICEBERG_TRANCHE_DELAY  = botCfg.iceberg?.trancheDelayMs ? +botCfg.iceberg.trancheDelayMs : 0;
+  const IMPACT_ABORT_PCT       = normalizeNumber(botCfg.impactAbortPct, 0);
+  const DYNAMIC_SLIPPAGE_MAX_PCT = normalizeNumber(botCfg.dynamicSlippageMaxPct, MAX_SLIPPAGE * 100);
 
   // routing
   const MULTI_ROUTE        = botCfg.multiRoute === true;
@@ -151,6 +187,22 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
   await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
   initTxWatcher("Sniper-Turbo");
 
+  // If pool detection is enabled, start the pool listener.  This listener
+  // emits events whenever a new liquidity pool is initialised on
+  // Raydium (or other configured AMMs).  The callback simply logs
+  // the detected tokens and signature.  Consumers may extend this
+  // behaviour to automatically snipe the detected tokens.
+  if (POOL_DETECTION) {
+    try {
+      const rpcUrl = PRIVATE_RPC_URL || (RPC_ENDPOINTS.length ? RPC_ENDPOINTS[0] : process.env.SOLANA_RPC_URL);
+      startPoolListener({ rpcUrl }, (info) => {
+        log('info', `Pool detected for ${info.tokenA}/${info.tokenB} via tx ${info.signature}`);
+      });
+    } catch (e) {
+      log('error', `Failed to start pool listener: ${e.message}`);
+    }
+  }
+
   /* ── TICK ────────────────────────────────────────── */
   async function tick() {
     if (trades >= MAX_TRADES) return;
@@ -163,6 +215,9 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
       if (!(await wm.ensureMinBalance(MIN_BALANCE_SOL, getWalletBalance, isAboveMinBalance))) {
         return;
       }
+
+      // Start detection timer
+      const phaseStart = Date.now();
 
       /* token feed resolution (kept minimal for perf) */
       const mint = botCfg.mint || (await resolveTokenFeed("sniper", botCfg))[0];
@@ -196,6 +251,7 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
       guards.assertDailyLimit(SNIPE_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
 
       /* quote helper */
+      const quoteStart = Date.now();
       const quoteRes = await getSafeQuote({
         inputMint    : BASE_MINT,
         outputMint   : mint,
@@ -203,6 +259,8 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
         slippage     : SLIPPAGE,
         maxImpactPct : MAX_SLIPPAGE,
       });
+      const quoteEnd = Date.now();
+      metricsLogger.recordTiming('detectToQuote', quoteEnd - phaseStart);
       if (!quoteRes.ok) return;
       const baseQuote = quoteRes.quote;
 
@@ -212,6 +270,8 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
       // If AUTO_PRIORITY_FEE is true, executor will compute best fee; we only pass the flag.
 
       /* meta for executor */
+      const metaBuildStart = Date.now();
+      const idempotencyKey = uuid();
       const baseMeta = {
         strategy        : "Sniper",
         walletId        : botCfg.walletId,
@@ -227,7 +287,7 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
         // turbo / fees
         turboMode       : TURBO_MODE,
         privateRpcUrl   : PRIVATE_RPC_URL,
-        skipPreflight   : TURBO_MODE,
+        skipPreflight   : SKIP_PREFLIGHT,
         priorityFeeLamports: PRIORITY_FEE,
         autoPriorityFee : AUTO_PRIORITY_FEE,
 
@@ -236,11 +296,22 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
         jitoTipLamports : JITO_TIP_LAMPORTS,
         jitoRelayUrl    : JITO_RELAY_URL,
 
+        // Bundle tuning
+        bundleStrategy  : BUNDLE_STRATEGY,
+        cuAdapt         : CU_ADAPT,
+        cuPriceMicroLamportsMin: CU_PRICE_MIN,
+        cuPriceMicroLamportsMax: CU_PRICE_MAX,
+        tipCurve        : TIP_CURVE,
+
         // routing & dex prefs
         multiRoute      : MULTI_ROUTE,
         splitTrade      : SPLIT_TRADE,
         allowedDexes    : ALLOWED_DEXES,
         excludedDexes   : EXCLUDED_DEXES,
+
+        // Direct AMM fallback
+        directAmmFallback : DIRECT_AMM_FALLBACK,
+        directAmmFirstPct: DIRECT_AMM_FIRST_PCT,
 
         // rpc failover & safety
         rpcEndpoints    : RPC_ENDPOINTS,
@@ -258,7 +329,29 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
         coverWalletId   : COVER_WALLET_ID,
         autoRug         : AUTO_RUG,
         prewarmAccounts : PREWARM_ACCS,
+
+        // post buy watcher
+        postBuyWatch    : POST_BUY_WATCH,
+
+        // iceberg
+        iceberg         : {
+          enabled: ICEBERG_ENABLED,
+          tranches: ICEBERG_TRANCHES,
+          trancheDelayMs: ICEBERG_TRANCHE_DELAY,
+        },
+
+        // impact/dynamic slippage
+        impactAbortPct  : IMPACT_ABORT_PCT,
+        dynamicSlippageMaxPct: DYNAMIC_SLIPPAGE_MAX_PCT,
+
+        // idempotency key to avoid duplicate buys
+        idempotencyKey  : idempotencyKey,
+
+        // measured quote latency in ms, used for direct AMM fallback
+        quoteLatencyMs  : quoteEnd - quoteStart,
       };
+      const metaBuildEnd = Date.now();
+      metricsLogger.recordTiming('quoteToBuild', metaBuildEnd - quoteEnd);
 
       /* optional delay before buy */
       if (DELAY_MS > 0) await new Promise(r => setTimeout(r, DELAY_MS));
@@ -266,7 +359,8 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
       /* optional pre-warm */
       if (PREWARM_ACCS) {
         try {
-          const conn = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
+          // Use the same private RPC as turbo for prewarm to avoid RPC mismatches
+          const conn = new Connection(PRIVATE_RPC_URL || process.env.SOLANA_RPC_URL, "confirmed");
           const currentWallet = wm.current();
           await prewarmTokenAccount(conn, baseQuote.outputMint, currentWallet);
         } catch (_) {/* ignore */}
@@ -288,6 +382,8 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
               slippage  : s,
             });
             if (q) {
+              // Track retries for metrics (any attempt beyond the first is a retry)
+              if (s !== slips[0]) metricsLogger.recordRetry();
               return await execTrade({
                 quote: { ...q, prioritizationFeeLamports: PRIORITY_FEE },
                 mint,
@@ -303,17 +399,25 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
           if (sig) { txHash = sig; break; }
         }
       } else {
+        const submitStart = Date.now();
         txHash = await execTrade({
           quote: baseQuote,
           mint,
           meta : baseMeta,
           simulated: DRY_RUN,
         });
+        const submitEnd = Date.now();
+        metricsLogger.recordTiming('buildToSubmit', submitEnd - metaBuildEnd);
       }
 
       if (txHash) {
         trades++; todaySol += SNIPE_LAMPORTS / 1e9;
         cd.hit(mint);
+        metricsLogger.recordSuccess();
+      }
+      if (!txHash) {
+        // Record a failure reason for metrics
+        metricsLogger.recordFail('no-tx');
       }
       if (trades >= MAX_TRADES) {
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
@@ -325,6 +429,7 @@ module.exports = async function turboSniperStrategy(botCfg = {}) {
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
       }
+      metricsLogger.recordFail(err?.code || err?.message || 'error');
     }
   }
 

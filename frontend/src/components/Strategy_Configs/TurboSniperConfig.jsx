@@ -1,3 +1,4 @@
+// frontend/src/components/Strategy_Configs/TurboSniperConfig.jsx
 // TurboSniperConfig.jsx — Turbo + Full Sniper Additions + Strategy Summary
 import React, { useMemo } from "react";
 import StrategyTooltip     from "./StrategyTooltip";
@@ -22,10 +23,18 @@ export const OPTIONAL_FIELDS = [
   "turboMode", "autoRiskManage", "privateRpcUrl",
   // jito / fees
   "useJitoBundle", "jitoTipLamports", "jitoRelayUrl", "autoPriorityFee",
+  // jito tuning
+  "bundleStrategy", "cuAdapt", "cuPriceMicroLamportsMin", "cuPriceMicroLamportsMax", "tipCurve",
   // rpc / safety
   "rpcEndpoints", "rpcMaxErrors", "killSwitch", "killThreshold", "poolDetection",
   // dex prefs / split / exits
   "allowedDexes", "excludedDexes", "splitTrade", "tpLadder", "trailingStopPct",
+  // direct amm
+  "directAmmFallback", "directAmmFirstPct", "skipPreflight",
+  // post-buy watcher
+  "postBuyWatch",
+  // iceberg & impact
+  "iceberg", "impactAbortPct", "dynamicSlippageMaxPct",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -95,6 +104,34 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
     turboMode            : false,
     autoRiskManage       : false,
     privateRpcUrl        : "",
+
+    // Jito bundle tuning
+    bundleStrategy       : "topOfBlock",
+    cuAdapt              : false,
+    cuPriceMicroLamportsMin: "",
+    cuPriceMicroLamportsMax: "",
+    tipCurve             : "flat",
+
+    // Direct AMM fallback
+    directAmmFallback    : false,
+    directAmmFirstPct    : 0.3,
+    skipPreflight        : true,
+
+    // Post-buy watcher defaults
+    postBuyWatch         : {
+      durationSec: 180,
+      lpPullExit: true,
+      authorityFlipExit: true,
+    },
+
+    // Iceberg & impact guard
+    iceberg              : {
+      enabled: false,
+      tranches: 1,
+      trancheDelayMs: 0,
+    },
+    impactAbortPct       : "",
+    dynamicSlippageMaxPct: "",
   };
 
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
@@ -102,6 +139,23 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
   /* generic change handler */
   const change = (e) => {
     const { name, value, type, checked } = e.target;
+    // support nested fields for objects like postBuyWatch.durationSec or iceberg.tranches
+    if (name.includes('.')) {
+      const [parent, child] = name.split('.');
+      setConfig((prev) => ({
+        ...prev,
+        [parent]: {
+          ...(prev[parent] ?? defaults[parent]),
+          [child]:
+            type === 'checkbox'
+              ? checked
+              : value === ''
+              ? ''
+              : parseFloat(value),
+        },
+      }));
+      return;
+    }
     setConfig((prev) => ({
       ...prev,
       [name]:
@@ -118,6 +172,8 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               "tpLadder",
               "jitoRelayUrl",
               "privateRpcUrl",
+              "tipCurve",
+              "bundleStrategy",
             ].includes(name)
           ? value
           : value === "" ? "" : parseFloat(value),
@@ -570,6 +626,259 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             onChange={change}
             disabled={disabled}
             placeholder="https://example-rpc"
+            className={inp}
+          />
+        </label>
+      </div>
+
+      {/* ——— Jito Bundle Fine Tuning ——— */}
+      {merged.useJitoBundle && (
+        <div className="grid sm:grid-cols-2 gap-4 mt-4">
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span className="flex items-center gap-1">
+              Bundle Strategy <StrategyTooltip name="bundleStrategy" />
+            </span>
+            <select
+              name="bundleStrategy"
+              value={merged.bundleStrategy || "topOfBlock"}
+              onChange={change}
+              disabled={disabled}
+              className={`${inp} appearance-none pr-10`}
+            >
+              <option value="topOfBlock">topOfBlock</option>
+              <option value="backrun">backrun</option>
+              <option value="private">private</option>
+            </select>
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="cuAdapt"
+              checked={!!merged.cuAdapt}
+              onChange={change}
+              disabled={disabled}
+              className="accent-emerald-500"
+            />
+            Adaptive CU Price <StrategyTooltip name="cuAdapt" />
+          </label>
+          {merged.cuAdapt && (
+            <>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span className="flex items-center gap-1">
+                  CU Price Min (µLAM)
+                  <StrategyTooltip name="cuPriceMicroLamportsMin" />
+                </span>
+                <input
+                  type="number"
+                  name="cuPriceMicroLamportsMin"
+                  value={merged.cuPriceMicroLamportsMin ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 100"
+                  className={inp}
+                />
+              </label>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span className="flex items-center gap-1">
+                  CU Price Max (µLAM)
+                  <StrategyTooltip name="cuPriceMicroLamportsMax" />
+                </span>
+                <input
+                  type="number"
+                  name="cuPriceMicroLamportsMax"
+                  value={merged.cuPriceMicroLamportsMax ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 1000"
+                  className={inp}
+                />
+              </label>
+            </>
+          )}
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span className="flex items-center gap-1">
+              Tip Curve <StrategyTooltip name="tipCurve" />
+            </span>
+            <select
+              name="tipCurve"
+              value={merged.tipCurve || "flat"}
+              onChange={change}
+              disabled={disabled}
+              className={`${inp} appearance-none pr-10`}
+            >
+              <option value="flat">flat</option>
+              <option value="ramp">ramp</option>
+            </select>
+          </label>
+        </div>
+      )}
+
+      {/* ——— Direct AMM Fallback ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="directAmmFallback"
+            checked={!!merged.directAmmFallback}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Direct AMM Fallback <StrategyTooltip name="directAmmFallback" />
+        </label>
+        {merged.directAmmFallback && (
+          <div className="flex flex-col gap-2">
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                First AMM Fraction (0–1)
+                <StrategyTooltip name="directAmmFirstPct" />
+              </span>
+              <input
+                type="number"
+                name="directAmmFirstPct"
+                min="0"
+                max="1"
+                step="0.01"
+                value={merged.directAmmFirstPct ?? 0.3}
+                onChange={change}
+                disabled={disabled}
+                className={inp}
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                name="skipPreflight"
+                checked={!!merged.skipPreflight}
+                onChange={change}
+                disabled={disabled}
+                className="accent-emerald-500"
+              />
+              Skip Preflight <StrategyTooltip name="skipPreflight" />
+            </label>
+          </div>
+        )}
+      </div>
+
+      {/* ——— Post-Buy Watch ——— */}
+      <div className="grid sm:grid-cols-3 gap-4 mt-4">
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Post-Buy Duration (sec)
+            <StrategyTooltip name="postBuyWatch.durationSec" />
+          </span>
+          <input
+            type="number"
+            name="postBuyWatch.durationSec"
+            min="1"
+            value={merged.postBuyWatch?.durationSec ?? 180}
+            onChange={change}
+            disabled={disabled}
+            className={inp}
+          />
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="postBuyWatch.lpPullExit"
+            checked={merged.postBuyWatch?.lpPullExit !== false}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Exit on LP Pull <StrategyTooltip name="postBuyWatch.lpPullExit" />
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="postBuyWatch.authorityFlipExit"
+            checked={merged.postBuyWatch?.authorityFlipExit !== false}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Exit on Authority Flip <StrategyTooltip name="postBuyWatch.authorityFlipExit" />
+        </label>
+      </div>
+
+      {/* ——— Iceberg Entries & Impact Guard ——— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="iceberg.enabled"
+            checked={!!merged.iceberg?.enabled}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Iceberg Entries <StrategyTooltip name="iceberg" />
+        </label>
+        {merged.iceberg?.enabled && (
+          <div className="flex flex-col gap-2">
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Tranches
+                <StrategyTooltip name="iceberg.tranches" />
+              </span>
+              <input
+                type="number"
+                name="iceberg.tranches"
+                min="1"
+                value={merged.iceberg?.tranches ?? 1}
+                onChange={change}
+                disabled={disabled}
+                className={inp}
+              />
+            </label>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span className="flex items-center gap-1">
+                Tranche Delay (ms)
+                <StrategyTooltip name="iceberg.trancheDelayMs" />
+              </span>
+              <input
+                type="number"
+                name="iceberg.trancheDelayMs"
+                min="0"
+                value={merged.iceberg?.trancheDelayMs ?? 0}
+                onChange={change}
+                disabled={disabled}
+                className={inp}
+              />
+            </label>
+          </div>
+        )}
+      </div>
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Impact Abort (%)
+            <StrategyTooltip name="impactAbortPct" />
+          </span>
+          <input
+            type="number"
+            name="impactAbortPct"
+            min="0"
+            value={merged.impactAbortPct ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 3"
+            className={inp}
+          />
+        </label>
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Max Dynamic Slippage (%)
+            <StrategyTooltip name="dynamicSlippageMaxPct" />
+          </span>
+          <input
+            type="number"
+            name="dynamicSlippageMaxPct"
+            min="0"
+            value={merged.dynamicSlippageMaxPct ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 2"
             className={inp}
           />
         </label>

@@ -1,3 +1,4 @@
+// backend/services/strategies/core/tradeExecutorTurbo.js
 /**
  * turboTradeExecutor.js – Turbo-path trade executor
  * -------------------------------------------------
@@ -16,6 +17,7 @@ const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
 const {
   executeSwapTurbo,
+  executeSwapJitoBundle,
   getSwapQuote,
 } = require("../../../utils/swap");
 const { getMintDecimals } = require("../../../utils/tokenAccounts");
@@ -23,6 +25,12 @@ const getTokenPrice = require("../paid_api/getTokenPrice");
 const getSolPrice = getTokenPrice.getSolPrice;
 const { sendAlert } = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
+
+// Additional helpers for Turbo enhancements
+const JitoFeeController = require("./jitoFeeController");
+const { directSwap } = require("../../../utils/raydiumDirect");
+const metricsLogger = require("../logging/metrics");
+const idempotencyStore = require("../../../utils/idempotencyStore");
 
 // 🔐  Arm / envelope-crypto helpers
 const { getDEK } = require("../../../armEncryption/sessionKeyCache");
@@ -147,21 +155,228 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     toNum(prefs?.defaultPriorityFee) ??
     0;
 
-  /* ——— 1️⃣  Turbo swap (blocking) ——— */
+  /*
+   * 1️⃣ Swap execution with enhancements
+   *
+   * Instead of always calling executeSwapTurbo directly, we first handle
+   * idempotency, impact guards, dynamic slippage and optional Jito
+   * bundle execution.  If the caller has set a unique idempotencyKey
+   * then repeated invocations will return the same tx hash from the
+   * in‑memory idempotency store.  Impact guards abort the trade when
+   * the quoted price impact exceeds a configured threshold.  Dynamic
+   * slippage limits slippage to a maximum value.  When Jito bundling
+   * is enabled the swap is submitted via Jito’s relay with adaptive
+   * compute unit pricing and tip; otherwise the turbo path is used.  A
+   * fallback direct Raydium swap is attempted when aggregator quote
+   * latency is high.
+   */
   let txHash = null;
+  // Idempotency: return prior result if exists
+  const idKey = meta.idempotencyKey;
+  if (idKey) {
+    const cached = idempotencyStore.get(idKey);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  // Dynamic slippage limit
+  let effSlippage = slippage;
+  if (meta.dynamicSlippageMaxPct) {
+    const ds = Number(meta.dynamicSlippageMaxPct);
+    if (Number.isFinite(ds) && ds > 0) {
+      effSlippage = Math.min(slippage, ds / 100);
+    }
+  }
+  // Impact guard: abort early if quoted price impact is too high
+  const impactAbortPct = Number(meta.impactAbortPct) || 0;
+  if (impactAbortPct > 0 && quote.priceImpactPct != null) {
+    const pct = quote.priceImpactPct * 100;
+    if (pct > impactAbortPct) {
+      metricsLogger.recordFail('impact-abort');
+      throw new Error('abort: price impact too high');
+    }
+  }
+
+  /*
+   * Iceberg splitting
+   *
+   * When configured to use iceberg entries we subdivide the total input
+   * amount into N tranches and execute them sequentially.  Between
+   * tranches an optional delay may be applied.  Before each tranche
+   * executes we request a fresh quote; if the resulting price impact
+   * exceeds the configured `impactAbortPct` the remainder of the
+   * iceberg is aborted.  Each tranche uses its own idempotency key
+   * suffix to prevent cache collisions.  Recursion is used to reuse
+   * the existing execution logic; the `iceberg.enabled` flag is
+   * temporarily disabled on the nested call to avoid infinite
+   * splitting.
+   */
+  if (!simulated && meta.iceberg && meta.iceberg.enabled && Number(meta.iceberg.tranches) > 1) {
+    try {
+      const tranches = Math.max(1, parseInt(meta.iceberg.tranches, 10));
+      const delayMs = Number(meta.iceberg.trancheDelayMs) || 0;
+      const totalIn = Number(quote.inAmount);
+      const per = Math.floor(totalIn / tranches);
+      let remaining = totalIn;
+      let lastTx = null;
+      for (let i = 0; i < tranches; i++) {
+        const thisAmount = i === tranches - 1 ? remaining : per;
+        remaining -= thisAmount;
+        // Fresh quote per tranche
+        const qRes = await getSwapQuote({
+          inputMint: quote.inputMint,
+          outputMint: quote.outputMint,
+          amount: String(thisAmount),
+          slippage: effSlippage,
+          multiRoute: meta.multiRoute,
+          splitTrade: meta.splitTrade,
+          allowedDexes: meta.allowedDexes,
+          excludedDexes: meta.excludedDexes,
+        });
+        if (!qRes) {
+          metricsLogger.recordFail('iceberg-quote');
+          break;
+        }
+        // Abort on high impact
+        if (impactAbortPct > 0 && qRes.priceImpactPct != null && qRes.priceImpactPct * 100 > impactAbortPct) {
+          metricsLogger.recordFail('iceberg-impact-abort');
+          break;
+        }
+        // Disable further splitting for nested execution and set a unique idempotency key suffix
+        const nestedMeta = {
+          ...meta,
+          iceberg: { ...meta.iceberg, enabled: false },
+          idempotencyKey: meta.idempotencyKey ? `${meta.idempotencyKey}:${i}` : undefined,
+        };
+        try {
+          lastTx = await execTrade({ quote: qRes, mint, meta: nestedMeta, simulated });
+        } catch (e) {
+          // If a tranche fails, abort the remainder
+          break;
+        }
+        // Wait between tranches if configured
+        if (delayMs > 0 && i < tranches - 1) {
+          await new Promise((r) => setTimeout(r, delayMs));
+        }
+      }
+      return lastTx;
+    } catch (ie) {
+      // If iceberg fails unexpectedly fall through to normal execution
+      console.warn('Iceberg execution error:', ie.message);
+    }
+  }
+
+  // Swap execution (only when not simulated)
   if (!simulated) {
-    txHash = await executeSwapTurbo({
-      quote,
-      wallet,
-      shared,
-      priorityFee: priorityFeeLamports,
-      briberyAmount,
-      privateRpcUrl,
-      skipPreflight,
-    });
-    if (!txHash)
-      throw new Error("swap-failed: executeSwapTurbo() returned null");
-    trackPendingTrade(txHash, mint, strategy);
+    // Optionally fallback to a direct Raydium swap when quote latency is high
+    let usedDirect = false;
+    if (meta.directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200) {
+      try {
+        const startSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+        txHash = await directSwap({
+          wallet,
+          inputMint: quote.inputMint,
+          outputMint: quote.outputMint,
+          amount: String(quote.inAmount),
+          slippage: effSlippage,
+          privateRpcUrl,
+        });
+        if (txHash) {
+          const endSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+          metricsLogger.recordInclusion(endSlot - startSlot);
+          metricsLogger.recordSuccess();
+          usedDirect = true;
+        } else {
+          metricsLogger.recordFail('direct-swap-fail');
+        }
+      } catch (e) {
+        metricsLogger.recordFail(e.code || e.message || 'direct-swap-error');
+      }
+    }
+    // Standard or Jito swap when not using direct fallback
+    if (!usedDirect) {
+      try {
+        if (meta.useJitoBundle) {
+          // Adaptive Jito bundle: try several attempts with ramping CU price and tip
+          const controller = new JitoFeeController({
+            cuAdapt: meta.cuAdapt,
+            cuPriceMicroLamportsMin: meta.cuPriceMicroLamportsMin,
+            cuPriceMicroLamportsMax: meta.cuPriceMicroLamportsMax,
+            tipCurve: meta.tipCurve || 'flat',
+            baseTipLamports: meta.jitoTipLamports || 1000,
+          });
+          let success = false;
+          let attempt = 0;
+          while (!success && attempt < 5) {
+            attempt++;
+            const fees = controller.getFee();
+            try {
+              const startSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+              txHash = await executeSwapJitoBundle({
+                quote,
+                wallet,
+                shared,
+                priorityFee: fees.computeUnitPriceMicroLamports,
+                briberyAmount: 0,
+                jitoRelayUrl: meta.jitoRelayUrl,
+                jitoTipLamports: fees.tipLamports,
+              });
+              if (txHash) {
+                const endSlot = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+                metricsLogger.recordInclusion(endSlot - startSlot);
+                metricsLogger.recordSuccess();
+                success = true;
+                break;
+              }
+            } catch (e) {
+              metricsLogger.recordRetry();
+            }
+          }
+          if (!txHash) {
+            // Fallback to turbo path if Jito fails
+            const startSlotFallback = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+            txHash = await executeSwapTurbo({
+              quote,
+              wallet,
+              shared,
+              priorityFee: priorityFeeLamports,
+              briberyAmount,
+              privateRpcUrl,
+              skipPreflight,
+            });
+            const endSlotFallback = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+            metricsLogger.recordInclusion(endSlotFallback - startSlotFallback);
+          }
+        } else {
+          // Standard turbo path
+          const startSlotTurbo = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+          txHash = await executeSwapTurbo({
+            quote,
+            wallet,
+            shared,
+            priorityFee: priorityFeeLamports,
+            briberyAmount,
+            privateRpcUrl,
+            skipPreflight,
+          });
+          const endSlotTurbo = await new Connection(privateRpcUrl || process.env.SOLANA_RPC_URL, 'confirmed').getSlot();
+          metricsLogger.recordInclusion(endSlotTurbo - startSlotTurbo);
+        }
+        if (!txHash) {
+          throw new Error('swap-failed');
+        }
+        // Track pending for aggregator/turbo paths
+        trackPendingTrade(txHash, mint, strategy);
+      } catch (e) {
+        metricsLogger.recordFail(e.code || e.message || 'swap-error');
+        throw e;
+      }
+    }
+    // Cache idempotency key on success
+    if (idKey && txHash) {
+      idempotencyStore.set(idKey, txHash);
+    }
   }
 
   /* ——— 2️⃣  Enrichment ——— */
@@ -356,6 +571,90 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       } catch (e) {
         console.warn("Auto-rug failed:", e.message);
       }
+    }
+
+    /* Post-buy watcher: monitor LP pulls or authority flips and exit quickly */
+    if (meta.postBuyWatch) {
+      const { durationSec = 180, lpPullExit = true, authorityFlipExit = true } = meta.postBuyWatch;
+      const startTime = Date.now();
+      const endTime = startTime + Math.max(0, durationSec) * 1000;
+      const intervalMs = 5000;
+      const sellInputMint = quote.outputMint;
+      const sellOutputMint = quote.inputMint;
+      const sellAmount = quote.outAmount;
+      let active = true;
+      const intervalId = setInterval(async () => {
+        if (!active || Date.now() > endTime) {
+          clearInterval(intervalId);
+          return;
+        }
+        try {
+          // LP pull: if quote fails or output drastically smaller, exit
+          if (lpPullExit) {
+            const sq = await getSwapQuote({
+              inputMint: sellInputMint,
+              outputMint: sellOutputMint,
+              amount: sellAmount,
+              slippage: 5.0,
+            });
+            const outAmt = sq?.outAmount ? BigInt(sq.outAmount) : null;
+            if (!sq || outAmt === null || outAmt < BigInt(sellAmount) / 2n) {
+              // Attempt to exit using last known quote or skip if none
+              const exitQuote = sq;
+              if (exitQuote) {
+                try {
+                  await executeSwapTurbo({
+                    quote: exitQuote,
+                    wallet,
+                    shared,
+                    priorityFee: priorityFeeLamports,
+                    briberyAmount,
+                    privateRpcUrl,
+                    skipPreflight,
+                  });
+                } catch (e) {
+                  /* ignore */
+                }
+              }
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
+          }
+          // Authority flip: freeze authority becomes non-null
+          if (authorityFlipExit) {
+            const freeze = await checkFreezeAuthority(conn, sellInputMint);
+            if (freeze) {
+              const exitQuote = await getSwapQuote({
+                inputMint: sellInputMint,
+                outputMint: sellOutputMint,
+                amount: sellAmount,
+                slippage: 5.0,
+              });
+              if (exitQuote) {
+                try {
+                  await executeSwapTurbo({
+                    quote: exitQuote,
+                    wallet,
+                    shared,
+                    priorityFee: priorityFeeLamports,
+                    briberyAmount,
+                    privateRpcUrl,
+                    skipPreflight,
+                  });
+                } catch (e) {
+                  /* ignore */
+                }
+              }
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
+          }
+        } catch (e) {
+          console.warn('post-buy watch error:', e.message);
+        }
+      }, intervalMs);
     }
   })().catch(console.error);
 
