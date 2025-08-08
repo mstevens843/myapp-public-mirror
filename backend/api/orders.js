@@ -15,6 +15,11 @@ const getCachedPrice = require("../utils/priceCache.static").getCachedPrice;
 
 const router = express.Router();
 
+// Additional middleware for validation and CSRF protection
+const validate = require("../middleware/validate");
+const { csrfProtection } = require("../middleware/csrf");
+const { limitOrderSchema, dcaOrderSchema } = require("./schemas/orders.schema");
+
 
 function log(...msg)  { console.log(new Date().toISOString(), "[orders]", ...msg); }
 function err(...msg)  { console.error(new Date().toISOString(), "[orders]", ...msg); }
@@ -117,7 +122,8 @@ router.get("/pending-dca", requireAuth, async (req, res) => {
   res.json(rows.map(r => ({ ...r, type: "dca" }))); // ensure type
 });
 /* ───────────────────────── POST /limit ─────────────────────── */
-router.post("/limit", requireAuth, async (req, res) => {
+// Apply requireAuth, CSRF protection and schema validation before executing
+router.post("/limit", requireAuth, csrfProtection, validate({ body: limitOrderSchema }), async (req, res) => {
   log("➡️  POST /limit", req.body)
   const { mint, side = "buy", targetPrice, amount,
           force = false, walletLabel, walletId } = req.body;
@@ -266,7 +272,7 @@ router.post("/limit", requireAuth, async (req, res) => {
 
 /* ───────────────────────── POST /dca ────────────────────────── */
 /* ───────────────────────── POST /dca ────────────────────────── */
-router.post("/dca", requireAuth, async (req, res) => {
+router.post("/dca", requireAuth, csrfProtection, validate({ body: dcaOrderSchema }), async (req, res) => {
   log("➡️  POST /dca", req.body);
 
   const {

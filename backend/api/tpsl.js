@@ -10,6 +10,10 @@ const getTokenPrice     = require("../services/strategies/paid_api/getTokenPrice
 
 const router = express.Router();
 
+const validate = require("../middleware/validate");
+const { csrfProtection } = require("../middleware/csrf");
+const { ruleSchema } = require("./schemas/tpsl.schema");
+
 /* ────────────── helper to resolve wallet by ID ────────────── */
 async function resolveWallet(userId, walletId) {
   if (walletId) {
@@ -65,7 +69,7 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 /* ───────────────────────── PUT /:mint ───────────────────────── */
-router.put("/:mint", requireAuth, async (req, res) => {
+router.put("/:mint", requireAuth, csrfProtection, validate({ body: ruleSchema }), async (req, res) => {
   const { mint } = req.params;
   const {
     tp, sl, tpPercent, slPercent,

@@ -1,5 +1,8 @@
 const express = require("express");
 const router = express.Router();
+const validate = require("../middleware/validate");
+const { csrfProtection } = require("../middleware/csrf");
+const { buySchema } = require("./schemas/manual.schema");
 const { performManualBuy, performManualSellByAmount, performManualSell } = require("../services/manualExecutor");
 // const { getAvailableWalletLabels } = require("../services/utils/wallet/walletManager");
 // const { getUserPreferences } = require("../telegram/services/userPrefs");
@@ -62,7 +65,11 @@ const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 
 // --- MANUAL BUY -----------------------------------------------------------
-router.post("/buy", requireAuth, async (req, res) => {
+// Validate and protect manual buy requests. The order of middleware is important:
+// 1) requireAuth ensures only authenticated users can access
+// 2) csrfProtection enforces double‑submit cookies when session cookies are used
+// 3) validate parses and validates the request body against the buySchema
+router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), async (req, res) => {
   console.log("🔥 /manual/buy HIT with body:", req.body);
 
   let {

@@ -10,10 +10,14 @@ const {
   listSchedules,      // optional: in-memory view
 } = require("../services/utils/strategy_utils/scheduler/strategyScheduler");
 
+const validate = require("../middleware/validate");
+const { csrfProtection } = require("../middleware/csrf");
+const { scheduleCreateSchema } = require("./schemas/schedule.schema");
+
 /* ────────────────────────────────────────────
  *  POST /api/schedule/create
  * ──────────────────────────────────────────── */
-router.post("/create", requireAuth, async (req, res, next) => {
+router.post("/create", requireAuth, csrfProtection, validate({ body: scheduleCreateSchema }), async (req, res, next) => {
   try {
     const {
       name = null,       // 🆕

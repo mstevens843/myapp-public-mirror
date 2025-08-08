@@ -24,6 +24,10 @@ const { getTokenAccountsAndInfo, getMintDecimals } = require("../utils/tokenAcco
 const { encryptPrivateKey } = require("../armEncryption/envelopeCrypto");   // 👈 NEW
 const crypto  = require("crypto");    
 
+// Validation for balance queries
+const validate = require("../middleware/validate");
+const { balanceQuerySchema } = require("./schemas/wallets.schema");
+
 
 const MIN_VALUE_USD = 0.50;
 const EXCLUDE_MINTS = new Set([
@@ -152,6 +156,41 @@ router.post("/balance", async (req, res) => {
  } catch (err) {
     console.error("Balance check failed:", err.message);
     res.status(500).json({ error: err.message || "Failed to fetch balance" });
+  }
+});
+
+// 🔍 GET /api/wallets/balance
+// Allows clients to fetch a SOL balance by supplying pubkey, walletId or walletLabel in the query string.
+router.get("/balance", validate({ query: balanceQuerySchema }), async (req, res) => {
+  try {
+    const { pubkey, walletId, walletLabel } = req.query;
+    // Case 1: direct public key
+    if (pubkey) {
+      const balanceLamports = await connection.getBalance(new PublicKey(pubkey));
+      return res.json({ balance: (balanceLamports / 1e9).toFixed(3) });
+    }
+
+    // Case 2: resolve by walletId or walletLabel in database
+    let resolvedWallet;
+    if (walletId) {
+      resolvedWallet = await prisma.wallet.findFirst({
+        where: { id: parseInt(walletId, 10) },
+        select: { publicKey: true }
+      });
+    } else if (walletLabel) {
+      resolvedWallet = await prisma.wallet.findFirst({
+        where: { label: walletLabel },
+        select: { publicKey: true }
+      });
+    }
+    if (!resolvedWallet) {
+      return res.status(404).json({ error: "Wallet not found." });
+    }
+    const balanceLamports = await connection.getBalance(new PublicKey(resolvedWallet.publicKey));
+    return res.json({ balance: (balanceLamports / 1e9).toFixed(3) });
+  } catch (err) {
+    console.error("Balance fetch failed:", err.message);
+    return res.status(500).json({ error: err.message || "Failed to fetch balance" });
   }
 });
 

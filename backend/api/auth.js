@@ -21,6 +21,17 @@ nacl.util = require("tweetnacl-util");
 const { v4: uuidv4 } = require("uuid");
 const { Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
 
+// Validation, CSRF and auth cookie helpers
+const validate = require("../middleware/validate");
+const { generateCsrfToken } = require("../middleware/csrf");
+const { loginSchema, refreshSchema } = require("./schemas/auth.schema");
+const {
+  setAccessCookie,
+  setRefreshCookie,
+  clearAuthCookies,
+  REFRESH_TOKEN_TTL_MS,
+} = require("../utils/authCookies");
+
 // Envelope encryption helper for generating encrypted wallet blobs
 const { encryptPrivateKey } = require("../armEncryption/envelopeCrypto");
 console.log("✅ encryptPrivateKey loaded →", typeof encryptPrivateKey);
@@ -867,7 +878,7 @@ router.post("/resend-confirm", async (req, res) => {
 
 
 // POST /auth/login
-router.post("/login", async (req, res) => {
+router.post("/login", validate({ body: loginSchema }), async (req, res) => {
 const { email, username, password, is2FAEnabled } = req.body
   if (!email && !username) return res.status(400).json({ error: "Missing fields" });
   if (!password) return res.status(400).json({ error: "Password is required" });
@@ -929,45 +940,44 @@ if (!data.user.email_confirmed_at) {
     }
 
 
-  // ✅ Issue your access + refresh tokens
-    const accessToken  = jwt.sign({ id: user.id, type: user.type }, JWT_SECRET, { expiresIn: "7d" });
+  // ✅ Issue your access + refresh tokens with short lifetimes
+    const accessToken  = jwt.sign({ id: user.id, type: user.type }, JWT_SECRET, { expiresIn: "15m" });
     const refreshToken = jwt.sign({ id: user.id },              JWT_SECRET, { expiresIn: "30d" });
 
-
+    // Persist the refresh token so we can rotate and blacklist old ones
     await prisma.refreshToken.create({
       data: { token: refreshToken, userId: user.id },
     });
 
-    // ✅ Get first wallet
+    // Get the user's first wallet for convenience
     const firstWallet = await prisma.wallet.findFirst({
       where: { userId: user.id },
     });
 
-    // 🔐  NEW — set httpOnly cookie
-    res.cookie("access_token", accessToken, {
-      httpOnly : true,
-      secure   : process.env.NODE_ENV === "production",
-      maxAge   : 1000 * 60 * 60 * 24 * 7,   // 7 days
-      sameSite : "Lax",
+    // Set cookies for access and refresh tokens
+    setAccessCookie(res, accessToken);
+    setRefreshCookie(res, refreshToken);
+
+    // Generate and set a CSRF token cookie using double submit pattern
+    const csrfToken = generateCsrfToken();
+    res.cookie('csrf_token', csrfToken, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Lax',
+      maxAge: REFRESH_TOKEN_TTL_MS,
     });
 
-
-    // res.json({
-    //   accessToken,
-    //   refreshToken,
-    //   userId: user.id,
-    //   activeWallet: firstWallet?.publicKey || null
-    // });
-  res.json({
-    accessToken,
-    refreshToken,
-    userId: user.id,
-    activeWallet: firstWallet ? {
-      id: firstWallet.id,
-      label: firstWallet.label,
-      publicKey: firstWallet.publicKey
-    } : null
-});
+    // Return tokens and basic user info in response (for non‑browser clients)
+    res.json({
+      accessToken,
+      refreshToken,
+      userId: user.id,
+      activeWallet: firstWallet ? {
+        id: firstWallet.id,
+        label: firstWallet.label,
+        publicKey: firstWallet.publicKey,
+      } : null,
+    });
 });
 
 
@@ -1169,16 +1179,54 @@ router.post("/verify-2fa-login", async (req, res) => {
 
 
 
-router.post("/refresh", async (req, res) => {
-  const { refreshToken } = req.body;
+router.post("/refresh", validate({ body: refreshSchema }), async (req, res) => {
+  // Accept refresh tokens either from the body or from the cookie for convenience
+  const tokenFromBody = req.body.refreshToken;
+  const tokenFromCookie = req.cookies && req.cookies["refresh_token"];
+  const oldToken = tokenFromBody || tokenFromCookie;
 
-  if (!refreshToken) return res.status(401).json({ error: "Refresh token is required" });
+  if (!oldToken) {
+    return res.status(401).json({ error: "Refresh token is required" });
+  }
 
   try {
-    const decoded = jwt.verify(refreshToken, JWT_SECRET);
-    const accessToken = jwt.sign({ userId: decoded.userId }, JWT_SECRET, { expiresIn: "365d" });
-    res.json({ accessToken });
+    // Verify signature and extract payload. We expect the payload to contain an id field.
+    const decoded = jwt.verify(oldToken, JWT_SECRET);
+    const userId = decoded.id || decoded.userId;
+    if (!userId) {
+      throw new Error("Invalid refresh token payload");
+    }
+
+    // Ensure token exists in the database (i.e. not blacklisted)
+    const exists = await prisma.refreshToken.findUnique({ where: { token: oldToken } });
+    if (!exists) {
+      return res.status(401).json({ error: "Invalid or expired refresh token" });
+    }
+
+    // Remove the old token so it cannot be reused (rotation)
+    await prisma.refreshToken.deleteMany({ where: { token: oldToken } });
+
+    // Issue new tokens
+    const newAccessToken  = jwt.sign({ id: userId, type: decoded.type }, JWT_SECRET, { expiresIn: "15m" });
+    const newRefreshToken = jwt.sign({ id: userId },              JWT_SECRET, { expiresIn: "30d" });
+
+    // Persist new refresh token and set cookies
+    await prisma.refreshToken.create({ data: { token: newRefreshToken, userId } });
+    setAccessCookie(res, newAccessToken);
+    setRefreshCookie(res, newRefreshToken);
+
+    // Rotate CSRF token as well
+    const csrfToken = generateCsrfToken();
+    res.cookie('csrf_token', csrfToken, {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'Lax',
+      maxAge: REFRESH_TOKEN_TTL_MS,
+    });
+
+    return res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
   } catch (err) {
+    console.error("Refresh error:", err.message);
     return res.status(401).json({ error: "Invalid or expired refresh token" });
   }
 });
