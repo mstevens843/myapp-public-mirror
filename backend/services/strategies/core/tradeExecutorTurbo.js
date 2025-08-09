@@ -23,6 +23,17 @@ const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
 const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
+
+// --- Error classification (NET / USER / UNKNOWN) ---
+const NET_ERRS = [/blockhash/i, /node is behind/i, /timed? out/i, /connection/i, /getblockheight timed out/i];
+const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i, /account in use/i, /slippage exceeded/i];
+function classifyError(msg = '') {
+  const lower = String(msg).toLowerCase();
+  if (USER_ERRS.some(r => r.test(lower))) return 'USER';
+  if (NET_ERRS.some(r => r.test(lower)))  return 'NET';
+  return 'UNKNOWN';
+}
+
 const {
   executeSwapTurbo,
   executeSwapJitoBundle,
@@ -107,11 +118,11 @@ function observe(name, value, labels = {}) {
 /* ──────────────────────────────────────────────
  *  Warm Quote Cache (shared per TTL bucket)
  * ──────────────────────────────────────────── */
-const _quoteCaches = new Map(); // ttlMs -> QuoteWarmCache
+const _quoteCaches = new Map();
 function getQuoteCache(ttlMs = 600) {
   const key = Number(ttlMs) || 0;
   if (!_quoteCaches.has(key)) {
-    _quoteCaches.set(key, new QuoteWarmCache({ ttlMs: key, capacity: 200 }));
+    _quoteCaches.set(key, new QuoteWarmCache({ ttlMs: key, maxEntries: 200 }));
   }
   return _quoteCaches.get(key);
 }
@@ -217,25 +228,32 @@ function computeStableIdKey({ userId, walletId, mint, amount, slotBucket, salt }
   return crypto.createHash('sha256').update(input).digest('hex');
 }
 
-async function applyLiquiditySizing({ baseQuote, sizingCfg, priceImpactEstimator }) {
+// Clean sizing helper that can refresh quote for the chosen amount
+async function applyLiquiditySizing({ baseQuote, sizingCfg, priceImpactEstimator, refreshQuote }) {
   if (!sizingCfg) return baseQuote;
   const poolReserves = Number(baseQuote?.poolReserves) || null; // if provided by your quote, else null
   const amount = Number(baseQuote?.inAmount);
-  const finalAmount = await sizeTrade({
-    amount,
-    poolReserves,
-    priceImpactEstimator,
-    config: sizingCfg,
-    metrics: { observe },
-  });
-  if (finalAmount === amount) return baseQuote;
-  // refresh quote for reduced size
-  return await getSwapQuote({
-    inputMint: baseQuote.inputMint,
-    outputMint: baseQuote.outputMint,
-    amount: String(finalAmount),
-    slippage: baseQuote.slippage ?? 0,
-  });
+  let finalAmount = amount;
+  try {
+    finalAmount = await sizeTrade({
+      amount,
+      poolReserves,
+      priceImpactEstimator,
+      config: sizingCfg,
+      metrics: { observe },
+    });
+  } catch (_) {
+    finalAmount = amount;
+  }
+  if (!finalAmount || finalAmount === amount) return baseQuote;
+  if (typeof refreshQuote === 'function') {
+    try {
+      const fresh = await refreshQuote(finalAmount);
+      if (fresh) return fresh;
+    } catch (_) {}
+  }
+  // Fallback if refresh failed: just reduce inAmount
+  return { ...baseQuote, inAmount: String(finalAmount) };
 }
 
 function startPrivateRelayIfEnabled({ privateRelay, walletPubkey, mint, idKey, amount }) {
@@ -472,7 +490,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     return fresh;
   }
 
-  // Liquidity-aware sizing
+  // Liquidity-aware sizing (with quote refresh)
   const sizedQuote = await applyLiquiditySizing({
     baseQuote: { ...quote, slippage: effSlippage },
     sizingCfg: sizing,
@@ -485,6 +503,14 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       });
       return (q?.priceImpactPct ?? 0) * 100;
     },
+    refreshQuote: async (newAmount) => {
+      return await getWarmQuote({
+        inputMint: quote.inputMint,
+        outputMint: quote.outputMint,
+        amount: String(newAmount),
+        slippage: effSlippage,
+      });
+    }
   }).catch(() => quote);
 
   if (!sizedQuote) throw new Error('sizing/quote unavailable');
@@ -523,16 +549,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     let jitoMode = !!useJitoBundle;
     let usedDirect = false;
 
-    const earlyAck = (async () => {
-      try {
-        const a = await Promise.race([
-          relayAck,
-          new Promise((resolve) => setTimeout(() => resolve(null), 50)),
-        ]);
-        return a;
-      } catch { return null; }
-    })();
-
     // Pre-send blockhash prewarm for first attempt
     await _preSendRefresh();
 
@@ -542,7 +558,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         await _preSendRefresh();
 
         // Direct AMM fallback on first attempt when quote latency high
-        if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200 && attempt === 0) {
+        if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 250 && attempt === 0) {
           const startSlot = await conn.getSlot();
           txHash = await directSwap({
             wallet,
@@ -654,28 +670,47 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         if (!txHash) throw new Error('swap-failed');
       } catch (err) {
         attempt += 1;
-        if (attempt >= maxAttempts) {
-          metricsLogger.recordFail?.(err?.code || err?.message || 'swap-error');
+        const cls = classifyError(err?.message || err?.toString());
+
+        // USER errors: surface immediately
+        if (cls === 'USER') {
+          metricsLogger.recordFail?.('user-error');
           throw err;
         }
-        // Bump CU / tip (lamports)
-        priorityFee += Number(retryPolicy.bumpCuStep || 2000);
-        briberyAmount += Number(retryPolicy.bumpTipStep || 1000);
-        metricsLogger.recordRetry?.();
 
-        // Route switch on 2nd try
-        if (retryPolicy.routeSwitch && attempt === 2) {
-          jitoMode = !jitoMode;
+        // If max attempts reached, stop
+        if (attempt >= maxAttempts) {
+          metricsLogger.recordFail?.(cls === 'NET' ? 'net-error' : 'unknown-error');
+          throw err;
         }
 
-        // RPC failover on last retry step before final
-        if (retryPolicy.rpcFailover && attempt === (maxAttempts - 1)) {
-          const endpointsList = endpoints.length ? endpoints : (Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : []);
-          if (endpointsList.length > 1) {
-            const idx = (endpointsList.indexOf(currentRpcUrl) + 1) % endpointsList.length;
-            currentRpcUrl = endpointsList[idx] || currentRpcUrl;
-            conn = new Connection(currentRpcUrl, 'confirmed');
+        // UNKNOWN: single conservative CU bump, then stop (no chain of bumps)
+        if (cls === 'UNKNOWN') {
+          if (attempt === 1) {
+            priorityFee += Number(retryPolicy.bumpCuStep || 2000);
+            metricsLogger.recordRetry?.();
+          } else {
+            throw err;
           }
+        }
+
+        // NET: bump exactly one dimension per attempt (CU → tip → route → RPC)
+        if (cls === 'NET') {
+          if (attempt === 1) {
+            priorityFee += Number(retryPolicy.bumpCuStep || 2000);
+          } else if (attempt === 2) {
+            briberyAmount += Number(retryPolicy.bumpTipStep || 1000);
+          } else if (attempt === 3 && retryPolicy.routeSwitch) {
+            jitoMode = !jitoMode;
+          } else if (attempt >= 4 && retryPolicy.rpcFailover) {
+            const endpointsList = endpoints.length ? endpoints : (Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : []);
+            if (endpointsList.length > 1) {
+              const idx = (endpointsList.indexOf(currentRpcUrl) + 1) % endpointsList.length;
+              currentRpcUrl = endpointsList[idx] || currentRpcUrl;
+              conn = new Connection(currentRpcUrl, 'confirmed');
+            }
+          }
+          metricsLogger.recordRetry?.();
         }
 
         // Refresh quote (and blockhash) after changes
@@ -692,8 +727,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       }
     }
 
-    // wait for earlyAck (unused) before returning
-    try { await earlyAck; } catch {}
+    // Do not await any relay ack here; avoid adding latency to hot path
     return txHash;
   }
 
@@ -1100,6 +1134,12 @@ class TradeExecutorTurbo {
   constructor({ connection, validatorIdentity } = {}) {
     this.connection = connection;
     this.validatorIdentity = validatorIdentity;
+    this.coreIdem = new CoreIdemStore(
+      { ttlSec: Number(process.env.IDEMPOTENCY_TTL_SEC) || 90,
+        salt: process.env.IDEMPOTENCY_SALT || '',
+        resumeFromLast: true },
+      { increment: () => {} }
+    );
   }
 
   /**
@@ -1108,20 +1148,7 @@ class TradeExecutorTurbo {
    * API, merges the provided configuration into the meta object and then
    * calls the underlying `execTrade` function.  It intentionally avoids
    * pulling in any database, logging or safety check logic to keep the
-   * latency as low as possible.  Callers may override `buildAndSubmit()`
-   * on the instance for testing purposes; by default it simply delegates
-   * to `execTrade()`.
-   *
-   * @param {Object} userCtx Contains `userId` and `walletId` identifying the
-   *   trader.  These values are required and will be merged into the meta.
-   * @param {Object} tradeParams Contains `inputMint`, `outputMint`, `amount`
-   *   (in smallest units) and `slippage` (percentage).  These values are
-   *   forwarded to the quote API.
-   * @param {Object} [cfg={}] Additional meta fields such as retryPolicy,
-   *   idempotency or leaderTiming.  Missing values are left undefined to
-   *   allow the underlying executor to apply its own defaults.
-   * @returns {Promise<string|null>} The transaction signature or null if a
-   *   quote could not be obtained.
+   * latency as low as possible.
    */
   async executeTrade(userCtx, tradeParams, cfg = {}) {
     if (!userCtx || !userCtx.userId || !userCtx.walletId) {
@@ -1131,10 +1158,7 @@ class TradeExecutorTurbo {
     if (!inputMint || !outputMint || !amount) {
       throw new Error('tradeParams must include inputMint, outputMint and amount');
     }
-    // Fetch a safe quote.  We deliberately bypass passes and other safety
-    // checks here to keep the hot path lean; upstream components are
-    // responsible for performing any desired risk management prior to
-    // invoking executeTrade().
+
     const safeQuoteRes = await getSafeQuote({ inputMint, outputMint, amount, slippage });
     if (!safeQuoteRes.ok) {
       throw new Error(`quote-failed: ${safeQuoteRes.reason || 'unknown'}`);
@@ -1146,18 +1170,10 @@ class TradeExecutorTurbo {
       slippage: slippage,
       validatorIdentity: this.validatorIdentity || cfg.validatorIdentity,
     });
-    // When dryRun is true we pass through to simulated mode on execTrade.
     const simulated = Boolean(cfg.dryRun);
     return execTrade({ quote, mint: outputMint, meta, simulated });
   }
 
-  /**
-   * Placeholder for the buildAndSubmit method.  The Turbo Sniper tests stub
-   * this function directly on the executor instance in order to simulate
-   * retries without hitting external RPCs.  In production the actual
-   * build/send logic lives inside execTrade(); this method exists solely
-   * to satisfy the interface expected by those tests.
-   */
   async buildAndSubmit() {
     throw new Error('buildAndSubmit is not implemented on the wrapper');
   }

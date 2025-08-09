@@ -1,51 +1,93 @@
 // backend/services/strategies/core/parallelFiller.js
 //
-// Implements multi‑wallet parallel fill for Turbo Sniper. The goal
-// is to increase first‑fill probability and reduce market impact by
-// splitting the desired notional across multiple wallets and racing
-// them in parallel. The first transaction to confirm causes the
-// remaining attempts to be abandoned. No global wallet manager
-// state is introduced – each wallet keypair is loaded on demand
-// using the manual executor’s loader.
+// ParallelFiller — multi‑wallet parallel fill utilities for Turbo Sniper
+// ---------------------------------------------------------------------
+// Goals
+//  • Increase first‑fill probability by racing multiple wallets in parallel
+//  • Keep the hot path non‑blocking (no DB/FS/Telegram in-line here)
+//  • Honor splitPct and maxParallel, share a stable idKey across attempts
+//  • Provide BOTH interfaces used in the codebase:
+//      1) Class instance with .execute({ walletIds, splitPct, ... })
+//      2) Stand‑alone executeParallel({ walletIds, splitPct, ... }) → {sigs, failures}
+//
+// Notes
+//  • We support splitPct either as fractions (sum≈1) OR percentages (sum≈100).
+//  • We swallow errors per‑attempt and report via counters / return shape.
+//  • We do not actually "cancel" in‑flight RPCs on first win (Node lacks
+//    hard cancellation). We short‑circuit subsequent work where possible.
+//
+// This file intentionally imports only lightweight metrics helpers.
+// Heavy loaders (wallet keypairs) are accessed via a pluggable loader.
 
 'use strict';
 
 const { incCounter, observeHistogram } = require('../logging/metrics');
 
 /**
- * Load a keypair for a wallet. We rely on the manual executor's
- * loader to avoid introducing global wallet state. If it is
- * unavailable this function should be patched by the caller.
+ * Optional wallet keypair loader (provided by manual executor).
+ * This keeps global wallet state out of the hot path.
  */
 let loadWalletKeypair;
 try {
-  // Attempt to require the manual executor’s loader. The actual path
-  // may differ in your codebase – adjust accordingly. This file
-  // intentionally does not require the entire manual executor to
-  // avoid pulling in heavy dependencies on the hot path.
   ({ loadWalletKeypair } = require('../../wallets/manualExecutor'));
-} catch (e) {
-  // fallback stub; will throw if invoked
-  loadWalletKeypair = () => {
+} catch (_e) {
+  loadWalletKeypair = async (_walletId) => {
     throw new Error('loadWalletKeypair() not implemented. Please provide a loader.');
   };
 }
 
+/* ──────────────────────────────────────────────
+ * Utilities
+ * ──────────────────────────────────────────── */
+
+/**
+ * Normalize splitPct values so they sum to ~1.
+ * Accepts arrays that sum to ~1 (fractions) or ~100 (percent).
+ */
+function normalizeSplits(splitPct = []) {
+  if (!Array.isArray(splitPct) || splitPct.length === 0) return [];
+  const sum = splitPct.reduce((a, b) => a + Number(b || 0), 0);
+  if (sum === 0) return splitPct.map(() => 0);
+  // If it looks like percentages, scale down
+  const scale = sum > 1.5 ? 100 : 1;
+  return splitPct.map((p) => Number(p || 0) / (scale));
+}
+
+/**
+ * Compute sub-amounts per split. Amount can be number|string|bigint.
+ * For non-numeric values we pass the original amount through and let the
+ * executor decide. Otherwise we floor to integers to avoid dust.
+ */
+function computeSubAmount(total, weight) {
+  if (total == null) return total;
+  if (typeof total === 'number' && Number.isFinite(total)) {
+    return Math.max(0, Math.floor(total * weight));
+  }
+  const n = Number(total);
+  if (Number.isFinite(n)) {
+    return Math.max(0, Math.floor(n * weight));
+  }
+  // Unknown type (e.g., structured amount) — leave unchanged
+  return total;
+}
+
+/* ──────────────────────────────────────────────
+ * Class API — first‑win parallel execution
+ * ──────────────────────────────────────────── */
 class ParallelFiller {
   /**
    * Execute a trade across multiple wallets in parallel. The first
-   * successful fill stops all other in‑flight attempts.
+   * successful fill "wins". Remaining attempts are allowed to settle
+   * but their results are ignored. Errors are swallowed per attempt.
    *
    * @param {Object} opts
-   * @param {string[]} opts.walletIds List of wallet IDs to load.
-   * @param {number[]} opts.splitPct Percent split per wallet (sums ≈1).
-   * @param {number} opts.maxParallel Maximum number of concurrent fills.
-   * @param {Object} opts.tradeParams Common trade parameters (amount, mints, slippage etc.).
-   * @param {string} opts.idKey Idempotency key to attach to each attempt.
-   * @param {Function} opts.executor A function that takes
-   *   `(walletContext, tradeParams)` and returns a promise that
-   *   resolves to a result { success: boolean, txId?: string }.
-   * @returns {Promise<Object>} The result of the first successful fill or the last failure.
+   * @param {string[]} opts.walletIds
+   * @param {number[]} opts.splitPct Fractions (~1) or percents (~100)
+   * @param {number} [opts.maxParallel=2]
+   * @param {Object} opts.tradeParams Common trade params
+   * @param {string} opts.idKey Shared idempotency key
+   * @param {Function} opts.executor (walletCtx, tradeParams) => Promise<{success:boolean, txId?:string}>
+   * @returns {Promise<Object>} First successful result or consolidated failure
    */
   async execute({ walletIds, splitPct, maxParallel = 2, tradeParams, idKey, executor }) {
     if (!Array.isArray(walletIds) || !Array.isArray(splitPct)) {
@@ -54,63 +96,158 @@ class ParallelFiller {
     if (walletIds.length !== splitPct.length) {
       throw new Error('walletIds.length must equal splitPct.length');
     }
-    const sum = splitPct.reduce((a, b) => a + b, 0);
-    // Accept small floating point error
-    if (Math.abs(sum - 1) > 0.05) {
-      throw new Error('splitPct must sum to approximately 1');
+    if (typeof executor !== 'function') {
+      throw new Error('executor must be a function');
     }
-    // Limit concurrency
-    const concurrency = Math.min(maxParallel, walletIds.length);
-    incCounter('parallel_send_count', { concurrency });
+
+    const weights = normalizeSplits(splitPct);
+    const sumW = weights.reduce((a, b) => a + b, 0);
+    if (Math.abs(sumW - 1) > 0.05) {
+      throw new Error('splitPct must sum to approximately 1 (or 100)');
+    }
+
+    const concurrency = Math.max(1, Math.min(maxParallel, walletIds.length));
+    incCounter('parallel_send_count', { concurrency, nWallets: walletIds.length });
+
     const start = Date.now();
     let resolved = false;
     let finalResult = null;
-    const results = [];
 
-    const attempts = walletIds.map((walletId, idx) => async () => {
-      const pct = splitPct[idx];
-      const amount = tradeParams.amount * pct;
-      const subParams = Object.assign({}, tradeParams, { amount, walletId });
-      // Each wallet context includes its keypair and idKey
-      const walletContext = {
-        walletId,
-        keypair: await loadWalletKeypair(walletId),
-        idKey,
-      };
-      try {
-        const result = await executor(walletContext, subParams);
-        if (!resolved && result && result.success) {
-          resolved = true;
-          finalResult = result;
-          const latency = Date.now() - start;
-          observeHistogram('parallel_first_win_ms', latency);
+    // Work queue with simple index, honoring maxParallel
+    let idx = 0;
+    const results = new Array(walletIds.length);
+    const failures = new Array(walletIds.length).fill(false);
+
+    const worker = async () => {
+      while (true) {
+        const i = idx++;
+        if (i >= walletIds.length) break;
+        // If we've already resolved a winner, skip heavy work
+        if (resolved) continue;
+
+        const wid = walletIds[i];
+        const w = weights[i] || 0;
+        const subAmount = computeSubAmount(tradeParams?.amount, w);
+        const subParams = Object.assign({}, tradeParams, {
+          amount: subAmount,
+          walletId: wid,
+          idKey,              // propagate stable idKey to all attempts
+          splitPct: w,        // record the weight for observability
+        });
+
+        try {
+          const keypair = await loadWalletKeypair(wid); // throws if missing
+          // Check again after async boundary
+          if (resolved) continue;
+
+          const walletContext = { walletId: wid, keypair, idKey };
+          const res = await executor(walletContext, subParams);
+          results[i] = res;
+
+          if (!resolved && res && res.success) {
+            resolved = true;
+            finalResult = res;
+            observeHistogram('parallel_first_win_ms', Date.now() - start);
+          } else if (!res || !res.success) {
+            failures[i] = true;
+          }
+        } catch (err) {
+          failures[i] = true;
+          results[i] = { success: false, error: err };
         }
-        return result;
-      } catch (err) {
-        return { success: false, error: err };
       }
-    });
+    };
 
-    // Launch attempts up to concurrency. We do not strictly limit
-    // concurrency here as Node’s event loop will handle scheduling,
-    // but the concurrency parameter is tracked for metrics. Promise.race
-    // is used to detect the first resolution; the remainder continue
-    // to run but are ignored.
-    const promises = attempts.map((fn) => fn());
-    await Promise.race(promises);
-    // Wait for all attempts to settle so that side effects (logs,
-    // aborts) complete before returning.
-    const allResults = await Promise.all(promises);
+    // Spin up limited workers
+    const workers = [];
+    for (let k = 0; k < concurrency; k++) workers.push(worker());
+    // Wait until *first* resolution (any worker may set resolved)
+    await Promise.race(workers.map(async (w) => {
+      await w;
+      return true;
+    })).catch(() => {});
+    // Ensure all settle (to finish logs/side‑effects)
+    await Promise.allSettled(workers);
+
+    // Aggregate
     if (!finalResult) {
-      // All failed; pick the last result for error propagation
-      finalResult = allResults[allResults.length - 1] || { success: false };
+      const last = results[results.length - 1];
+      finalResult = last || { success: false, error: new Error('all attempts failed') };
     } else {
-      // Count aborted attempts
-      const aborted = allResults.filter((r) => !r.success).length;
+      const aborted = failures.filter(Boolean).length;
       if (aborted > 0) incCounter('parallel_abort_total', { aborted });
     }
     return finalResult;
   }
 }
 
-module.exports = new ParallelFiller();
+/* ──────────────────────────────────────────────
+ * Functional API — batch execution with signatures
+ * Shape required by routing layer:
+ * executeParallel({ walletIds, splitPct, maxParallel, idKey, tradeParams, executor })
+ *  -> { sigs: string[], failures: number }
+ * ──────────────────────────────────────────── */
+async function executeParallel({
+  walletIds = [],
+  splitPct = [],
+  maxParallel = 1,
+  idKey,
+  tradeParams = {},
+  executor, // async (walletId, tradeParams) => string
+}) {
+  if (typeof executor !== 'function') {
+    throw new Error('executor must be a function');
+  }
+  if (!Array.isArray(walletIds) || !Array.isArray(splitPct) || walletIds.length !== splitPct.length) {
+    throw new Error('walletIds and splitPct must be arrays of equal length');
+  }
+
+  const weights = normalizeSplits(splitPct);
+  const sumW = weights.reduce((a, b) => a + b, 0);
+  if (Math.abs(sumW - 1) > 0.05) {
+    throw new Error('splitPct must sum to approximately 1 (or 100)');
+  }
+
+  const results = new Array(walletIds.length).fill(null);
+  let failures = 0;
+  let idx = 0;
+
+  const worker = async () => {
+    while (true) {
+      const i = idx++;
+      if (i >= walletIds.length) break;
+      const wid = walletIds[i];
+      const w = weights[i] || 0;
+      const subAmount = computeSubAmount(tradeParams?.amount, w);
+      const subParams = Object.assign({}, tradeParams, {
+        amount: subAmount,
+        walletId: wid,
+        idKey,
+        splitPct: w,
+      });
+      try {
+        const sig = await executor(wid, subParams);
+        results[i] = typeof sig === 'string' ? sig : null;
+        if (!results[i]) failures++;
+      } catch (_err) {
+        failures++;
+        results[i] = null;
+      }
+    }
+  };
+
+  const n = Math.max(1, Math.min(maxParallel || 1, walletIds.length));
+  const workers = [];
+  for (let k = 0; k < n; k++) workers.push(worker());
+  await Promise.allSettled(workers);
+
+  return { sigs: results.filter(Boolean), failures };
+}
+
+/* ──────────────────────────────────────────────
+ * Exports
+ * ──────────────────────────────────────────── */
+const instance = new ParallelFiller();
+module.exports = instance;               // Back‑compat: default export is instance with .execute()
+module.exports.executeParallel = executeParallel;   // New functional API
+module.exports.ParallelFiller = ParallelFiller;     // Named export of the class
