@@ -12,6 +12,7 @@
  */
 
 const PoolWatcher = require('../../../utils/poolWatcher');
+const LaserWatcher = require('../../../utils/laserWatcher');
 
 let watcherInstance = null;
 let lastEmit = 0;
@@ -29,25 +30,37 @@ let callbackFn = null;
  * @param {string[]} [opts.programIds] Optional list of program IDs to watch
  * @param {number} [opts.debounceMs=1000] Debounce interval in ms
  * @param {function(Object):void} onPool Callback invoked when a pool is detected
+ *
+ * The opts object supports an optional `enableLaserStream` flag which
+ * selects the LaserWatcher over the default PoolWatcher.  When
+ * enabled the watcher will emit a `detectedAt` timestamp on each
+ * event.  Without this flag the PoolWatcher will be used and the
+ * timestamp will be injected here.
  */
-function startPoolListener({ rpcUrl, programIds = undefined, debounceMs: db = 1000 } = {}, onPool) {
+function startPoolListener({ rpcUrl, programIds = undefined, debounceMs: db = 1000, enableLaserStream = false } = {}, onPool) {
   if (watcherInstance) return;
   if (!rpcUrl || typeof rpcUrl !== 'string') {
     throw new Error('poolCreateListener: rpcUrl is required');
   }
   debounceMs = typeof db === 'number' && db > 0 ? db : 1000;
   callbackFn = typeof onPool === 'function' ? onPool : () => {};
-  watcherInstance = new PoolWatcher(rpcUrl, programIds);
+  // Choose watcher implementation based on flag
+  const WatcherClass = enableLaserStream ? LaserWatcher : PoolWatcher;
+  watcherInstance = new WatcherClass(rpcUrl, programIds);
   watcherInstance.on('poolDetected', (info) => {
     const now = Date.now();
     if (now - lastEmit < debounceMs) return;
     lastEmit = now;
+    // If the selected watcher did not inject detectedAt (PoolWatcher)
+    // add it here for consistency.
+    const enriched = Object.assign({}, info, { detectedAt: info.detectedAt || Date.now() });
     try {
-      callbackFn(info);
+      callbackFn(enriched);
     } catch (err) {
       console.error('poolCreateListener callback error:', err.message);
     }
   });
+  // Start watcher asynchronously and surface errors
   watcherInstance.start().catch((err) => {
     console.error('poolCreateListener start error:', err.message);
   });

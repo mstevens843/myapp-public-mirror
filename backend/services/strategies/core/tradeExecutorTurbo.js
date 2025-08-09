@@ -533,7 +533,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         // Also refresh before each attempt if TTL expired
         await _preSendRefresh();
 
-        // Direct AMM fallback
+        // Direct AMM fallback on first attempt when quote latency high
         if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 200 && attempt === 0) {
           const startSlot = await conn.getSlot();
           txHash = await directSwap({
@@ -549,6 +549,21 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             metricsLogger.recordSuccess?.();
             usedDirect = true;
+            // Capture lead time relative to pool detection
+            const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
+            // Record the pending transaction with metrics
+            try {
+              trackPendingTrade(txHash, mint, strategy, {
+                slot: endSlot,
+                cuUsed: null,
+                cuPrice: priorityFee,
+                tip: briberyAmount,
+                route: 'direct',
+                slippage: effSlippage,
+                fillPct: null,
+                leadTime_ms: leadTime,
+              });
+            } catch (_) {}
             break;
           } else {
             metricsLogger.recordFail?.('direct-swap-fail');
@@ -557,10 +572,13 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
         // Choose path (Jito or Turbo)
         if (jitoMode) {
+          // Instantiate controller with potential custom curves
           const controller = new JitoFeeController({
             cuAdapt,
             cuPriceMicroLamportsMin,
             cuPriceMicroLamportsMax,
+            cuPriceCurve: meta?.cuPriceCurve,
+            tipCurveCoefficients: meta?.tipCurveCoefficients,
             tipCurve,
             baseTipLamports: jitoTipLamports || 1000,
           });
@@ -570,7 +588,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             quote: localQuote,
             wallet,
             shared,
-            priorityFee: fees.computeUnitPriceMicroLamports, // μLamports
+            priorityFee: fees.computeUnitPriceMicroLamports,
             briberyAmount: 0,
             jitoRelayUrl,
           });
@@ -578,6 +596,20 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           if (txHash) {
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             metricsLogger.recordSuccess?.();
+            // Log pending tx with metrics
+            const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
+            try {
+              trackPendingTrade(txHash, mint, strategy, {
+                slot: endSlot,
+                cuUsed: null,
+                cuPrice: fees.computeUnitPriceMicroLamports,
+                tip: fees.tipLamports,
+                route: 'jito',
+                slippage: effSlippage,
+                fillPct: null,
+                leadTime_ms: leadTime,
+              });
+            } catch (_) {}
           }
         } else {
           const startSlot = await conn.getSlot();
@@ -585,8 +617,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             quote: localQuote,
             wallet,
             shared,
-            priorityFee,       // lamports
-            briberyAmount,     // lamports
+            priorityFee,
+            briberyAmount,
             privateRpcUrl: currentRpcUrl,
             skipPreflight,
           });
@@ -594,6 +626,20 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           if (txHash) {
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             metricsLogger.recordSuccess?.();
+            // Log pending tx with metrics
+            const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
+            try {
+              trackPendingTrade(txHash, mint, strategy, {
+                slot: endSlot,
+                cuUsed: null,
+                cuPrice: priorityFee,
+                tip: briberyAmount,
+                route: 'turbo',
+                slippage: effSlippage,
+                fillPct: null,
+                leadTime_ms: leadTime,
+              });
+            } catch (_) {}
           }
         }
 
@@ -638,6 +684,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       }
     }
 
+    // wait for earlyAck (unused) before returning
     try { await earlyAck; } catch {}
     return txHash;
   }
@@ -919,7 +966,13 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
     /* Post-buy watcher */
     if (txHash && postBuyWatch) {
-      const { durationSec = 180, lpPullExit = true, authorityFlipExit = true } = postBuyWatch;
+      // Extract watcher options; include optional rugDelayBlocks
+      const {
+        durationSec = 180,
+        lpPullExit = true,
+        authorityFlipExit = true,
+        rugDelayBlocks = 0,
+      } = postBuyWatch;
       const startTime = Date.now();
       const endTime = startTime + Math.max(0, durationSec) * 1000;
       const intervalMs = 5000;
@@ -927,6 +980,30 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       const sellOutputMint = sizedQuote.inputMint;
       const sellAmount = sizedQuote.outAmount;
       let active = true;
+      // Convert rug delay blocks into milliseconds.  Each Solana slot is ~400 ms; adjust if scheduler provides better estimate
+      const delayMs = Math.max(0, Number(rugDelayBlocks) || 0) * 400;
+      /**
+       * Perform a delayed exit.  If rugDelayBlocks > 0 this waits before submitting
+       * the sell transaction to give the pool time to potentially recover.  The
+       * provided quote must still be refreshed immediately before submit.
+       */
+      async function executeDelayedExit(exitQuote) {
+        if (!exitQuote) return;
+        try {
+          if (delayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+          await executeSwapTurbo({
+            quote: exitQuote,
+            wallet,
+            shared,
+            priorityFee: undefined,
+            briberyAmount: undefined,
+            privateRpcUrl: currentRpcUrl,
+            skipPreflight,
+          });
+        } catch { /* ignore */ }
+      }
       const intervalId = setInterval(async () => {
         if (!active || Date.now() > endTime) {
           clearInterval(intervalId);
@@ -943,25 +1020,13 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             });
             const outAmt = sq?.outAmount ? BigInt(sq.outAmount) : null;
             if (!sq || outAmt === null || outAmt < BigInt(sellAmount) / 2n) {
-              if (sq) {
-                try {
-                  await executeSwapTurbo({
-                    quote: sq,
-                    wallet,
-                    shared,
-                    priorityFee: undefined,
-                    briberyAmount: undefined,
-                    privateRpcUrl: currentRpcUrl,
-                    skipPreflight,
-                  });
-                } catch { /* ignore */ }
-              }
+              await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
               return;
             }
           }
-          // Authority flip
+          // Authority flip: sell if freeze authority returns
           if (authorityFlipExit) {
             const freeze = await checkFreezeAuthority(connPost, sellInputMint);
             if (freeze) {
@@ -971,19 +1036,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
                 amount: String(sellAmount),
                 slippage: 5.0,
               });
-              if (exitQuote) {
-                try {
-                  await executeSwapTurbo({
-                    quote: exitQuote,
-                    wallet,
-                    shared,
-                    priorityFee: undefined,
-                    briberyAmount: undefined,
-                    privateRpcUrl: currentRpcUrl,
-                    skipPreflight,
-                  });
-                } catch { /* ignore */ }
-              }
+              await executeDelayedExit(exitQuote);
               active = false;
               clearInterval(intervalId);
               return;

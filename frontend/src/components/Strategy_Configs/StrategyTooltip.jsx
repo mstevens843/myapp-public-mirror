@@ -199,6 +199,30 @@ feeEscalationLamports: "Adds this many extra lamports on each retry if your tran
       "Enable automated risk management features such as automatic sell on sharp price movements.",
     privateRpcUrl:
       "URL of a private RPC endpoint used for low‑latency trade routing.",
+
+    // ----- Turbo Sniper++ additions -----
+    enableInsiderHeuristics:
+      "Enable on‑chain heuristics to detect suspicious patterns such as deployer‑funded liquidity or same‑block snipes.  When enabled the bot skips tokens flagged by these checks.",
+    maxHolderPercent:
+      "Maximum percentage of total supply allowed to be held by the largest wallets.  If the top holders exceed this value the trade is skipped.",
+    requireFreezeRevoked:
+      "Require the token’s freeze authority to be renounced before buying.  Tokens with active freeze authority are considered high risk.",
+    enableLaserStream:
+      "Use the Laser/Geyser WebSocket stream for pool detection instead of the standard watcher.  Provides lower latency and includes detection timestamps.",
+    multiWallet:
+      "Number of funded wallets to rotate through when sniping.  Each wallet will attempt a single fill per mint, improving fill probability.",
+    alignToLeader:
+      "When enabled the bot aligns transaction submission to the next 200 ms auction tick via the leader scheduler.  Improves inclusion probability on Jito.",
+    cuPriceCurve:
+      "Custom compute unit price curve.  Provide an array of polynomial coefficients (e.g. [5000, 1000] for base 5000 and +1000 per attempt) to fine‑tune priority fees.  Values are clamped between the min and max CU prices.",
+    tipCurveCoefficients:
+      "Custom tip curve.  Provide polynomial coefficients to control the per‑attempt tip lamports.  If unspecified, the flat or ramp mode is used.",
+    riskLevels:
+      "Optional object defining risk profiles and actions.  Use this to map heuristic outcomes to custom behaviours (e.g. adjust size, abort, or warn).",
+    stopLossPercent:
+      "Percentage drop from entry price that triggers an automatic sell.  0 disables the stop loss.",
+    rugDelayBlocks:
+      "Number of blocks to wait before exiting after a rug or suspicious liquidity pull is detected.  Allows partial recovery in volatile exits.",
   };
 
   const content = text || lookup[name] || "Tooltip coming soon.";

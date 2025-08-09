@@ -378,9 +378,198 @@ async function turboSniperStrategy(botCfg = {}) {
   if (POOL_DETECTION) {
     try {
       const rpcUrl = PRIVATE_RPC_URL || (RPC_ENDPOINTS.length ? RPC_ENDPOINTS[0] : process.env.SOLANA_RPC_URL);
-      startPoolListener({ rpcUrl }, (info) => {
-        log('info', `Pool detected for ${info.tokenA}/${info.tokenB} via tx ${info.signature}`);
-      });
+      // Use LaserWatcher when enableLaserStream is true; default debounce 1s
+      startPoolListener(
+        {
+          rpcUrl,
+          enableLaserStream: botCfg.enableLaserStream === true,
+          debounceMs: 1000,
+        },
+        async (info) => {
+          try {
+            // Log detection
+            log('info', `Pool detected for ${info.tokenA}/${info.tokenB} via tx ${info.signature}`);
+            // Determine candidate mint: pick the token that is not the base mint (SOL or USDC)
+            let candidateMint;
+            const a = info.tokenA;
+            const b = info.tokenB;
+            // Skip if either token is undefined
+            if (!a || !b) return;
+            // Lowercase for comparison
+            const aLow = String(a).toLowerCase();
+            const bLow = String(b).toLowerCase();
+            const baseLow = BASE_MINT.toLowerCase();
+            // Skip base mints (SOL/USDC) and pick the other
+            if (aLow === baseLow) candidateMint = b;
+            else if (bLow === baseLow) candidateMint = a;
+            else {
+              // If both differ, arbitrarily choose tokenA
+              candidateMint = a;
+            }
+            // Basic guard: must be valid string
+            if (!candidateMint || typeof candidateMint !== 'string') return;
+
+            // Heuristic passes (reuse devWatch config)
+            const _devWatch = botCfg.enableInsiderHeuristics
+              ? Object.assign(
+                  {},
+                  botCfg.devWatch || {},
+                  botCfg.maxHolderPercent != null && botCfg.maxHolderPercent !== ''
+                    ? { holderTop5MaxPct: Number(botCfg.maxHolderPercent) }
+                    : {}
+                )
+              : botCfg.devWatch;
+            const passRes = await passes(candidateMint, {
+              entryThreshold: ENTRY_THRESHOLD,
+              volumeThresholdUSD: VOLUME_THRESHOLD,
+              pumpWindow: botCfg.priceWindow || '5m',
+              volumeWindow: botCfg.volumeWindow || '1h',
+              limitUsd: LIMIT_USD,
+              minMarketCap: MIN_MARKET_CAP,
+              maxMarketCap: MAX_MARKET_CAP,
+              dipThreshold: null,
+              volumeSpikeMult: null,
+              fetchOverview: (m) => getTokenShortTermChange(null, m, '5m', '1h'),
+              devWatch: _devWatch,
+            });
+            if (!passRes?.ok) return;
+            // Safety check
+            if (!(botCfg.disableSafety === true)) {
+              const safeRes = await isSafeToBuyDetailed(candidateMint, botCfg.safetyChecks || {});
+              if (logSafetyResults(candidateMint, safeRes, log, 'sniper-turbo')) return;
+              if (botCfg.requireFreezeRevoked && safeRes?.authority && safeRes.authority.detail) {
+                try {
+                  if (safeRes.authority.detail.freeze != null) return;
+                } catch (_) {}
+              }
+            }
+            // Quote
+            const quoteRes = await getSafeQuote({
+              inputMint: BASE_MINT,
+              outputMint: candidateMint,
+              amount: SNIPE_LAMPORTS,
+              slippage: SLIPPAGE,
+              maxImpactPct: SIZING_MAX_IMPACT_PCT != null ? SIZING_MAX_IMPACT_PCT : MAX_SLIPPAGE,
+            });
+            if (!quoteRes.ok) return;
+            const quote = quoteRes.quote;
+            if (PRIORITY_FEE > 0) {
+              quote.prioritizationFeeLamports = PRIORITY_FEE;
+            }
+            // Record detection->quote latency metric
+            try {
+              const detTs = info.detectedAt || Date.now();
+              metricsLogger.recordTiming?.('detectToQuote', Date.now() - detTs);
+            } catch (_) {}
+            // Build a meta object similar to baseMeta but scoped for this detection
+            const idempotencyKey = uuid();
+            const detectionMeta = {
+              strategy: 'Sniper',
+              walletId: botCfg.walletId,
+              userId: botCfg.userId,
+              slippage: SLIPPAGE,
+              category: 'Sniper',
+              tpPercent: botCfg.tpPercent ?? TAKE_PROFIT,
+              slPercent: botCfg.slPercent ?? STOP_LOSS,
+              tp: botCfg.takeProfit,
+              sl: botCfg.stopLoss,
+              botId: botId,
+              // turbo / fees
+              turboMode: TURBO_MODE,
+              privateRpcUrl: PRIVATE_RPC_URL,
+              skipPreflight: SKIP_PREFLIGHT,
+              priorityFeeLamports: PRIORITY_FEE,
+              autoPriorityFee: AUTO_PRIORITY_FEE,
+              // Jito
+              useJitoBundle: USE_JITO_BUNDLE,
+              jitoTipLamports: JITO_TIP_LAMPORTS,
+              jitoRelayUrl: JITO_RELAY_URL,
+              // Bundle tuning
+              bundleStrategy: BUNDLE_STRATEGY,
+              cuAdapt: CU_ADAPT,
+              cuPriceMicroLamportsMin: CU_PRICE_MIN,
+              cuPriceMicroLamportsMax: CU_PRICE_MAX,
+              tipCurve: TIP_CURVE,
+              // Routing
+              multiRoute: MULTI_ROUTE,
+              splitTrade: SPLIT_TRADE,
+              allowedDexes: ALLOWED_DEXES,
+              excludedDexes: EXCLUDED_DEXES,
+              // Direct AMM fallback
+              directAmmFallback: DIRECT_AMM_FALLBACK,
+              directAmmFirstPct: DIRECT_AMM_FIRST_PCT,
+              // RPC & safety
+              rpcEndpoints: RPC_ENDPOINTS,
+              rpcMaxErrors: RPC_MAX_ERRORS,
+              killSwitch: KILL_SWITCH,
+              killThreshold: KILL_THRESHOLD,
+              poolDetection: POOL_DETECTION,
+              // Exits
+              tpLadder: TP_LADDER,
+              trailingStopPct: TRAILING_STOP_PCT,
+              // Advanced flags
+              ghostMode: GHOST_MODE,
+              coverWalletId: COVER_WALLET_ID,
+              autoRug: AUTO_RUG,
+              prewarmAccounts: PREWARM_ACCS,
+              // Post buy watcher
+              postBuyWatch: POST_BUY_WATCH,
+              slippageAuto: botCfg.slippageAuto || {},
+              postTx: botCfg.postTx || null,
+              devWatch: botCfg.devWatch || null,
+              feeds: botCfg.feeds || null,
+              iceberg: {
+                enabled: ICEBERG_ENABLED,
+                tranches: ICEBERG_TRANCHES,
+                trancheDelayMs: ICEBERG_TRANCHE_DELAY,
+              },
+              impactAbortPct: IMPACT_ABORT_PCT,
+              dynamicSlippageMaxPct: DYNAMIC_SLIPPAGE_MAX_PCT,
+              idempotencyKey: idempotencyKey,
+              privateRelay: {
+                enabled: PRIVATE_RELAY_ENABLED,
+                urls: PRIVATE_RELAY_URLS,
+                mode: PRIVATE_RELAY_MODE,
+              },
+              idempotency: {
+                ttlSec: IDEMP_TTL_SEC,
+                salt: IDEMP_SALT,
+                resumeFromLast: IDEMP_RESUME,
+                key: idempotencyKey,
+              },
+              sizing: {
+                maxImpactPct: SIZING_MAX_IMPACT_PCT,
+                maxPoolPct: SIZING_MAX_POOL_PCT,
+                minUsd: SIZING_MIN_USD,
+              },
+              probe: {
+                enabled: PROBE_ENABLED,
+                usd: PROBE_USD,
+                scaleFactor: PROBE_SCALE_FACTOR,
+                abortOnImpactPct: PROBE_ABORT_IMPACT_PCT,
+                delayMs: PROBE_DELAY_MS,
+              },
+              quoteLatencyMs: 0,
+              cuPriceCurve: botCfg.cuPriceCurve,
+              tipCurveCoefficients: botCfg.tipCurveCoefficients,
+              detectedAt: info.detectedAt || Date.now(),
+            };
+            // Execute trade (simulate flag handled by DRY_RUN)
+            const txHash = await execTrade({ quote, mint: candidateMint, meta: detectionMeta, simulated: DRY_RUN });
+            if (txHash) {
+              trades++; todaySol += SNIPE_LAMPORTS / 1e9;
+              cd.hit(candidateMint);
+              metricsLogger.recordSuccess();
+            }
+            if (!txHash) {
+              metricsLogger.recordFail('no-tx');
+            }
+          } catch (err) {
+            // Ignore errors during pool detection trades
+            console.warn('pool detection trade error:', err?.message);
+          }
+        }
+      );
     } catch (e) {
       log('error', `Failed to start pool listener: ${e.message}`);
     }
@@ -616,6 +805,15 @@ async function turboSniperStrategy(botCfg = {}) {
 
         // measured quote latency in ms, used for direct AMM fallback
         quoteLatencyMs  : quoteEnd - quoteStart,
+
+        // Custom CU and tip curves (Turbo Sniper++)
+        cuPriceCurve        : botCfg.cuPriceCurve,
+        tipCurveCoefficients: botCfg.tipCurveCoefficients,
+
+        // Detection timestamp used for lead‑time metrics.  For tick‑based
+        // scanning we use the start of this phase as a proxy.  When pool
+        // events are emitted the detectedAt field will be overridden.
+        detectedAt          : phaseStart,
       };
       const metaBuildEnd = Date.now();
       metricsLogger.recordTiming('quoteToBuild', metaBuildEnd - quoteEnd);

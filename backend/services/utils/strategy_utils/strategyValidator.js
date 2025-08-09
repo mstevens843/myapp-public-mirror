@@ -360,6 +360,70 @@ function validateTurboSniper(cfg = {}) {
     }
   }
 
+  // ──────────── New TurboSniper++ validations ────────────
+  // Insider heuristics toggle
+  if (cfg.enableInsiderHeuristics !== undefined && typeof cfg.enableInsiderHeuristics !== 'boolean') {
+    errors.push('TurboSniper: enableInsiderHeuristics must be boolean');
+  }
+  // Maximum allowed holder concentration percentage
+  if (!isUnset(cfg.maxHolderPercent)) {
+    if (!isNumeric(cfg.maxHolderPercent) || toNum(cfg.maxHolderPercent) < 0 || toNum(cfg.maxHolderPercent) > 100) {
+      errors.push('TurboSniper: maxHolderPercent must be a number between 0 and 100');
+    }
+  }
+  // Require freeze revoked flag
+  if (cfg.requireFreezeRevoked !== undefined && typeof cfg.requireFreezeRevoked !== 'boolean') {
+    errors.push('TurboSniper: requireFreezeRevoked must be boolean');
+  }
+  // Laser stream watcher toggle
+  if (cfg.enableLaserStream !== undefined && typeof cfg.enableLaserStream !== 'boolean') {
+    errors.push('TurboSniper: enableLaserStream must be boolean');
+  }
+  // Multi-wallet mapping count
+  if (!isUnset(cfg.multiWallet)) {
+    if (!Number.isInteger(toNum(cfg.multiWallet)) || toNum(cfg.multiWallet) < 1) {
+      errors.push('TurboSniper: multiWallet must be a positive integer');
+    }
+  }
+  // Align sends to leader toggle
+  if (cfg.alignToLeader !== undefined && typeof cfg.alignToLeader !== 'boolean') {
+    errors.push('TurboSniper: alignToLeader must be boolean');
+  }
+  // cuPriceCurve validation: must be array of numbers or object with coeffs array
+  if (cfg.cuPriceCurve !== undefined && cfg.cuPriceCurve !== null) {
+    const curve = cfg.cuPriceCurve;
+    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
+    if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
+      errors.push('TurboSniper: cuPriceCurve must be an array of numbers or an object with a coeffs array');
+    }
+  }
+  // tipCurveCoefficients validation
+  if (cfg.tipCurveCoefficients !== undefined && cfg.tipCurveCoefficients !== null) {
+    const curve = cfg.tipCurveCoefficients;
+    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
+    if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
+      errors.push('TurboSniper: tipCurveCoefficients must be an array of numbers or an object with a coeffs array');
+    }
+  }
+  // riskLevels must be object if provided
+  if (cfg.riskLevels !== undefined && cfg.riskLevels !== null) {
+    if (typeof cfg.riskLevels !== 'object' || Array.isArray(cfg.riskLevels)) {
+      errors.push('TurboSniper: riskLevels must be an object if provided');
+    }
+  }
+  // stopLossPercent between 0 and 100
+  if (!isUnset(cfg.stopLossPercent)) {
+    if (!isNumeric(cfg.stopLossPercent) || toNum(cfg.stopLossPercent) < 0 || toNum(cfg.stopLossPercent) > 100) {
+      errors.push('TurboSniper: stopLossPercent must be between 0 and 100');
+    }
+  }
+  // rugDelayBlocks ≥ 0
+  if (!isUnset(cfg.rugDelayBlocks)) {
+    if (!Number.isInteger(toNum(cfg.rugDelayBlocks)) || toNum(cfg.rugDelayBlocks) < 0) {
+      errors.push('TurboSniper: rugDelayBlocks must be an integer ≥ 0');
+    }
+  }
+
   // allowed/excluded DEXes must be string or array if provided
   ["allowedDexes", "excludedDexes"].forEach((k) => {
     if (

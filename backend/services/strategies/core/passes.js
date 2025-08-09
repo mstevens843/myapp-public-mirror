@@ -1,6 +1,11 @@
 // backend/services/strategies/core/passes.js
 const getTokenShortTermChange = require("../paid_api/getTokenShortTermChanges");
 const { incCounter } = require("../logging/metrics");
+// Import paid API heuristics
+const { estimateHolderConcentration } = require('../paid_api/holderConcentration');
+const { estimateLpBurnPct } = require('../paid_api/lpBurnPct');
+// Import insider detector
+const { insiderDetector } = require('./heuristics/insiderDetector');
 
 /*
  * Dev/Creator Heuristics v2
@@ -27,20 +32,18 @@ async function checkDevHeuristics(mint, devWatch) {
   const cfg = devWatch || {};
   const whitelist = Array.isArray(cfg.whitelist) ? cfg.whitelist.map((s) => String(s).toLowerCase()) : [];
   const blacklist = Array.isArray(cfg.blacklist) ? cfg.blacklist.map((s) => String(s).toLowerCase()) : [];
-  const holderMax = Number(cfg.holderTop5MaxPct);
-  const burnMin = Number(cfg.lpBurnMinPct);
+  // Support both legacy holderTop5MaxPct and new maxHolderPercent fields
+  const holderMax = Number(cfg.holderTop5MaxPct ?? cfg.maxHolderPercent);
+  // Support both legacy lpBurnMinPct and new minLpBurnPercent
+  const burnMin = Number(cfg.lpBurnMinPct ?? cfg.minLpBurnPercent);
+  const enableInsider = Boolean(cfg.enableInsiderHeuristics);
   const m = String(mint).toLowerCase();
   if (whitelist.includes(m)) return { ok: true };
   if (blacklist.includes(m)) {
     incCounter('devwatch_filtered_total', { reason: 'blacklist' });
     return { ok: false, reason: 'blacklist' };
   }
-  // Holder concentration check (stub).  In a production build this
-  // would query an API or on‑chain program to estimate the
-  // distribution among the largest holders.  For now we assume no
-  // concentration information is available and therefore skip the
-  // check.  If future implementations can derive a percentage they
-  // should return it here and compare against holderMax.
+  // Holder concentration check using paid API adapter
   try {
     if (Number.isFinite(holderMax) && holderMax > 0) {
       const pct = await estimateHolderConcentration(mint);
@@ -52,10 +55,7 @@ async function checkDevHeuristics(mint, devWatch) {
   } catch (_) {
     // ignore errors in heuristic
   }
-  // LP burn check (stub).  Real implementations should retrieve
-  // the percentage of LP tokens burned.  Here we default to 100% to
-  // avoid false positives.  If a value is available and below
-  // burnMin we fail the check.
+  // LP burn check
   try {
     if (Number.isFinite(burnMin) && burnMin > 0) {
       const pct = await estimateLpBurnPct(mint);
@@ -67,22 +67,22 @@ async function checkDevHeuristics(mint, devWatch) {
   } catch (_) {
     // ignore
   }
+  // Insider detection heuristics
+  if (enableInsider) {
+    try {
+      const ins = await insiderDetector({ mint });
+      if (!ins.ok) {
+        incCounter('insider_detected_total', { reason: ins.reason || 'insider' });
+        return { ok: false, reason: ins.reason || 'insider' };
+      }
+    } catch (_) {
+      // ignore errors
+    }
+  }
   return { ok: true };
 }
 
-// Placeholder implementations for heuristics.  They return null
-// indicating that no information is available.  When an external
-// service or on‑chain program becomes available these functions
-// should be replaced with real lookups.  Returning a number will
-// cause the heuristic to be evaluated against the thresholds.
-async function estimateHolderConcentration(/* mint */) {
-  // No data available – return null.
-  return null;
-}
-async function estimateLpBurnPct(/* mint */) {
-  // Without a source of truth we assume liquidity is fully burned.
-  return 100;
-}
+// Note: placeholder heuristics have been moved to paid_api modules
 
 const reasonMessages = {
   "pump-fail":     (pct, th, win) => `Skipped — ${win} change ${(pct * 100).toFixed(2)}% < ${(th * 100)}%`,

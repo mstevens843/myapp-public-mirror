@@ -911,7 +911,7 @@ const startMode = async () => {
     "rebalancer",
     "paperTrader",
     "scheduleLaunch",
-    "turboSniper",
+    // turboSniper now supports multiple wallets via the multiWallet setting
   ];
 
   
