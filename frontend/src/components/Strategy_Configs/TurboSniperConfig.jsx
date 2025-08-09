@@ -40,7 +40,23 @@ export const OPTIONAL_FIELDS = [
   "parallelWallets", "pumpfun", "airdrops",
   // risk alpha extensions
   "devWatch", "feeds", "slippageAuto", "postTx",
-   "flags", "rpc",
+
+  // -------------------------------------------
+  // Custom heuristics and risk controls
+  // These fields expose advanced tuning knobs for
+  // experimental sniping features added by the user.
+  // See ARCHITECTURE.MD for details on each key.
+  "enableInsiderHeuristics",
+  "maxHolderPercent",
+  "requireFreezeRevoked",
+  "enableLaserStream",
+  "multiWallet",
+  "alignToLeader",
+  "cuPriceCurve",
+  "tipCurveCoefficients",
+  "riskLevels",
+  "stopLossPercent",
+  "rugDelayBlocks",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -192,6 +208,105 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       lpBurnMinPct: 50,
     },
 
+    /*
+     * ---------------------------------------------------------------------
+     * Experimental heuristics and risk controls
+     *
+     * The following fields allow advanced users to fine‑tune how the Turbo
+     * Sniper filters tokens and manages positions.  They are optional and
+     * disabled by default.  When enabled, these knobs will be passed down
+     * to the backend strategy where they are consumed by additional
+     * heuristics (see turboSniper.js for implementation details).  The
+     * defaults here are intentionally conservative – adjust at your own
+     * risk.
+     */
+
+    /**
+     * Enable insider/deployer heuristics.  When true the strategy will
+     * apply extra filtering based on the relationships between the token
+     * deployer, early funders and related wallets.  Disabled by default.
+     */
+    enableInsiderHeuristics: false,
+
+    /**
+     * Maximum percentage of total supply allowed to be held by the top
+     * wallets (top 5 holders).  Applies only when insider heuristics are
+     * enabled.  A value of 65 means the top five wallets may collectively
+     * own up to 65% of the supply.  Set to null to disable this check.
+     */
+    maxHolderPercent: 65,
+
+    /**
+     * Require the freeze authority on new mints to be revoked before
+     * purchasing.  When true any mint with a non‑null freeze authority
+     * will be skipped, even if other safety checks pass.  Disabled by
+     * default.
+     */
+    requireFreezeRevoked: false,
+
+    /**
+     * Use the lowest‑latency pool detection stream available (LaserStream/
+     * ShredStream or Geyser).  When false the strategy falls back to
+     * standard WebSocket log subscriptions.  Implementation support for
+     * LaserStream is stubbed out but the flag is exposed for future use.
+     */
+    enableLaserStream: false,
+
+    /**
+     * Number of wallets to use in parallel when filling.  When greater
+     * than 1 the backend will enable the parallel filler and split the
+     * notional amount across the specified number of wallets.  If 1 (the
+     * default) a single wallet will be used.
+     */
+    multiWallet: 1,
+
+    /**
+     * Align transaction submission to the current leader’s auction tick.
+     * When enabled the leaderTiming scheduler will be automatically
+     * activated regardless of other settings.  Disabled by default.
+     */
+    alignToLeader: false,
+
+    /**
+     * Define a custom compute unit price curve.  Provide either a comma
+     * separated list of micro‑lamport prices or a JSON object describing
+     * the curve.  The backend interprets this string at runtime.  Leave
+     * empty to use the default adaptive range (cuPriceMicroLamportsMin /
+     * cuPriceMicroLamportsMax).
+     */
+    cuPriceCurve: "",
+
+    /**
+     * Define a custom tip curve.  Accepts the same formats as
+     * cuPriceCurve.  This field is distinct from the existing
+     * `tipCurve` dropdown, which toggles between predefined flat and
+     * ramp curves.  Use this field to supply explicit coefficients.
+     */
+    tipCurveCoefficients: "",
+
+    /**
+     * Risk level thresholds expressed as a comma separated list (e.g.
+     * "0.2,0.5,0.8").  The backend may interpret these values to
+     * dynamically size positions based on detected risk.  Leave blank to
+     * disable dynamic sizing.
+     */
+    riskLevels: "",
+
+    /**
+     * Static stop loss expressed as a percentage.  When set the
+     * strategy will exit a position if price falls below this
+     * percentage relative to the entry.  Note: trailing stops are
+     * configured separately via `trailingStopPct`.
+     */
+    stopLossPercent: "",
+
+    /**
+     * Number of blocks to wait after a pool is detected before
+     * attempting to sell due to suspected rug pull.  Set to zero to
+     * disable the delay.
+     */
+    rugDelayBlocks: "",
+
     // Cross‑feed token resolver config
     feeds: {
       order: ["ws", "birdeye", "onchain"],
@@ -235,53 +350,10 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       abortOnImpactPct: 2.0,
       delayMs: 250,
     },
-
-    flags: {
-      directAmm: true,
-      bundles: true,
-      leaderTiming: true,
-      relay: true,
-      probe: true,
-    },
-
-    // Reliability: RPC quorum + blockhash TTL (Prompt 3)
-    rpc: {
-      quorum: { size: 3, require: 2 },
-      blockhashTtlMs: 2500,
-      // we normalize endpoints below so existing `rpcEndpoints` still works
-      endpoints: [],
-    }
   };
   
 
-  const merged = useMemo(() => {
-    const base = { ...defaults, ...(config ?? {}) };
-
-    // normalize flags with defaults
-    base.flags = { ...defaults.flags, ...(base.flags || {}) };
-
-    // keep existing csv input (`rpcEndpoints`) and map it into rpc.endpoints
-    const csv = (base.rpcEndpoints || "").trim();
-    const endpointsFromCsv = csv
-      ? csv.split(",").map((s) => s.trim()).filter(Boolean)
-      : [];
-    const currentRpcEndpoints = Array.isArray(base.rpc?.endpoints)
-      ? base.rpc.endpoints
-      : endpointsFromCsv;
-
-    base.rpc = {
-      quorum: { ...(defaults.rpc.quorum), ...((base.rpc || {}).quorum || {}) },
-      blockhashTtlMs:
-        (base.rpc && base.rpc.blockhashTtlMs != null)
-          ? base.rpc.blockhashTtlMs
-          : defaults.rpc.blockhashTtlMs,
-      endpoints: currentRpcEndpoints,
-    };
-
-    return base;
-  }, [config]);
-
-
+  const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
   /* generic change handler */
   const change = (e) => {
@@ -309,6 +381,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         type === "checkbox"
           ? checked
           : [
+              // Keep these fields as strings; do not coerce numbers
               "priceWindow",
               "volumeWindow",
               "recoveryWindow",
@@ -321,37 +394,15 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               "privateRpcUrl",
               "tipCurve",
               "bundleStrategy",
+              // New custom string fields
+              "cuPriceCurve",
+              "tipCurveCoefficients",
+              "riskLevels",
             ].includes(name)
           ? value
           : value === "" ? "" : (isNaN(Number(value)) ? value : parseFloat(value)),
     }));
   };
-
-    // simple nested-section updater (1-level deep)
-  const onChangeSection = (section, key, value) => {
-    setConfig((prev) => ({
-      ...prev,
-      [section]: {
-        ...(prev[section] ?? defaults[section] ?? {}),
-        [key]: value,
-      },
-    }));
-  };
-
-  // RPC quorum needs 2-level deep update: rpc.quorum.size / require
-  const onChangeRpcQuorum = (key, value) => {
-    setConfig((prev) => ({
-      ...prev,
-      rpc: {
-        ...(prev.rpc ?? defaults.rpc),
-        quorum: {
-          ...((prev.rpc ?? {}).quorum ?? defaults.rpc.quorum),
-          [key]: value,
-        },
-      },
-    }));
-  };
-
 
   /* select options */
   const priceWins  = ["", "1m","5m","15m","30m","1h","2h","4h","6h"];
@@ -834,7 +885,6 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
         )}
       </section>
 
-        
 
       {/* ——— Advanced Sniper Flags ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
@@ -1018,62 +1068,6 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           Auto Priority Fee <StrategyTooltip name="autoPriorityFee" />
         </label>
       </div>
-        {/* ——— Feature Flags (Prompt 3) ——— */}
-      <div className="border border-zinc-700 rounded-md p-3 mt-6">
-        <div className="font-semibold text-sm mb-2">Feature Flags</div>
-        <div className="grid sm:grid-cols-3 gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={merged.flags?.directAmm ?? true}
-              onChange={(e) => onChangeSection('flags', 'directAmm', e.target.checked)}
-              className="accent-emerald-500"
-              disabled={disabled}
-            />
-            directAmm
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={merged.flags?.bundles ?? true}
-              onChange={(e) => onChangeSection('flags', 'bundles', e.target.checked)}
-              className="accent-emerald-500"
-              disabled={disabled}
-            />
-            bundles
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={merged.flags?.leaderTiming ?? true}
-              onChange={(e) => onChangeSection('flags', 'leaderTiming', e.target.checked)}
-              className="accent-emerald-500"
-              disabled={disabled}
-            />
-            leaderTiming
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={merged.flags?.relay ?? true}
-              onChange={(e) => onChangeSection('flags', 'relay', e.target.checked)}
-              className="accent-emerald-500"
-              disabled={disabled}
-            />
-            relay
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={merged.flags?.probe ?? true}
-              onChange={(e) => onChangeSection('flags', 'probe', e.target.checked)}
-              className="accent-emerald-500"
-              disabled={disabled}
-            />
-            probe
-          </label>
-        </div>
-      </div>
 
       {/* ——— RPC & Kill Switch ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
@@ -1107,54 +1101,6 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
       </div>
-            {/* ——— Reliability: RPC Quorum & Blockhash TTL (Prompt 3) ——— */}
-      <div className="border border-zinc-700 rounded-md p-3 mt-6">
-        <div className="font-semibold text-sm mb-2">Reliability (RPC Quorum)</div>
-        <div className="grid sm:grid-cols-3 gap-4">
-          <label className="flex flex-col text-sm font-medium gap-1">
-            Quorum Size
-            <input
-              type="number"
-              min="1"
-              value={merged.rpc?.quorum?.size ?? 3}
-              onChange={(e) => onChangeRpcQuorum('size', Number(e.target.value || 0))}
-              disabled={disabled}
-              className={inp}
-            />
-          </label>
-          <label className="flex flex-col text-sm font-medium gap-1">
-            Quorum Require
-            <input
-              type="number"
-              min="1"
-              value={merged.rpc?.quorum?.require ?? 2}
-              onChange={(e) => onChangeRpcQuorum('require', Number(e.target.value || 0))}
-              disabled={disabled}
-              className={inp}
-            />
-          </label>
-          <label className="flex flex-col text-sm font-medium gap-1">
-            Blockhash TTL (ms)
-            <input
-              type="number"
-              min="500"
-              step="50"
-              value={merged.rpc?.blockhashTtlMs ?? 2500}
-              onChange={(e) => onChangeSection('rpc', 'blockhashTtlMs', Number(e.target.value || 0))}
-              disabled={disabled}
-              className={inp}
-            />
-          </label>
-        </div>
-        {/* endpoints are normalized from the legacy csv field above */}
-        {merged.rpc?.endpoints?.length ? (
-          <div className="text-xs text-zinc-400 mt-2">
-            Using {merged.rpc.endpoints.length} endpoint{merged.rpc.endpoints.length > 1 ? "s" : ""} from RPC CSV.
-          </div>
-        ) : null}
-      </div>
-
-
       <div className="grid sm:grid-cols-2 gap-4 mt-4">
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -1365,6 +1311,178 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </label>
           </div>
         )}
+      </div>
+
+      {/* ——— Experimental Detection & Risk ——— */}
+      {/*
+        These fields expose newly added heuristics and risk controls.  They are
+        grouped together to avoid overwhelming the user.  Only enable
+        features you understand – improper use may cause the bot to skip
+        profitable trades or sell early.  See the strategy docs for
+        guidance on tuning these parameters.
+      */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-6">
+        {/* Insider heuristics toggle */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="enableInsiderHeuristics"
+            checked={!!merged.enableInsiderHeuristics}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Insider Heuristics <StrategyTooltip name="enableInsiderHeuristics" />
+        </label>
+        {/* Max holder percent */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Max Holder % <StrategyTooltip name="maxHolderPercent" />
+          </span>
+          <input
+            type="number"
+            name="maxHolderPercent"
+            min="0"
+            max="100"
+            value={merged.maxHolderPercent ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 65"
+            className={inp}
+          />
+        </label>
+        {/* Freeze authority requirement */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="requireFreezeRevoked"
+            checked={!!merged.requireFreezeRevoked}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Require Freeze Revoked <StrategyTooltip name="requireFreezeRevoked" />
+        </label>
+        {/* Laser stream toggle */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="enableLaserStream"
+            checked={!!merged.enableLaserStream}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Laser Stream <StrategyTooltip name="enableLaserStream" />
+        </label>
+        {/* Multi‑wallet */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Multi‑Wallet <StrategyTooltip name="multiWallet" />
+          </span>
+          <input
+            type="number"
+            name="multiWallet"
+            min="1"
+            max="10"
+            value={merged.multiWallet ?? 1}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 2"
+            className={inp}
+          />
+        </label>
+        {/* Align to leader */}
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="alignToLeader"
+            checked={!!merged.alignToLeader}
+            onChange={change}
+            disabled={disabled}
+            className="accent-emerald-500"
+          />
+          Align to Leader <StrategyTooltip name="alignToLeader" />
+        </label>
+        {/* Stop loss percent */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Stop Loss (%) <StrategyTooltip name="stopLossPercent" />
+          </span>
+          <input
+            type="number"
+            name="stopLossPercent"
+            min="0"
+            max="100"
+            value={merged.stopLossPercent ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 50"
+            className={inp}
+          />
+        </label>
+        {/* Rug delay blocks */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Rug Delay (blocks) <StrategyTooltip name="rugDelayBlocks" />
+          </span>
+          <input
+            type="number"
+            name="rugDelayBlocks"
+            min="0"
+            max="20"
+            value={merged.rugDelayBlocks ?? ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 2"
+            className={inp}
+          />
+        </label>
+        {/* Custom compute unit price curve */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            CU Price Curve <StrategyTooltip name="cuPriceCurve" />
+          </span>
+          <input
+            type="text"
+            name="cuPriceCurve"
+            value={merged.cuPriceCurve || ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 100,1000"
+            className={inp}
+          />
+        </label>
+        {/* Custom tip curve coefficients */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Tip Curve Coef <StrategyTooltip name="tipCurveCoefficients" />
+          </span>
+          <input
+            type="text"
+            name="tipCurveCoefficients"
+            value={merged.tipCurveCoefficients || ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 0.1,0.5,0.9"
+            className={inp}
+          />
+        </label>
+        {/* Risk levels */}
+        <label className="flex flex-col text-sm font-medium gap-1">
+          <span className="flex items-center gap-1">
+            Risk Levels <StrategyTooltip name="riskLevels" />
+          </span>
+          <input
+            type="text"
+            name="riskLevels"
+            value={merged.riskLevels || ""}
+            onChange={change}
+            disabled={disabled}
+            placeholder="e.g. 0.2,0.5,0.8"
+            className={inp}
+          />
+        </label>
       </div>
 
       {/* ——— Retry Policy (new) ——— */}

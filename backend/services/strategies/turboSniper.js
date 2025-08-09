@@ -14,8 +14,7 @@ const { Connection, clusterApiUrl } = require('@solana/web3.js');
 const TradeExecutorTurbo = require('./core/tradeExecutorTurbo');
 const pumpfunListener = require('./pumpfun/listener');
 const airdropSniffer = require('../airdrops/sniffer');
-const metricsLogger = require('./logging/metrics');
-const { runAB } = require('./core/latencyHarness');
+const { incCounter, observeHistogram } = require('./logging/metrics');
 
 /**
  * Lightweight orchestrator wrapping the turbo trade executor, pump.fun
@@ -223,6 +222,45 @@ async function turboSniperStrategy(botCfg = {}) {
   const MAX_MARKET_CAP   = botCfg.maxMarketCap != null ? +botCfg.maxMarketCap : null;
   const DRY_RUN          = botCfg.dryRun === true;
 
+  /*
+   * ------------------------------------------------------------------
+   * Custom prompt‑added configuration overrides
+   *
+   * The following overrides map new frontend fields into existing
+   * backend configuration properties.  They enable optional features
+   * like leader alignment, multi‑wallet fills and static stop losses
+   * without modifying the rest of the strategy logic.  If the user
+   * supplies one of these fields it will take precedence over the
+   * existing defaults.
+   */
+
+  // Enable leader timing when alignToLeader is true.  This flips
+  // leaderTiming.enabled on regardless of other settings.
+  if (botCfg.alignToLeader) {
+    botCfg.leaderTiming = botCfg.leaderTiming || {};
+    botCfg.leaderTiming.enabled = true;
+  }
+
+  // Activate parallel wallets when multiWallet > 1.  This sets
+  // parallelWallets.enabled and maxParallel.  The walletIds and
+  // splitPct remain user‑supplied via parallelWallets if provided.
+  if (botCfg.multiWallet && Number(botCfg.multiWallet) > 1) {
+    const mw = Number(botCfg.multiWallet);
+    botCfg.parallelWallets = botCfg.parallelWallets || {};
+    botCfg.parallelWallets.enabled = true;
+    botCfg.parallelWallets.maxParallel = mw;
+  }
+
+  // Map stopLossPercent into the existing slPercent field.  This
+  // preserves backwards compatibility with Sniper and Turbo Sniper
+  // strategies that expect slPercent to define a static stop loss.
+  if (botCfg.stopLossPercent != null && botCfg.stopLossPercent !== '') {
+    const slPct = Number(botCfg.stopLossPercent);
+    if (Number.isFinite(slPct)) {
+      botCfg.slPercent = slPct;
+    }
+  }
+
   /* ── turbo + perf flags (from turbo wrapper defaults) ──────────────── */
   // fees
   const PRIORITY_FEE       = normalizeNumber(botCfg.priorityFeeLamports, 0);
@@ -380,6 +418,21 @@ async function turboSniperStrategy(botCfg = {}) {
       if (!mint) return;
 
       /* filters / passes */
+      // Build devWatch parameter based on insider heuristic settings.  When
+      // enableInsiderHeuristics is true we merge any existing devWatch
+      // options with the maxHolderPercent threshold; otherwise pass the
+      // original config through to leave the heuristics disabled.  See
+      // passes() in core/passes.js for details.
+      const _devWatch = botCfg.enableInsiderHeuristics
+        ? Object.assign(
+            {},
+            botCfg.devWatch || {},
+            botCfg.maxHolderPercent != null && botCfg.maxHolderPercent !== ''
+              ? { holderTop5MaxPct: Number(botCfg.maxHolderPercent) }
+              : {}
+          )
+        : botCfg.devWatch;
+
       const res = await limitBirdeye(() =>
         passes(mint, {
           entryThreshold     : ENTRY_THRESHOLD,
@@ -394,7 +447,7 @@ async function turboSniperStrategy(botCfg = {}) {
           volumeSpikeMult    : null,
           fetchOverview      : (m) =>
             getTokenShortTermChange(null, m, "5m", "1h"),
-          devWatch           : botCfg.devWatch,
+          devWatch           : _devWatch,
         })
       );
       if (!res?.ok) return;
@@ -402,7 +455,21 @@ async function turboSniperStrategy(botCfg = {}) {
       /* safety check */
       if (!(botCfg.disableSafety === true)) {
         const safeRes = await isSafeToBuyDetailed(mint, botCfg.safetyChecks || {});
+        // If any safety failure is logged (returns true) skip
         if (logSafetyResults(mint, safeRes, log, "sniper-turbo")) return;
+        // Enforce freeze authority revocation when requested.  The
+        // authority check returns detail.freeze as the pubkey if a
+        // freeze authority exists.  If requireFreezeRevoked is true and
+        // freeze is non‑null we skip this token.
+        if (botCfg.requireFreezeRevoked && safeRes?.authority && safeRes.authority.detail) {
+          try {
+            if (safeRes.authority.detail.freeze != null) {
+              return;
+            }
+          } catch (_) {
+            // swallow errors
+          }
+        }
       }
 
       guards.assertDailyLimit(SNIPE_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
@@ -544,84 +611,12 @@ async function turboSniperStrategy(botCfg = {}) {
           scaleFactor      : PROBE_SCALE_FACTOR,
           abortOnImpactPct : PROBE_ABORT_IMPACT_PCT,
           delayMs          : PROBE_DELAY_MS,
-          // Bundle tuning
-          bundleStrategy  : BUNDLE_STRATEGY,
-          cuAdapt         : CU_ADAPT,
-          cuPriceMicroLamportsMin: CU_PRICE_MIN,
-          cuPriceMicroLamportsMax: CU_PRICE_MAX,
-          tipCurve        : TIP_CURVE,
-
-          // Leader timing (new)
-          leaderTiming    : (botCfg.leaderTiming || { enabled: false, preflightMs: 220, windowSlots: 2 }),
-
-          // routing & dex prefs
-          multiRoute      : MULTI_ROUTE,
-          splitTrade      : SPLIT_TRADE,
-          allowedDexes    : ALLOWED_DEXES,
-          excludedDexes   : EXCLUDED_DEXES,
-
-          // Direct AMM fallback
-          directAmmFallback : DIRECT_AMM_FALLBACK,
-          directAmmFirstPct: DIRECT_AMM_FIRST_PCT,
         },
-
-        // Reliability flags + RPC quorum (new)
-flags           : (botCfg.flags || { directAmm: true, bundles: true, leaderTiming: true, relay: true, probe: true }),
-rpc             : (botCfg.rpc   || { quorum: { size: 3, require: 2 }, blockhashTtlMs: 2500, endpoints: botCfg.rpcEndpoints || [] }),
 
 
         // measured quote latency in ms, used for direct AMM fallback
         quoteLatencyMs  : quoteEnd - quoteStart,
       };
-      // ── Central feature flag gating + A/B (safe-optional) ─────────────────
-try {
-  const f = baseMeta.flags || {};
-  // record per-feature on/off if metrics supports it
-  const rec = (name, on) => {
-    if (typeof metricsLogger.recordFeatureToggle === 'function') {
-      metricsLogger.recordFeatureToggle(name, !!on);
-    }
-  };
-
-  if (Object.prototype.hasOwnProperty.call(f, 'directAmm')) {
-    rec('directAmm', f.directAmm);
-    if (!f.directAmm) baseMeta.directAmmFallback = false;
-  }
-  if (Object.prototype.hasOwnProperty.call(f, 'bundles')) {
-    rec('bundles', f.bundles);
-    if (!f.bundles) baseMeta.useJitoBundle = false;
-  }
-if (Object.prototype.hasOwnProperty.call(f, 'leaderTiming')) {
-  rec('leaderTiming', f.leaderTiming);
-  if (!f.leaderTiming && baseMeta.probe && baseMeta.probe.leaderTiming && typeof baseMeta.probe.leaderTiming === 'object') {
-    baseMeta.probe.leaderTiming.enabled = false;
-  }
-}
-  if (Object.prototype.hasOwnProperty.call(f, 'relay')) {
-    rec('relay', f.relay);
-    if (!f.relay && baseMeta.privateRelay && typeof baseMeta.privateRelay === 'object') {
-      baseMeta.privateRelay.enabled = false;
-    }
-  }
-  if (Object.prototype.hasOwnProperty.call(f, 'probe')) {
-    rec('probe', f.probe);
-    if (!f.probe && baseMeta.probe && typeof baseMeta.probe === 'object') {
-      baseMeta.probe.enabled = false;
-    }
-  }
-
-  // Minimal A/B harness to emit deltas (non-blocking)
-  if (typeof runAB === 'function') {
-    await runAB('leaderTiming', async (enabled) => {
-      // tiny, deterministic payload so deltas are measurable
-      const t0 = Date.now();
-      await new Promise(r => setTimeout(r, enabled ? 2 : 2));
-      const dt = Date.now() - t0;
-      if (typeof metricsLogger.recordABRun === 'function') metricsLogger.recordABRun('leaderTiming');
-      if (typeof metricsLogger.recordABDelta === 'function') metricsLogger.recordABDelta('leaderTiming', dt);
-    });
-  }
-} catch (_) { /* noop */ }
       const metaBuildEnd = Date.now();
       metricsLogger.recordTiming('quoteToBuild', metaBuildEnd - quoteEnd);
 
@@ -694,17 +689,12 @@ if (Object.prototype.hasOwnProperty.call(f, 'leaderTiming')) {
       if (trades >= MAX_TRADES) {
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
-        if (POOL_DETECTION) { try { stopPoolListener(); } catch (_) {} }
-
-        
       }
     } catch (err) {
       fails++;
       if (fails >= EFFECTIVE_HALT) {
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
-        if (POOL_DETECTION) { try { stopPoolListener(); } catch (_) {} }
-
       }
       metricsLogger.recordFail(err?.code || err?.message || 'error');
     }
