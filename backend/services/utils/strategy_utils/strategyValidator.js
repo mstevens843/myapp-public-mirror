@@ -275,185 +275,8 @@ function validateSniper(cfg = {}) {
   return errors;
 }
 
-/* ───── Turbo Sniper ─────────────────────────────────────────────── */
-/**
- * Validate Turbo Sniper configs.  Builds on the base Sniper validator and
- * enforces bounds on the additional turbo settings (e.g. multi-buy count,
- * RPC failover, kill switch).  Boolean flags must be boolean when
- * provided; numeric parameters are coerced and checked for sane ranges.
- */
-function validateTurboSniper(cfg = {}) {
-  const errors = validateSniper(cfg);
 
-  // boolean toggles
-  [
-    "ghostMode",
-    "multiBuy",
-    "prewarmAccounts",
-    "multiRoute",
-    "autoRug",
-    "useJitoBundle",
-    "autoPriorityFee",
-    "killSwitch",
-    "poolDetection",
-    "splitTrade",
-    "turboMode",
-    "autoRiskManage",
-  ].forEach((k) => {
-    if (cfg[k] !== undefined && typeof cfg[k] !== "boolean") {
-      errors.push(`TurboSniper: ${k} must be boolean`);
-    }
-  });
 
-  // ghost-mode cover wallet requirement
-  if (cfg.ghostMode === true) {
-    if (!cfg.coverWalletId || typeof cfg.coverWalletId !== "string") {
-      errors.push("TurboSniper: coverWalletId required when ghostMode is enabled");
-    }
-  }
-
-  // multi-buy count 1–3
-  if (!isUnset(cfg.multiBuyCount)) {
-    if (
-      !Number.isInteger(toNum(cfg.multiBuyCount)) ||
-      toNum(cfg.multiBuyCount) < 1 ||
-      toNum(cfg.multiBuyCount) > 3
-    ) {
-      errors.push("TurboSniper: multiBuyCount must be an integer between 1 and 3");
-    }
-  }
-
-  // Jito tip lamports ≥ 0
-  if (!isUnset(cfg.jitoTipLamports)) {
-    if (
-      !Number.isInteger(toNum(cfg.jitoTipLamports)) ||
-      toNum(cfg.jitoTipLamports) < 0
-    ) {
-      errors.push("TurboSniper: jitoTipLamports must be an integer ≥ 0");
-    }
-  }
-
-  // rpcMaxErrors ≥ 1
-  if (!isUnset(cfg.rpcMaxErrors)) {
-    if (
-      !Number.isInteger(toNum(cfg.rpcMaxErrors)) ||
-      toNum(cfg.rpcMaxErrors) < 1
-    ) {
-      errors.push("TurboSniper: rpcMaxErrors must be an integer ≥ 1");
-    }
-  }
-
-  // killThreshold ≥ 1
-  if (!isUnset(cfg.killThreshold)) {
-    if (
-      !Number.isInteger(toNum(cfg.killThreshold)) ||
-      toNum(cfg.killThreshold) < 1
-    ) {
-      errors.push("TurboSniper: killThreshold must be an integer ≥ 1");
-    }
-  }
-
-  // trailingStopPct ≥ 0
-  if (!isUnset(cfg.trailingStopPct)) {
-    if (!isNumeric(cfg.trailingStopPct) || toNum(cfg.trailingStopPct) < 0) {
-      errors.push("TurboSniper: trailingStopPct must be ≥ 0");
-    }
-  }
-
-  // ──────────── New TurboSniper++ validations ────────────
-  // Insider heuristics toggle
-  if (cfg.enableInsiderHeuristics !== undefined && typeof cfg.enableInsiderHeuristics !== 'boolean') {
-    errors.push('TurboSniper: enableInsiderHeuristics must be boolean');
-  }
-  // Maximum allowed holder concentration percentage
-  if (!isUnset(cfg.maxHolderPercent)) {
-    if (!isNumeric(cfg.maxHolderPercent) || toNum(cfg.maxHolderPercent) < 0 || toNum(cfg.maxHolderPercent) > 100) {
-      errors.push('TurboSniper: maxHolderPercent must be a number between 0 and 100');
-    }
-  }
-  // Require freeze revoked flag
-  if (cfg.requireFreezeRevoked !== undefined && typeof cfg.requireFreezeRevoked !== 'boolean') {
-    errors.push('TurboSniper: requireFreezeRevoked must be boolean');
-  }
-  // Laser stream watcher toggle
-  if (cfg.enableLaserStream !== undefined && typeof cfg.enableLaserStream !== 'boolean') {
-    errors.push('TurboSniper: enableLaserStream must be boolean');
-  }
-  // Multi-wallet mapping count
-  if (!isUnset(cfg.multiWallet)) {
-    if (!Number.isInteger(toNum(cfg.multiWallet)) || toNum(cfg.multiWallet) < 1) {
-      errors.push('TurboSniper: multiWallet must be a positive integer');
-    }
-  }
-  // Align sends to leader toggle
-  if (cfg.alignToLeader !== undefined && typeof cfg.alignToLeader !== 'boolean') {
-    errors.push('TurboSniper: alignToLeader must be boolean');
-  }
-  // cuPriceCurve validation: must be array of numbers or object with coeffs array
-  if (cfg.cuPriceCurve !== undefined && cfg.cuPriceCurve !== null) {
-    const curve = cfg.cuPriceCurve;
-    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
-    if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
-      errors.push('TurboSniper: cuPriceCurve must be an array of numbers or an object with a coeffs array');
-    }
-  }
-  // tipCurveCoefficients validation
-  if (cfg.tipCurveCoefficients !== undefined && cfg.tipCurveCoefficients !== null) {
-    const curve = cfg.tipCurveCoefficients;
-    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
-    if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
-      errors.push('TurboSniper: tipCurveCoefficients must be an array of numbers or an object with a coeffs array');
-    }
-  }
-  // riskLevels must be object if provided
-  if (cfg.riskLevels !== undefined && cfg.riskLevels !== null) {
-    if (typeof cfg.riskLevels !== 'object' || Array.isArray(cfg.riskLevels)) {
-      errors.push('TurboSniper: riskLevels must be an object if provided');
-    }
-  }
-  // stopLossPercent between 0 and 100
-  if (!isUnset(cfg.stopLossPercent)) {
-    if (!isNumeric(cfg.stopLossPercent) || toNum(cfg.stopLossPercent) < 0 || toNum(cfg.stopLossPercent) > 100) {
-      errors.push('TurboSniper: stopLossPercent must be between 0 and 100');
-    }
-  }
-  // rugDelayBlocks ≥ 0
-  if (!isUnset(cfg.rugDelayBlocks)) {
-    if (!Number.isInteger(toNum(cfg.rugDelayBlocks)) || toNum(cfg.rugDelayBlocks) < 0) {
-      errors.push('TurboSniper: rugDelayBlocks must be an integer ≥ 0');
-    }
-  }
-
-  // allowed/excluded DEXes must be string or array if provided
-  ["allowedDexes", "excludedDexes"].forEach((k) => {
-    if (
-      cfg[k] !== undefined &&
-      !Array.isArray(cfg[k]) &&
-      typeof cfg[k] !== "string"
-    ) {
-      errors.push(`TurboSniper: ${k} must be a comma-separated string or array`);
-    }
-  });
-
-  // tpLadder percentages between 0 and 100
-  if (cfg.tpLadder !== undefined && cfg.tpLadder !== null && cfg.tpLadder !== "") {
-    const parts = Array.isArray(cfg.tpLadder)
-      ? cfg.tpLadder
-      : String(cfg.tpLadder)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-    parts.forEach((p) => {
-      if (!isNumeric(p) || toNum(p) < 0 || toNum(p) > 100) {
-        errors.push(
-          "TurboSniper: tpLadder percentages must be numbers between 0 and 100"
-        );
-      }
-    });
-  }
-
-  return errors;
-}
 
 function validateScalper(cfg = {}) {
   const errors = validateSharedConfig(cfg);
@@ -1114,6 +937,434 @@ function validateScheduleLauncher(cfg = {}) {
 
   return errs;
 }
+
+/* ───── Turbo Sniper ─────────────────────────────────────────────── */
+/**
+ * Validate Turbo Sniper configs.  Builds on the base Sniper validator and
+ * enforces bounds on the additional turbo settings (e.g. multi-buy count,
+ * RPC failover, kill switch).  Boolean flags must be boolean when
+ * provided; numeric parameters are coerced and checked for sane ranges.
+ */
+'use strict';
+
+// Assumes these exist in the module scope or are imported by the caller file:
+// - validateSniper(cfg)
+// - isUnset(v)
+// - isNumeric(v)
+// - toNum(v)
+
+function validateTurboSniper(cfg = {}) {
+  const errors = validateSniper(cfg);
+
+  // ---------------------------
+  // Simple boolean toggles
+  // ---------------------------
+  [
+    "ghostMode",
+    "multiBuy",
+    "prewarmAccounts",
+    "multiRoute",
+    "autoRug",
+    "useJitoBundle",
+    "autoPriorityFee",
+    "killSwitch",
+    "poolDetection",
+    "splitTrade",
+    "turboMode",
+    "autoRiskManage",
+    "cuAdapt",
+    "skipPreflight",
+    "directAmmFallback",
+  ].forEach((k) => {
+    if (cfg[k] !== undefined && typeof cfg[k] !== "boolean") {
+      errors.push(`TurboSniper: ${k} must be boolean`);
+    }
+  });
+
+  // ghost-mode cover wallet requirement
+  if (cfg.ghostMode === true) {
+    if (!cfg.coverWalletId || typeof cfg.coverWalletId !== "string") {
+      errors.push("TurboSniper: coverWalletId required when ghostMode is enabled");
+    }
+  }
+
+  // multi-buy count 1–3
+  if (!isUnset(cfg.multiBuyCount)) {
+    if (
+      !Number.isInteger(toNum(cfg.multiBuyCount)) ||
+      toNum(cfg.multiBuyCount) < 1 ||
+      toNum(cfg.multiBuyCount) > 3
+    ) {
+      errors.push("TurboSniper: multiBuyCount must be an integer between 1 and 3");
+    }
+  }
+
+  // priority fee (lamports) ≥ 0
+  if (!isUnset(cfg.priorityFeeLamports)) {
+    if (!Number.isInteger(toNum(cfg.priorityFeeLamports)) || toNum(cfg.priorityFeeLamports) < 0) {
+      errors.push("TurboSniper: priorityFeeLamports must be an integer ≥ 0");
+    }
+  }
+
+  // Jito tip lamports ≥ 0
+  if (!isUnset(cfg.jitoTipLamports)) {
+    if (!Number.isInteger(toNum(cfg.jitoTipLamports)) || toNum(cfg.jitoTipLamports) < 0) {
+      errors.push("TurboSniper: jitoTipLamports must be an integer ≥ 0");
+    }
+  }
+
+  // rpcMaxErrors ≥ 1
+  if (!isUnset(cfg.rpcMaxErrors)) {
+    if (!Number.isInteger(toNum(cfg.rpcMaxErrors)) || toNum(cfg.rpcMaxErrors) < 1) {
+      errors.push("TurboSniper: rpcMaxErrors must be an integer ≥ 1");
+    }
+  }
+
+  // killThreshold ≥ 1
+  if (!isUnset(cfg.killThreshold)) {
+    if (!Number.isInteger(toNum(cfg.killThreshold)) || toNum(cfg.killThreshold) < 1) {
+      errors.push("TurboSniper: killThreshold must be an integer ≥ 1");
+    }
+  }
+
+  // trailingStopPct ≥ 0
+  if (!isUnset(cfg.trailingStopPct)) {
+    if (!isNumeric(cfg.trailingStopPct) || toNum(cfg.trailingStopPct) < 0) {
+      errors.push("TurboSniper: trailingStopPct must be ≥ 0");
+    }
+  }
+
+  // ---------------------------
+  // Leader timing (enabled → require sane numbers)
+  // ---------------------------
+  if (cfg.leaderTiming && cfg.leaderTiming.enabled) {
+    if (!(toNum(cfg.leaderTiming.preflightMs) > 0)) {
+      errors.push('TurboSniper: leaderTiming.preflightMs must be > 0 when enabled');
+    }
+    if (!(toNum(cfg.leaderTiming.windowSlots) >= 1)) {
+      errors.push('TurboSniper: leaderTiming.windowSlots must be ≥ 1 when enabled');
+    }
+  }
+
+  // Quote TTL (ms) > 0
+  if (!isUnset(cfg.quoteTtlMs)) {
+    if (!Number.isInteger(toNum(cfg.quoteTtlMs)) || toNum(cfg.quoteTtlMs) <= 0) {
+      errors.push('TurboSniper: quoteTtlMs must be a positive integer (ms)');
+    }
+  }
+
+  // ---------------------------
+  // Idempotency
+  // ---------------------------
+  if (cfg.idempotency) {
+    const v = cfg.idempotency;
+    if (!(toNum(v.ttlSec) > 0)) errors.push('TurboSniper: idempotency.ttlSec must be > 0');
+    if (typeof v.salt !== 'string' || !v.salt.length) {
+      errors.push('TurboSniper: idempotency.salt must be a non-empty string');
+    }
+    if (typeof v.resumeFromLast !== 'boolean') {
+      errors.push('TurboSniper: idempotency.resumeFromLast must be boolean');
+    }
+  }
+  // Legacy alias support (optional): idempotencyTtlSec
+  if (!isUnset(cfg.idempotencyTtlSec)) {
+    if (!Number.isInteger(toNum(cfg.idempotencyTtlSec)) || toNum(cfg.idempotencyTtlSec) <= 0) {
+      errors.push('TurboSniper: idempotencyTtlSec must be a positive integer (seconds)');
+    }
+  }
+
+  // ---------------------------
+  // Retry policy
+  // ---------------------------
+  if (cfg.retryPolicy) {
+    const rp = cfg.retryPolicy;
+    if (!(toNum(rp.max) >= 1)) errors.push('TurboSniper: retryPolicy.max must be ≥ 1');
+    if (!(toNum(rp.bumpCuStep) >= 0)) errors.push('TurboSniper: retryPolicy.bumpCuStep must be ≥ 0');
+    if (!(toNum(rp.bumpTipStep) >= 0)) errors.push('TurboSniper: retryPolicy.bumpTipStep must be ≥ 0');
+    if (!isUnset(rp.routeSwitch) && typeof rp.routeSwitch !== 'boolean') {
+      errors.push('TurboSniper: retryPolicy.routeSwitch must be boolean');
+    }
+    if (!isUnset(rp.rpcFailover) && typeof rp.rpcFailover !== 'boolean') {
+      errors.push('TurboSniper: retryPolicy.rpcFailover must be boolean');
+    }
+  }
+
+  // ---------------------------
+  // Parallel wallets
+  // ---------------------------
+  if (cfg.parallelWallets && cfg.parallelWallets.enabled) {
+    const { walletIds = [], splitPct = [], maxParallel } = cfg.parallelWallets;
+    if (!Array.isArray(walletIds) || walletIds.length === 0) {
+      errors.push('TurboSniper: parallelWallets.walletIds must be a non-empty array when enabled');
+    }
+    if (!Array.isArray(splitPct) || splitPct.length !== walletIds.length) {
+      errors.push('TurboSniper: parallelWallets.splitPct length must match walletIds length');
+    } else {
+      const sum = splitPct.reduce((a, b) => a + (Number(b) || 0), 0);
+      if (Math.abs(sum - 1) > 0.05) {
+        errors.push('TurboSniper: parallelWallets.splitPct values must sum to ~1.0');
+      }
+      splitPct.forEach((pct, i) => {
+        if (!(toNum(pct) > 0)) {
+          errors.push(`TurboSniper: parallelWallets.splitPct[${i}] must be > 0`);
+        }
+      });
+    }
+    if (!(toNum(maxParallel) >= 1 && toNum(maxParallel) <= walletIds.length)) {
+      errors.push('TurboSniper: parallelWallets.maxParallel must be between 1 and walletIds.length');
+    }
+  }
+
+  // ---------------------------
+  // Pump.fun & airdrops
+  // ---------------------------
+  if (cfg.pumpfun && cfg.pumpfun.enabled) {
+    const pf = cfg.pumpfun;
+    const tp = toNum(pf.thresholdPct);
+    if (!(tp >= 0 && tp <= 1)) errors.push('TurboSniper: pumpfun.thresholdPct must be between 0 and 1');
+    if (!(toNum(pf.minSolLiquidity) >= 0)) errors.push('TurboSniper: pumpfun.minSolLiquidity must be ≥ 0');
+    if (!(toNum(pf.cooldownSec) >= 0)) errors.push('TurboSniper: pumpfun.cooldownSec must be ≥ 0');
+  }
+
+  if (cfg.airdrops && cfg.airdrops.enabled) {
+    const ad = cfg.airdrops;
+    if (!(toNum(ad.minUsdValue) >= 0)) errors.push('TurboSniper: airdrops.minUsdValue must be ≥ 0');
+    if (!(toNum(ad.maxSellSlippagePct) >= 0 && toNum(ad.maxSellSlippagePct) <= 100)) {
+      errors.push('TurboSniper: airdrops.maxSellSlippagePct must be between 0 and 100');
+    }
+    if (!isUnset(ad.whitelistMints)) {
+      if (!Array.isArray(ad.whitelistMints)) {
+        errors.push('TurboSniper: airdrops.whitelistMints must be an array');
+      } else {
+        ad.whitelistMints.forEach((m, i) => {
+          if (typeof m !== 'string' || !m.trim()) {
+            errors.push(`TurboSniper: airdrops.whitelistMints[${i}] must be a non-empty string`);
+          }
+        });
+      }
+    }
+  }
+
+  // ---------------------------
+  // Private relay (bundle/tx)
+  // ---------------------------
+  if (cfg.privateRelay && cfg.privateRelay.enabled) {
+    const pr = cfg.privateRelay;
+    if (!Array.isArray(pr.urls) || pr.urls.length === 0) {
+      errors.push('TurboSniper: privateRelay.urls must contain at least one URL when enabled');
+    } else {
+      pr.urls.forEach((u, i) => {
+        if (typeof u !== 'string' || !u.trim()) {
+          errors.push(`TurboSniper: privateRelay.urls[${i}] must be a non-empty string`);
+        }
+      });
+    }
+    if (!isUnset(pr.mode) && !['bundle', 'tx'].includes(pr.mode)) {
+      errors.push('TurboSniper: privateRelay.mode must be either "bundle" or "tx"');
+    }
+  }
+
+  // ---------------------------
+  // Advanced sizing & probe
+  // ---------------------------
+  if (cfg.sizing) {
+    const s = cfg.sizing;
+    if (!isUnset(s.maxImpactPct) && !(toNum(s.maxImpactPct) > 0)) {
+      errors.push('TurboSniper: sizing.maxImpactPct must be > 0');
+    }
+    if (!isUnset(s.maxPoolPct)) {
+      const v = toNum(s.maxPoolPct);
+      if (!(v > 0 && v <= 1)) errors.push('TurboSniper: sizing.maxPoolPct must be between 0 and 1');
+    }
+    if (!isUnset(s.minUsd) && !(toNum(s.minUsd) >= 0)) {
+      errors.push('TurboSniper: sizing.minUsd must be ≥ 0');
+    }
+  }
+
+  if (cfg.probe && cfg.probe.enabled) {
+    const p = cfg.probe;
+    if (!(toNum(p.usd) > 0)) errors.push('TurboSniper: probe.usd must be > 0');
+    if (!(toNum(p.scaleFactor) > 1)) errors.push('TurboSniper: probe.scaleFactor must be > 1');
+    if (!(toNum(p.abortOnImpactPct) > 0)) errors.push('TurboSniper: probe.abortOnImpactPct must be > 0');
+    if (!(toNum(p.delayMs) >= 0)) errors.push('TurboSniper: probe.delayMs must be ≥ 0');
+  }
+
+  // ---------------------------
+  // CU/tip tuning & routing prefs
+  // ---------------------------
+  if (!isUnset(cfg.cuPriceMicroLamportsMin) && !(toNum(cfg.cuPriceMicroLamportsMin) >= 0)) {
+    errors.push('TurboSniper: cuPriceMicroLamportsMin must be ≥ 0');
+  }
+  if (!isUnset(cfg.cuPriceMicroLamportsMax) && !(toNum(cfg.cuPriceMicroLamportsMax) >= 0)) {
+    errors.push('TurboSniper: cuPriceMicroLamportsMax must be ≥ 0');
+  }
+  if (!isUnset(cfg.cuPriceMicroLamportsMin) && !isUnset(cfg.cuPriceMicroLamportsMax)) {
+    if (toNum(cfg.cuPriceMicroLamportsMax) < toNum(cfg.cuPriceMicroLamportsMin)) {
+      errors.push('TurboSniper: cuPriceMicroLamportsMax must be ≥ cuPriceMicroLamportsMin');
+    }
+  }
+
+  if (!isUnset(cfg.bundleStrategy) && !['topOfBlock', 'mid', 'nearEnd'].includes(cfg.bundleStrategy)) {
+    errors.push('TurboSniper: bundleStrategy must be one of topOfBlock|mid|nearEnd');
+  }
+  if (!isUnset(cfg.tipCurve) && !['flat', 'linear', 'expo'].includes(cfg.tipCurve)) {
+    errors.push('TurboSniper: tipCurve must be one of flat|linear|expo');
+  }
+
+  // cuPriceCurve / tipCurveCoefficients
+  if (cfg.cuPriceCurve !== undefined && cfg.cuPriceCurve !== null) {
+    const curve = cfg.cuPriceCurve;
+    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
+    if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
+      errors.push('TurboSniper: cuPriceCurve must be an array of numbers or an object with a coeffs array');
+    }
+  }
+  if (cfg.tipCurveCoefficients !== undefined && cfg.tipCurveCoefficients !== null) {
+    const curve = cfg.tipCurveCoefficients;
+    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
+    if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
+      errors.push('TurboSniper: tipCurveCoefficients must be an array of numbers or an object with a coeffs array');
+    }
+  }
+
+  // allowed/excluded DEXes must be string or array if provided
+  ["allowedDexes", "excludedDexes"].forEach((k) => {
+    if (cfg[k] !== undefined && !Array.isArray(cfg[k]) && typeof cfg[k] !== "string") {
+      errors.push(`TurboSniper: ${k} must be a comma-separated string or array`);
+    }
+  });
+
+  // Direct AMM fallback % guard (0–1) if provided
+  if (!isUnset(cfg.directAmmFirstPct)) {
+    const v = toNum(cfg.directAmmFirstPct);
+    if (!(v >= 0 && v <= 1)) {
+      errors.push('TurboSniper: directAmmFirstPct must be between 0 and 1');
+    }
+  }
+
+  // ---------------------------
+  // Post-buy watcher / Iceberg / Impact guards
+  // ---------------------------
+  if (cfg.postBuyWatch) {
+    const w = cfg.postBuyWatch;
+    if (!isUnset(w.durationSec) && !(toNum(w.durationSec) >= 0)) {
+      errors.push('TurboSniper: postBuyWatch.durationSec must be ≥ 0');
+    }
+    if (!isUnset(w.lpPullExit) && typeof w.lpPullExit !== 'boolean') {
+      errors.push('TurboSniper: postBuyWatch.lpPullExit must be boolean');
+    }
+    if (!isUnset(w.authorityFlipExit) && typeof w.authorityFlipExit !== 'boolean') {
+      errors.push('TurboSniper: postBuyWatch.authorityFlipExit must be boolean');
+    }
+  }
+
+  if (cfg.iceberg) {
+    const ic = cfg.iceberg;
+    if (!isUnset(ic.enabled) && typeof ic.enabled !== 'boolean') {
+      errors.push('TurboSniper: iceberg.enabled must be boolean');
+    }
+    if (!isUnset(ic.tranches) && (!Number.isInteger(toNum(ic.tranches)) || toNum(ic.tranches) < 1)) {
+      errors.push('TurboSniper: iceberg.tranches must be an integer ≥ 1');
+    }
+    if (!isUnset(ic.trancheDelayMs) && !(toNum(ic.trancheDelayMs) >= 0)) {
+      errors.push('TurboSniper: iceberg.trancheDelayMs must be ≥ 0');
+    }
+  }
+
+  if (!isUnset(cfg.impactAbortPct) && !(toNum(cfg.impactAbortPct) >= 0)) {
+    errors.push('TurboSniper: impactAbortPct must be ≥ 0');
+  }
+  if (!isUnset(cfg.dynamicSlippageMaxPct) && !(toNum(cfg.dynamicSlippageMaxPct) >= 0)) {
+    errors.push('TurboSniper: dynamicSlippageMaxPct must be ≥ 0');
+  }
+
+  // ---------------------------
+  // Dev/Creator heuristics + Feeds (advanced)
+  // ---------------------------
+  if (!isUnset(cfg.enableInsiderHeuristics) && typeof cfg.enableInsiderHeuristics !== 'boolean') {
+    errors.push('TurboSniper: enableInsiderHeuristics must be boolean');
+  }
+  if (!isUnset(cfg.maxHolderPercent)) {
+    const v = toNum(cfg.maxHolderPercent);
+    if (!isNumeric(v) || v < 0 || v > 100) errors.push('TurboSniper: maxHolderPercent must be between 0 and 100');
+  }
+  if (!isUnset(cfg.requireFreezeRevoked) && typeof cfg.requireFreezeRevoked !== 'boolean') {
+    errors.push('TurboSniper: requireFreezeRevoked must be boolean');
+  }
+  if (!isUnset(cfg.enableLaserStream) && typeof cfg.enableLaserStream !== 'boolean') {
+    errors.push('TurboSniper: enableLaserStream must be boolean');
+  }
+  if (!isUnset(cfg.multiWallet)) {
+    if (!Number.isInteger(toNum(cfg.multiWallet)) || toNum(cfg.multiWallet) < 1) {
+      errors.push('TurboSniper: multiWallet must be a positive integer');
+    }
+  }
+  if (!isUnset(cfg.alignToLeader) && typeof cfg.alignToLeader !== 'boolean') {
+    errors.push('TurboSniper: alignToLeader must be boolean');
+  }
+  if (!isUnset(cfg.riskLevels) && (typeof cfg.riskLevels !== 'object' || Array.isArray(cfg.riskLevels))) {
+    errors.push('TurboSniper: riskLevels must be an object if provided');
+  }
+  if (!isUnset(cfg.stopLossPercent)) {
+    const v = toNum(cfg.stopLossPercent);
+    if (!isNumeric(v) || v < 0 || v > 100) errors.push('TurboSniper: stopLossPercent must be between 0 and 100');
+  }
+  if (!isUnset(cfg.rugDelayBlocks)) {
+    const v = toNum(cfg.rugDelayBlocks);
+    if (!Number.isInteger(v) || v < 0) errors.push('TurboSniper: rugDelayBlocks must be an integer ≥ 0');
+  }
+
+  if (cfg.feeds) {
+    const feeds = cfg.feeds;
+    if (!isUnset(feeds.order)) {
+      if (!Array.isArray(feeds.order) || feeds.order.length === 0) {
+        errors.push('TurboSniper: feeds.order must be a non-empty array');
+      } else {
+        const allowed = ['ws', 'birdeye', 'onchain'];
+        feeds.order.forEach((s, i) => {
+          if (!allowed.includes(s)) errors.push(`TurboSniper: feeds.order[${i}] must be one of ${allowed.join(', ')}`);
+        });
+      }
+    }
+    if (!isUnset(feeds.ttlMs) && !(toNum(feeds.ttlMs) > 0)) {
+      errors.push('TurboSniper: feeds.ttlMs must be positive');
+    }
+  }
+
+  // ---------------------------
+  // RPC endpoints / URLs (best-effort type checks)
+  // ---------------------------
+  if (!isUnset(cfg.rpcEndpoints)) {
+    if (!(Array.isArray(cfg.rpcEndpoints) || typeof cfg.rpcEndpoints === 'string')) {
+      errors.push('TurboSniper: rpcEndpoints must be a comma-separated string or array of URLs');
+    }
+  }
+  if (!isUnset(cfg.privateRpcUrl) && typeof cfg.privateRpcUrl !== 'string') {
+    errors.push('TurboSniper: privateRpcUrl must be a string (URL)');
+  }
+  if (!isUnset(cfg.jitoRelayUrl) && typeof cfg.jitoRelayUrl !== 'string') {
+    errors.push('TurboSniper: jitoRelayUrl must be a string (URL)');
+  }
+
+  // ---------------------------
+  // DEX prefs already covered above
+  // ---------------------------
+  if (cfg.tpLadder !== undefined && cfg.tpLadder !== null && cfg.tpLadder !== "") {
+    const parts = Array.isArray(cfg.tpLadder)
+      ? cfg.tpLadder
+      : String(cfg.tpLadder).split(",").map((s) => s.trim()).filter(Boolean);
+    parts.forEach((p) => {
+      if (!isNumeric(p) || toNum(p) < 0 || toNum(p) > 100) {
+        errors.push("TurboSniper: tpLadder percentages must be numbers between 0 and 100");
+      }
+    });
+  }
+
+  return errors;
+}
+
+module.exports = validateTurboSniper;
+
 
 
 

@@ -151,7 +151,11 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote }         = require("./core/quoteHelper");
-const execTrade                = require("./core/tradeExecutorTurbo"); // <-- turbo executor
+// Import the turbo executor's `execTrade` helper from the wrapper.  The
+// default export is now a class (see core/tradeExecutorTurbo.js), so we
+// destructure the named export to retain function semantics.  Without
+// destructuring this would instead resolve to the class itself.
+const { execTrade }            = require("./core/tradeExecutorTurbo"); // <-- turbo executor
 const { passes }               = require("./core/passes");
 const { createSummary }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
@@ -809,6 +813,25 @@ async function turboSniperStrategy(botCfg = {}) {
         // Custom CU and tip curves (Turbo Sniper++)
         cuPriceCurve        : botCfg.cuPriceCurve,
         tipCurveCoefficients: botCfg.tipCurveCoefficients,
+
+        // -------------------------------------------------------------------
+        // Pass through advanced timing/tuning controls from the frontend.  The
+        // executor defines sensible defaults for these fields if they are
+        // undefined, but explicitly forwarding user‑provided values ensures
+        // configuration parity between the UI and backend.  Missing values are
+        // left undefined so destructuring in the executor falls back to its
+        // internal defaults without incurring extra overhead.  See
+        // backend/services/strategies/core/tradeExecutorTurbo.js for the
+        // corresponding defaults.
+
+        // Leader scheduling parameters (enabled, preflightMs, windowSlots)
+        leaderTiming    : botCfg.leaderTiming || undefined,
+        // Quote cache TTL in milliseconds (controls warm quote reuse)
+        quoteTtlMs      : botCfg.quoteTtlMs   || undefined,
+        // Retry policy for compute unit/tip bumps and route switching
+        retryPolicy     : botCfg.retryPolicy  || undefined,
+        // Parallel wallet filler configuration (opt‑in)
+        parallelWallets : botCfg.parallelWallets || undefined,
 
         // Detection timestamp used for lead‑time metrics.  For tick‑based
         // scanning we use the start of this phase as a proxy.  When pool

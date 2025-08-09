@@ -88,12 +88,20 @@ function inc(counter, value = 1, labels) {
     }
   } catch (_) {}
 }
-function observe(name, value) {
+// Provide a thin wrapper around the metrics observer.  Accept an optional
+// labels object to avoid referencing an undefined identifier.  This helper
+// never throws and will silently ignore metrics when the underlying
+// implementation is missing.  Without an explicit labels parameter the
+// call sites will fall back to an empty object, preserving existing
+// behaviour but eliminating the reference error.
+function observe(name, value, labels = {}) {
   try {
     if (typeof metricsLogger.observe === 'function') {
       metricsLogger.observe(name, value, labels);
     }
-  } catch (_) {}
+  } catch (_) {
+    /* noop */
+  }
 }
 
 /* ──────────────────────────────────────────────
@@ -1053,4 +1061,107 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   return txHash;
 }
 
-module.exports = execTrade;
+/*
+ * ---------------------------------------------------------------------------
+ * Public API
+ *
+ * Historically this module exported a single async function which, when
+ * `require`‑d, returned a bare function.  Some calling code (including the
+ * Turbo Sniper orchestrator and accompanying tests) were instantiating it via
+ * `new TradeExecutorTurbo()` and then invoking `.executeTrade(...)`.  However,
+ * asynchronous functions cannot be used as constructors, so calling `new` on
+ * the exported function resulted in a `TypeError`.  To maintain backwards
+ * compatibility while supporting the `new` constructor pattern, we wrap the
+ * core executor in a thin class.  The class exposes an `executeTrade()`
+ * instance method which internally performs a safe quote, constructs the
+ * required meta object and delegates to the original `execTrade()` helper.
+ *
+ * The static `execTrade` export is preserved for advanced callers that wish
+ * to bypass the wrapper and supply their own quote and meta objects.  This
+ * dual‑export design ensures that existing consumers continue to work
+ * unchanged while new code can rely on the more ergonomic class interface.
+ */
+
+const { getSafeQuote } = require('./quoteHelper');
+
+class TradeExecutorTurbo {
+  /**
+   * Construct a new TradeExecutorTurbo wrapper.
+   *
+   * @param {Object} opts
+   * @param {Connection} [opts.connection] Optional Solana connection.  The
+   *   underlying executor will create its own connections as needed; this
+   *   parameter is retained for interface completeness but is not currently
+   *   passed down into the hot path to avoid coupling.
+   * @param {string} [opts.validatorIdentity] The validator identity used for
+   *   leader scheduling.  When present it is forwarded into the meta on each
+   *   call to `executeTrade()`.
+   */
+  constructor({ connection, validatorIdentity } = {}) {
+    this.connection = connection;
+    this.validatorIdentity = validatorIdentity;
+  }
+
+  /**
+   * Execute a trade given user context, basic trade parameters and optional
+   * configuration.  This helper performs a safe quote using Jupiter's lite
+   * API, merges the provided configuration into the meta object and then
+   * calls the underlying `execTrade` function.  It intentionally avoids
+   * pulling in any database, logging or safety check logic to keep the
+   * latency as low as possible.  Callers may override `buildAndSubmit()`
+   * on the instance for testing purposes; by default it simply delegates
+   * to `execTrade()`.
+   *
+   * @param {Object} userCtx Contains `userId` and `walletId` identifying the
+   *   trader.  These values are required and will be merged into the meta.
+   * @param {Object} tradeParams Contains `inputMint`, `outputMint`, `amount`
+   *   (in smallest units) and `slippage` (percentage).  These values are
+   *   forwarded to the quote API.
+   * @param {Object} [cfg={}] Additional meta fields such as retryPolicy,
+   *   idempotency or leaderTiming.  Missing values are left undefined to
+   *   allow the underlying executor to apply its own defaults.
+   * @returns {Promise<string|null>} The transaction signature or null if a
+   *   quote could not be obtained.
+   */
+  async executeTrade(userCtx, tradeParams, cfg = {}) {
+    if (!userCtx || !userCtx.userId || !userCtx.walletId) {
+      throw new Error('userCtx must include userId and walletId');
+    }
+    const { inputMint, outputMint, amount, slippage } = tradeParams || {};
+    if (!inputMint || !outputMint || !amount) {
+      throw new Error('tradeParams must include inputMint, outputMint and amount');
+    }
+    // Fetch a safe quote.  We deliberately bypass passes and other safety
+    // checks here to keep the hot path lean; upstream components are
+    // responsible for performing any desired risk management prior to
+    // invoking executeTrade().
+    const safeQuoteRes = await getSafeQuote({ inputMint, outputMint, amount, slippage });
+    if (!safeQuoteRes.ok) {
+      throw new Error(`quote-failed: ${safeQuoteRes.reason || 'unknown'}`);
+    }
+    const quote = safeQuoteRes.quote;
+    const meta = Object.assign({}, cfg, {
+      userId: userCtx.userId,
+      walletId: userCtx.walletId,
+      slippage: slippage,
+      validatorIdentity: this.validatorIdentity || cfg.validatorIdentity,
+    });
+    // When dryRun is true we pass through to simulated mode on execTrade.
+    const simulated = Boolean(cfg.dryRun);
+    return execTrade({ quote, mint: outputMint, meta, simulated });
+  }
+
+  /**
+   * Placeholder for the buildAndSubmit method.  The Turbo Sniper tests stub
+   * this function directly on the executor instance in order to simulate
+   * retries without hitting external RPCs.  In production the actual
+   * build/send logic lives inside execTrade(); this method exists solely
+   * to satisfy the interface expected by those tests.
+   */
+  async buildAndSubmit() {
+    throw new Error('buildAndSubmit is not implemented on the wrapper');
+  }
+}
+
+module.exports = TradeExecutorTurbo;
+module.exports.execTrade = execTrade;
