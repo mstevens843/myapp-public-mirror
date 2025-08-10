@@ -1,7 +1,13 @@
 /* core/tradeExecutor.js
- * Arm-aware trade executor: uses in-memory DEK (no latency) when armed,
- * enforces Protected Mode when required, and falls back to legacy decrypt
- * only when allowed (non-protected wallets).
+ * Arm-aware trade executor (enhanced):
+ * - Uses in-memory DEK when armed; falls back to legacy decrypt when allowed.
+ * - Adds free Turbo-derived safety/UX features with ZERO extra RPC or UI inputs:
+ *     • Global kill switch (env KILL_SWITCH=1)
+ *     • Pre-send duplicate guard (DB lookback 60s)
+ *     • Deterministic idempotency TTL gate (+ in-memory result cache)
+ *     • Per-mint cool-off window after failures
+ *     • Tiny in-process caches for decimals and prices
+ *     • Optional auto-create TP/SL rule when tp/sl present (DB only)
  */
 
 const prisma = require("../../../prisma/prisma");
@@ -15,20 +21,75 @@ const getSolPrice           = getTokenPriceModule.getSolPrice;
 const { sendAlert }         = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 
-// 🔐 NEW: Arm session + envelope decrypt
-const { getDEK } = require("../../../armEncryption/sessionKeyCache");              // <-- ADD
-const { decryptPrivateKeyWithDEK } = require("../../../armEncryption/envelopeCrypto"); // <-- ADD
+// 🔐 Arm session + envelope decrypt
+const { getDEK } = require("../../../armEncryption/sessionKeyCache");
+const { decryptPrivateKeyWithDEK } = require("../../../armEncryption/envelopeCrypto");
 
-// 🔐 Legacy env-key encrypt/decrypt (your current helper)
+// 🔐 Legacy env-key encrypt/decrypt
 const { decrypt } = require("../../../middleware/auth/encryption");
+
+/* ======== ADD: zero-cost execution helpers (ported from Turbo) ======== */
+const crypto = require("crypto");
+
+// in-memory guards
+const _coolOffByMint = Object.create(null);          // mint -> ts
+const _idemCache     = new Map();                    // idKey -> { res:any, exp:number }
+const _idTtlGate     = new Map();                    // idKey -> expiresAtMs
+
+function idTtlCheckAndSet(idKey, ttlSec = 60) {
+  if (!idKey || !ttlSec) return true;
+  const now = Date.now();
+  const exp = _idTtlGate.get(idKey);
+  if (exp && exp > now) return false;
+  _idTtlGate.set(idKey, now + ttlSec * 1000);
+  return true;
+}
+
+let __KILLED = String(process.env.KILL_SWITCH || '').trim() === '1';
+function requireAlive() { if (__KILLED) { const e = new Error("KILL_SWITCH_ACTIVE"); e.code="KILL"; throw e; } }
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _idTtlGate.entries()) if (v <= now) _idTtlGate.delete(k);
+  for (const [m, ts] of Object.entries(_coolOffByMint)) if (now - ts > 10 * 60_000) delete _coolOffByMint[m];
+  for (const [k, v] of _idemCache.entries()) if (v?.exp && v.exp <= now) _idemCache.delete(k);
+}, 60_000).unref?.();
+
+function classifyError(msg = '') {
+  const s = String(msg).toLowerCase();
+  if (/slippage|insufficient (funds|liquidity)|slippage exceeded/.test(s)) return 'USER';
+  if (/blockhash|node is behind|timed? out|connection|429|too many requests|rate limit|account in use/.test(s)) return 'NET';
+  return 'UNKNOWN';
+}
+
+// tiny caches to avoid repeat lookups
+const _decCache   = new Map(); // mint -> { v, exp }
+const _priceCache = new Map(); // key -> { v, exp }
+
+async function getDecimalsCached(mint) {
+  const e = _decCache.get(mint); const now = Date.now();
+  if (e && e.exp > now) return e.v;
+  const v = await getMintDecimals(mint);
+  _decCache.set(mint, { v, exp: now + 3600_000 });
+  return v;
+}
 
 const SOL_MINT  = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
+async function getPriceCached(userId, mint) {
+  const key = `${userId||'anon'}:${mint}`; const e = _priceCache.get(key); const now = Date.now();
+  if (e && e.exp > now) return e.v;
+  const v = (await getTokenPriceModule(userId || null, mint)) || (mint === SOL_MINT ? await getSolPrice(userId) : null);
+  _priceCache.set(key, { v, exp: now + 30_000 });
+  return v;
+}
+/* ======== /ADD ======== */
+
 const toNum = (v) => (v === undefined || v === null ? null : Number(v));
 
 /**
- * 🔑 NEW: Arm-aware wallet loader
+ * 🔑 Arm-aware wallet loader
  * Priority:
  *  1) If wallet.encrypted (envelope v1) exists:
  *      - require an armed session (DEK present in memory) if wallet.isProtected = true
@@ -36,14 +97,14 @@ const toNum = (v) => (v === undefined || v === null ? null : Number(v));
  *  2) Else (legacy path):
  *      - decrypt(row.privateKey) → base58 → Keypair
  */
-async function loadWalletKeypairArmAware(userId, walletId) { // <-- REPLACE callers to pass userId too
+async function loadWalletKeypairArmAware(userId, walletId) {
   const wallet = await prisma.wallet.findUnique({
     where: { id: walletId },
     select: { id: true, encrypted: true, isProtected: true, privateKey: true }
   });
   if (!wallet) throw new Error("Wallet not found in DB.");
 
-  const aad = `user:${userId}:wallet:${walletId}`; // <-- AAD from context (DO NOT trust blob)
+  const aad = `user:${userId}:wallet:${walletId}`;
 
   // Envelope path
   if (wallet.encrypted && wallet.encrypted.v === 1) {
@@ -60,18 +121,16 @@ async function loadWalletKeypairArmAware(userId, walletId) { // <-- REPLACE call
         err.code = "AUTOMATION_NOT_ARMED";
         throw err;
       }
-      // If not protected and not required to Arm, we still cannot decrypt an envelope without KEK.
-      // So we *must* block here to avoid silently failing.
+      // Not protected & not required -> still cannot decrypt envelope without KEK.
       const err = new Error("Protected wallet requires an armed session");
       err.status = 401;
       err.code = "AUTOMATION_NOT_ARMED";
       throw err;
     }
 
-    // Fast path: decrypt with DEK in memory (no network/KMS)
+    // Fast path: decrypt with DEK (no network/KMS)
     const pkBuf = decryptPrivateKeyWithDEK(wallet.encrypted, dek, aad);
     try {
-      // Expect 64-byte secret key
       if (pkBuf.length !== 64) {
         throw new Error(`Unexpected secret key length: ${pkBuf.length}`);
       }
@@ -83,14 +142,12 @@ async function loadWalletKeypairArmAware(userId, walletId) { // <-- REPLACE call
 
   // Legacy path (string ciphertext -> plaintext base58 -> bytes)
   if (wallet.privateKey) {
-    // AAD is accepted by your helper but legacy colon-hex ignores it; safe to pass.
     const secretBase58 = decrypt(wallet.privateKey, { aad });
     try {
       const secretBytes = bs58.decode(secretBase58.trim());
       if (secretBytes.length !== 64) throw new Error("Invalid secret key length after legacy decryption");
       return Keypair.fromSecretKey(secretBytes);
     } finally {
-      // best-effort wipe local copies
       try { secretBase58.fill?.(0); } catch {}
     }
   }
@@ -108,18 +165,61 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     walletId,
     // optional MEV overrides on meta:
     priorityFeeLamports: metaPriority,
+    // ======== ADD: optional idempotency inputs (no frontend changes required) ========
+    idempotencyKey,
+    idempotencyTtlMs = 60_000,
   } = meta;
 
   if (!userId || !walletId) throw new Error("userId and walletId are required in meta");
 
   console.log("🧩 META RECEIVED:", { walletId, userId });
 
+  // ADD: global kill switch
+  requireAlive();
+
+  // ADD: pre-send duplicate guard (DB lookback 60s)
+  const dupRecent = await prisma.trade.findFirst({
+    where: {
+      userId, walletId, mint, strategy, type: "buy",
+      createdAt: { gte: new Date(Date.now() - 60_000) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { txHash: true },
+  });
+  if (dupRecent?.txHash) {
+    console.log("⛔ Pre-send duplicate guard hit -> returning existing tx:", dupRecent.txHash);
+    return dupRecent.txHash; // zero-cost short-circuit
+  }
+
+  // ADD: deterministic idempotency (auto key if none supplied)
+  const timeBucket = Math.floor(Date.now() / 30_000); // 30s bucket
+  const stableIdKey =
+    idempotencyKey ||
+    crypto.createHash("sha256")
+      .update([userId, walletId, strategy || "", mint || "", quote?.inAmount || "", timeBucket].join("|"))
+      .digest("hex");
+
+  if (!idTtlCheckAndSet(stableIdKey, Math.max(1, Math.floor(idempotencyTtlMs / 1000)))) {
+    const hit = _idemCache.get(stableIdKey);
+    if (hit && (!hit.exp || hit.exp > Date.now())) {
+      console.log("🧊 Idempotency TTL gate: returning cached result");
+      return hit.res || null;
+    }
+    console.log("🧊 Idempotency TTL gate: suppressed duplicate attempt");
+    return null;
+  }
+
+  // ADD: per-mint cool-off (7s default)
+  const COOL_OFF_MS = 7_000;
+  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < COOL_OFF_MS) {
+    throw new Error(`coolOff active for mint ${mint}`);
+  }
+
   // 🔑 LOAD KEYPAIR (Arm-aware)
   let wallet;
   try {
-    wallet = await loadWalletKeypairArmAware(userId, walletId); // <-- USE NEW LOADER
+    wallet = await loadWalletKeypairArmAware(userId, walletId);
   } catch (err) {
-    // Bubble up an HTTP-friendly 401 so your API layer can map it to the frontend (to pop the Arm modal)
     if (err.status === 401 || err.code === "AUTOMATION_NOT_ARMED") {
       err.expose = true;
       throw err;
@@ -143,6 +243,17 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   console.log("🛡️ Using MEV prefs:", { mevMode, shared, briberyAmount, priorityFeeLamports });
 
   let txHash = null;
+  // optional quorum wiring (env or meta)
+  const endpointsRaw = meta.rpcEndpoints || process.env.RPC_POOL_ENDPOINTS || "";
+  const endpoints = Array.isArray(endpointsRaw)
+    ? endpointsRaw
+    : String(endpointsRaw).split(",").map(s => s.trim()).filter(Boolean);
+  const rpcQuorum   = Number(meta.rpcQuorum || process.env.RPC_POOL_QUORUM || 1);
+  const rpcFanout   = Number(meta.rpcMaxFanout || process.env.RPC_POOL_MAX_FANOUT || endpoints.length || 1);
+  const rpcStagger  = Number(meta.rpcStaggerMs || process.env.RPC_POOL_STAGGER_MS || 50);
+  const rpcTimeout  = Number(meta.rpcTimeoutMs || process.env.RPC_POOL_TIMEOUT_MS || 10_000);
+  const useQuorum   = endpoints.length > 0 && (rpcQuorum > 1 || rpcFanout > 1);
+  const pool        = useQuorum ? new RpcPool(endpoints) : null;
   if (!simulated) {
     try {
       console.log("🔁 Executing live swap…");
@@ -152,30 +263,43 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         shared,
         priorityFee: priorityFeeLamports,
         briberyAmount,
+        // quorum injection (keeps tight loop clean)
+        privateRpcUrl: process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL,
+        skipPreflight: true,
+        sendRawTransaction: useQuorum
+          ? (raw, opts) => pool.sendRawTransactionQuorum(raw, {
+              quorum: rpcQuorum,
+              maxFanout: rpcFanout,
+              staggerMs: rpcStagger,
+              timeoutMs: rpcTimeout,
+              ...(opts || {}),
+            })
+          : undefined,
       });
       if (!txHash) throw new Error("swap-failed: executeSwap() returned null");
       trackPendingTrade(txHash, mint, strategy);
     } catch (err) {
+      _coolOffByMint[mint] = Date.now(); // ADD: start cooldown on any failure
       console.error("❌ Swap failed:", err.message);
       throw new Error(`swap-failed: ${err.message || err}`);
     }
+  } else {
+    // OPTIONAL: if you want dry-runs to be truly free, uncomment the next line:
+    // return { simulated: true };
   }
 
-  /* Enrichment */
+  /* Enrichment — switch to cached helpers to reduce lookups */
   let entryPriceUSD = null, usdValue = null, entryPrice = null, decimals = null;
   try {
-    const inDec  = await getMintDecimals(quote.inputMint);
-    const outDec = await getMintDecimals(quote.outputMint);
+    const inDec  = await getDecimalsCached(quote.inputMint);
+    const outDec = await getDecimalsCached(quote.outputMint);
     const inUi   = Number(quote.inAmount)  / 10 ** inDec;
     const outUi  = Number(quote.outAmount) / 10 ** outDec;
 
     decimals     = outDec;
     entryPrice   = inUi / outUi;
 
-    const baseUsd =
-      (await getTokenPriceModule(userId || null, quote.inputMint)) ||
-      (quote.inputMint === SOL_MINT ? await getSolPrice(userId) : null);
-
+    const baseUsd = await getPriceCached(userId, quote.inputMint);
     entryPriceUSD = baseUsd ? entryPrice * baseUsd : null;
     usdValue      = baseUsd ? +((quote.inAmount / 1e9) * baseUsd).toFixed(2) : null;
     console.log("📊 Enrichment done:", { entryPrice, entryPriceUSD, usdValue });
@@ -225,7 +349,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     })
   );
 
-  // Deduplicate recent trade
+  // Deduplicate recent trade (kept from original implementation)
   const recent = await prisma.trade.findFirst({
     where: {
       userId,
@@ -238,6 +362,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   });
   if (recent) {
     console.log(`⚠️ Duplicate trade detected within lookback window for mint ${mint}, skipping create`);
+    // Note: we already do a pre-send guard; this is a no-op safety.
     return txHash;
   }
 
@@ -271,6 +396,27 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       outputMint: quote.outputMint,
     },
   });
+
+  // ======== ADD: auto-create TP/SL rule if already supplied (no new inputs) ========
+  if (((Number(tp) || 0) !== 0 || (Number(sl) || 0) !== 0) && !["rotationbot", "rebalancer"].includes(String(strategy||"").toLowerCase())) {
+    try {
+      await prisma.tpSlRule.create({
+        data: {
+          id: uuid(),
+          mint, walletId, userId, strategy,
+          tp, sl, tpPercent, slPercent,
+          entryPrice,
+          force: false, enabled: true, status: "active", failCount: 0,
+        },
+      });
+    } catch (_) {}
+  }
+
+  // cache idempotency result on success
+  if (stableIdKey) {
+    const exp = Date.now() + Math.max(1, Number(idempotencyTtlMs));
+    _idemCache.set(stableIdKey, { res: txHash, exp });
+  }
 
   /* Alerts */
   const amountFmt = (quote.outAmount / 10 ** (decimals || 0)).toFixed(4);
@@ -320,8 +466,6 @@ async function executeTWAP(opts) {
   let lastTx = null;
   for (const ratio of slices) {
     let partialQuote = quote;
-    // Attempt to scale the in/out amounts proportionally.  Fallback to
-    // the original quote if BigInt math fails.
     try {
       if (quote && quote.inAmount != null && quote.outAmount != null) {
         const inAmt  = BigInt(quote.inAmount);
@@ -333,7 +477,6 @@ async function executeTWAP(opts) {
     } catch (_) {
       partialQuote = quote;
     }
-    // Call risk hooks if provided; ignore any errors or return values.
     try {
       const risk = meta && meta.riskPolicy;
       if (risk) {
@@ -341,12 +484,7 @@ async function executeTWAP(opts) {
         if (typeof risk.shouldExit === 'function') risk.shouldExit(meta.position || {}, {});
       }
     } catch {}
-    // Execute the partial order using the same live swap path.  Note
-    // that simulateBuy uses the same interface and will be chosen
-    // upstream by the strategy when DRY_RUN is enabled.
     lastTx = await liveBuy({ ...opts, quote: partialQuote });
-    // Introduce a small delay (100ms) to stagger slices.  Using
-    // setTimeout via Promise avoids blocking the event loop.
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return lastTx;

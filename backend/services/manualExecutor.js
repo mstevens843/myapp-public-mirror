@@ -28,6 +28,72 @@ const { closePositionFIFO } = require("./utils/analytics/fifoReducer")
 // }
 
 
+/* ===== Manual-exec: zero-cost safety/UX helpers ===== */
+const crypto = require("crypto");
+
+// in-memory guards
+const _idemCache = new Map();      // idKey -> { res:any, exp:number }
+const _idTtlGate = new Map();      // idKey -> expiresAtMs
+const _coolOffByMint = Object.create(null);  // mint -> ts
+let __KILLED = String(process.env.KILL_SWITCH || '').trim() === '1';
+
+function requireAlive() { if (__KILLED) { const e = new Error("KILL_SWITCH_ACTIVE"); e.code = "KILL"; throw e; } }
+function idTtlCheckAndSet(idKey, ttlSec = 60) {
+  if (!idKey || !ttlSec) return true;
+  const now = Date.now();
+  const exp = _idTtlGate.get(idKey);
+  if (exp && exp > now) return false;
+  _idTtlGate.set(idKey, now + ttlSec * 1000);
+  return true;
+}
+function classifyError(msg='') {
+  const s = String(msg).toLowerCase();
+  if (/slippage|insufficient (funds|liquidity)|slippage exceeded/.test(s)) return 'USER';
+  if (/blockhash|node is behind|timed? out|connection|429|too many requests|rate limit|account in use/.test(s)) return 'NET';
+  return 'UNKNOWN';
+}
+
+// tiny caches
+const _decCache = new Map();   // mint -> { v, exp }
+const _pxCache  = new Map();   // key  -> { v, exp }
+async function getDecimalsCached(mint) {
+  const now = Date.now(); const e = _decCache.get(mint);
+  if (e && e.exp > now) return e.v;
+  const v = await getMintDecimals(mint);
+  _decCache.set(mint, { v, exp: now + 3600_000 });
+  return v;
+}
+async function getPxCached(mint) {
+  const key = mint; const now = Date.now(); const e = _pxCache.get(key);
+  if (e && e.exp > now) return e.v;
+  const v = await getTokenPriceApp(mint);      // you already call this elsewhere
+  _pxCache.set(key, { v, exp: now + 30_000 });
+  return v;
+}
+
+// housekeeping
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _idTtlGate.entries()) if (v <= now) _idTtlGate.delete(k);
+  for (const [k, v] of _idemCache.entries()) if (v?.exp && v.exp <= now) _idemCache.delete(k);
+  for (const [m, ts] of Object.entries(_coolOffByMint)) if (now - ts > 10*60_000) delete _coolOffByMint[m];
+}, 60_000).unref?.();
+
+/* stable keys (no new UI): time-bucketed for manual clicks */
+function idKeyForBuy({ userId, walletId, mint, inAmount }) {
+  const bucket = Math.floor(Date.now() / 30_000); // 30s
+  return crypto.createHash('sha256')
+    .update([userId, walletId, 'BUY', mint, String(inAmount||0), bucket].join('|'))
+    .digest('hex');
+}
+function idKeyForSell({ userId, walletId, mint, kind, value }) {
+  const bucket = Math.floor(Date.now() / 30_000); // 30s
+  return crypto.createHash('sha256')
+    .update([userId, walletId, 'SELL', mint, kind, String(value||0), bucket].join('|'))
+    .digest('hex');
+}
+
+
 async function alertUser(userId, msg, tag = "Buy") {
   try {
     await sendAlert(userId, msg, tag);  // will handle prefs + chatId
@@ -127,6 +193,12 @@ async function performManualBuy(opts) {
 
   console.log("💾 performManualBuy received TP/SL:", { tp, sl, tpPercent, slPercent });
 
+  // ===== Guards =====
+  requireAlive();
+  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
+    throw new Error(`coolOff active for mint ${mint}`);
+  }
+
   /* ── wallet & prefs ────────────────────────────────────────────────────────── */
   let wallet;
   try {
@@ -135,12 +207,14 @@ async function performManualBuy(opts) {
     if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
     throw e;
   }  
-const prefs  = await getUserPreferencesByUserId(userId, context);
+  const prefs  = await getUserPreferencesByUserId(userId, context);
   /* slippage: explicit > saved slippage > saved max‑slippage > fallback arg */
-  const slippageToUse =
-    prefs?.slippage ??
-    prefs?.defaultMaxSlippage ??
-    slippageInput;
+  let slippageToUse =
+    (prefs?.slippage ?? prefs?.defaultMaxSlippage ?? slippageInput);
+  // clamp to user's max if provided
+  if (prefs?.defaultMaxSlippage != null) {
+    slippageToUse = Math.min(Number(slippageToUse), Number(prefs.defaultMaxSlippage));
+  }
   /* MEV / bribery / priority‑fee */
   const mevMode        = (prefs?.mevMode === "secure" ? "secure" : "fast");   // sanitise
   const briberyAmount  = prefs?.briberyAmount ?? 0;
@@ -193,6 +267,24 @@ const prefs  = await getUserPreferencesByUserId(userId, context);
     ? Math.floor(amountInUSDC * 1e6)   // USDC (6 dec)
     : Math.floor(amountInSOL * 1e9);   // SOL  (9 dec)
 
+  // ===== Dup guards (DB + TTL) =====
+  const dupRecent = await prisma.trade.findFirst({
+    where: {
+      userId, walletId, mint, strategy, type: "buy",
+      createdAt: { gte: new Date(Date.now() - 60_000) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { txHash: true },
+  });
+  if (dupRecent?.txHash) return { tx: dupRecent.txHash, message: "Duplicate prevented (recent buy)" };
+
+  const buyId = idKeyForBuy({ userId, walletId, mint, inAmount });
+  if (!idTtlCheckAndSet(buyId, 60)) {
+    const hit = _idemCache.get(buyId);
+    if (hit && (!hit.exp || hit.exp > Date.now())) return hit.res;
+    return { tx: null, message: "Suppressed duplicate click" };
+  }
+
   console.log("⚙️ Applied user prefs for manual buy:", {
     slippageInput,
     slippageToUse,
@@ -223,6 +315,7 @@ const prefs  = await getUserPreferencesByUserId(userId, context);
       briberyAmount,                          // lamports
     });
   } catch (err) {
+    _coolOffByMint[mint] = Date.now(); // start cool-off on any failure
     const msg = err?.message || "";
     if (msg.includes("insufficient lamports") || msg.includes("custom program error: 0x1")) {
       throw new Error("Not enough SOL.");
@@ -235,11 +328,11 @@ const prefs  = await getUserPreferencesByUserId(userId, context);
   if (!tx) throw new Error("❌ Swap transaction failed or returned null");
 
   /* price math ---------------------------------------------------------------- */
-  const decimals       = await getMintDecimals(mint);
+  const decimals       = await getDecimalsCached(mint);
   const entryPriceSOL  = (Number(quote.inAmount) * 10 ** decimals) / (Number(quote.outAmount) * 1e9);
-  const solPrice       = await getTokenPriceApp(SOL_MINT);
+  const solPrice       = await getPxCached(SOL_MINT);
   const entryPriceUSD  = solPrice ? +(entryPriceSOL * solPrice).toFixed(6) : null;
-  const tokenPrice     = await getTokenPriceApp(inputMint);
+  const tokenPrice     = await getPxCached(inputMint);
   const usdValue       = tokenPrice
     ? +((inAmount / 10 ** (inputMint === SOL_MINT ? 9 : 6)) * tokenPrice).toFixed(2)
     : null;
@@ -315,30 +408,31 @@ const prefs  = await getUserPreferencesByUserId(userId, context);
       });
     }
   }
-  /* alert -------------------------------------------------------------------- */
-const explorer  = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
-const tokenUrl  = `https://birdeye.so/token/${mint}`;
-const short     = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
-const time      = tsUTC();
 
-const alertMsg = `
+  // cache successful result for TTL window
+  _idemCache.set(buyId, { res: { tx, message: "Buy complete (cached)" }, exp: Date.now() + 60_000 });
+
+  /* alert -------------------------------------------------------------------- */
+  const explorer  = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
+  const tokenUrl  = `https://birdeye.so/token/${mint}`;
+  const short     = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+  const time      = tsUTC();
+
+  const alertMsg = `
 🛒 *${strategy} Buy Executed*
 
 🧾 *Mint:* \`${short}\`
 🔗 [View Token on Birdeye](${tokenUrl})
 💸 *In:* ${ amountInSOL != null ? `${fmt(amountInSOL, 3)} SOL` : `${fmt(amountInUSDC, 2)} USDC`
-  }  ≈ \`$${usdValue ?? "?"}\`
+    }  ≈ \`$${usdValue ?? "?"}\`
 📈 *Entry:* \`$${entryPriceUSD ?? "N/A"}\`
 🎯 *TP/SL:* \`${ tpPercent != null || slPercent != null
-      ? `+${tpPercent ?? "N/A"} % / -${slPercent ?? "N/A"} %` : "N/A"}\`
+        ? `+${tpPercent ?? "N/A"} % / -${slPercent ?? "N/A"} %` : "N/A"}\`
 👤 *Wallet:* \`${walletLabel}\`
 🕒 *Time:* ${time}
 📡 [View Transaction](${explorer})
 `.trim();
-await alertUser(userId, alertMsg, "Buy");
-// await sendAlert(chatId || "ui", alertMsg, "Buy");
-// await sendAlert(chatId || "ui", `🛒 *${strategy} Buy*\n[↗️ View](${explorer})`, "Buy");
-
+  await alertUser(userId, alertMsg, "Buy");
 
   /* return payload ----------------------------------------------------------- */
   return {
@@ -376,6 +470,12 @@ async function performManualSell(opts) {
     triggerType,
   } = opts;
 
+  // ===== Guards =====
+  requireAlive();
+  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
+    throw new Error(`coolOff active for mint ${mint}`);
+  }
+
   /* 🔕  Skip duplicate “Sell” alert if TP/SL already sent one */
   const skipAlert = triggerType === "tp" || triggerType === "sl";
 
@@ -403,19 +503,19 @@ async function performManualSell(opts) {
 
     /* same percent‑to‑raw logic as before */
     const totalRaw = rows.reduce((s,r)=>s+BigInt(r.outAmount),0n);
-   if (percent > 1) percent /= 100;
+    if (percent > 1) percent /= 100;
     let sellRaw = (totalRaw * BigInt(Math.round(percent*1e6))) / 1_000_000n;
     if (sellRaw===0n) throw new Error("Too little balance.");
 
     /* get an exit price so we still show PnL */
     const decimals = rows[0].decimals ?? 9;
-    const tokUsd   = await getTokenPriceApp(mint) ?? 0;
+    const tokUsd   = await getPxCached(mint) ?? 0;
     const exitPriceUSD = tokUsd;
-    const exitPrice    = tokUsd / (await getTokenPriceApp(SOL_MINT));
+    const exitPrice    = tokUsd / (await getPxCached(SOL_MINT));
     await closePositionFIFO({
-     userId,
-     mint,
-     walletId,
+      userId,
+      mint,
+      walletId,
       walletLabel,
       percent,
       removedAmount : Number(sellRaw),  // just bookkeeping
@@ -434,20 +534,21 @@ async function performManualSell(opts) {
 
   /* ── REAL sell continues below ──────────────────── */
   let wallet;
-try {
-  wallet = await loadWalletKeypairArmAware(userId, walletId);
-} catch (e) {
-  if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
-  throw e;
-}
-  const decimals = await getMintDecimals(mint);
+  try {
+    wallet = await loadWalletKeypairArmAware(userId, walletId);
+  } catch (e) {
+    if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
+    throw e;
+  }
+  const decimals = await getDecimalsCached(mint);
   if (percent > 1) percent /= 100;
 
   const prefs = await getUserPreferencesByUserId(userId, context);
-  const slippageToUse =
-    prefs?.slippage ??
-    prefs?.defaultMaxSlippage ??
-    slippage;
+  let slippageToUse =
+    (prefs?.slippage ?? prefs?.defaultMaxSlippage ?? slippage);
+  if (prefs?.defaultMaxSlippage != null) {
+    slippageToUse = Math.min(Number(slippageToUse), Number(prefs.defaultMaxSlippage));
+  }
   const mevMode        = prefs?.mevMode === "secure" ? "secure" : "fast";
   const briberyAmount  = prefs?.briberyAmount ?? 0;
   const priorityFeeToUse = prefs?.defaultPriorityFee ?? 0;
@@ -469,39 +570,47 @@ try {
   });
   if (!dbWallet) throw new Error("Wallet not in DB.");
 
-const rowsAll = await prisma.trade.findMany({
-  where: {
-    walletId: dbWallet.id,    // PRIMARY FILTER
-    mint,
-    strategy: isPaperTrader ? { in:["Paper Trader","paperTrader"] } : strategy,
-    ...(walletLabel && walletLabel !== "default" ? { walletLabel } : {})
-  },
-  orderBy: { timestamp: "asc" },
-});
+  const rowsAll = await prisma.trade.findMany({
+    where: {
+      walletId: dbWallet.id,    // PRIMARY FILTER
+      mint,
+      strategy: isPaperTrader ? { in:["Paper Trader","paperTrader"] } : strategy,
+      ...(walletLabel && walletLabel !== "default" ? { walletLabel } : {})
+    },
+    orderBy: { timestamp: "asc" },
+  });
 
-// Handle untracked (imported) tokens with missing entryPrice
-let entryPrice = null;
-let notes = null;
-if (rowsAll.length === 1) {
-  const trade = rowsAll[0];
-  const isUntracked = trade.source === "imported" || trade.entryPrice === null;
-  if (isUntracked) {
-    notes = "Untracked token";
-    entryPrice = null;
+  // Handle untracked (imported) tokens with missing entryPrice
+  let entryPrice = null;
+  let notes = null;
+  if (rowsAll.length === 1) {
+    const trade = rowsAll[0];
+    const isUntracked = trade.source === "imported" || trade.entryPrice === null;
+    if (isUntracked) {
+      notes = "Untracked token";
+      entryPrice = null;
+    }
   }
-}
   
- const rows = rowsAll.filter(r => BigInt(r.outAmount) > 0n);
+  const rows = rowsAll.filter(r => BigInt(r.outAmount) > 0n);
   if (!rows.length) throw new Error("No matching open-trade rows.");
 
-const totalRaw = rows.reduce((s, r) => s + BigInt(r.outAmount), 0n);
+  const totalRaw = rows.reduce((s, r) => s + BigInt(r.outAmount), 0n);
   let sellRaw    = (totalRaw * BigInt(Math.round(percent * 1e6))) / 1_000_000n;
   if (sellRaw === 0n) throw new Error("Too little balance.");
   console.log(`🧪 SELL CALC: totalRaw=${totalRaw}, percent=${percent}, sellRaw=${sellRaw}`);
 
   const walletBal = BigInt(await getTokenBalanceRaw(wallet.publicKey, mint));
   if (walletBal < sellRaw) sellRaw = walletBal;
-console.log(`🧪 SELL CALC after balance: walletBal=${walletBal}, final sellRaw=${sellRaw}`);
+  console.log(`🧪 SELL CALC after balance: walletBal=${walletBal}, final sellRaw=${sellRaw}`);
+
+  // ===== TTL idempotency for sell (percent) =====
+  const sellId = idKeyForSell({ userId, walletId, mint, kind: "pct", value: percent });
+  if (!idTtlCheckAndSet(sellId, 60)) {
+    const hit = _idemCache.get(sellId);
+    if (hit && (!hit.exp || hit.exp > Date.now())) return hit.res;
+    return { tx: null, message: "Suppressed duplicate click" };
+  }
 
   const slippageBps = Math.round(Number(slippageToUse) * 100);
 
@@ -512,15 +621,21 @@ console.log(`🧪 SELL CALC after balance: walletBal=${walletBal}, final sellRaw
     slippageBps,
   });
   if (!quote) throw new Error("No route.");
-const tx = await executeSwap({ quote, wallet, priorityFee: priorityFeeToUse, briberyAmount, shared, });  
-if (!tx) {
-await alertUser(userId, "❌ Sell failed", "Sell");
+  let tx;
+  try {
+    tx = await executeSwap({ quote, wallet, priorityFee: priorityFeeToUse, briberyAmount, shared, });
+  } catch (err) {
+    _coolOffByMint[mint] = Date.now();
+    throw err;
+  }
+  if (!tx) {
+    await alertUser(userId, "❌ Sell failed", "Sell");
     return;
   }
 
- const exitPriceSOL = (Number(quote.outAmount) * 10 ** decimals) /
-                      (Number(sellRaw)    * 1e9);const solUSD       = await getTokenPriceApp(SOL_MINT);
-const exitPriceUSD = solUSD ? +(exitPriceSOL * solUSD).toFixed(6) : null;
+  const exitPriceSOL = (Number(quote.outAmount) * 10 ** decimals) / (Number(sellRaw) * 1e9);
+  const solUSD       = await getPxCached(SOL_MINT);
+  const exitPriceUSD = solUSD ? +(exitPriceSOL * solUSD).toFixed(6) : null;
 
   const entryUsd  = rows[0].entryPriceUSD;
   let   finalTrig = triggerType;
@@ -548,36 +663,39 @@ const exitPriceUSD = solUSD ? +(exitPriceSOL * solUSD).toFixed(6) : null;
     decimals,
   });
 
-  // 🔍 Check if any positions left for this mint+strategy
-const stillOpen = await prisma.trade.findMany({
-  where: {
-    walletId: dbWallet.id,
-    mint,
-    strategy,
-    outAmount: { gt: 0 }
-  }
-});
+  // cache success
+  _idemCache.set(sellId, { res: { tx, message: "Sell complete (cached)" }, exp: Date.now() + 60_000 });
 
-if (stillOpen.length === 0) {
-  console.log(`🧹 No open trades left for ${mint}, deleting TP/SL rules...`);
-  await prisma.tpSlRule.deleteMany({
+  // 🔍 Check if any positions left for this mint+strategy
+  const stillOpen = await prisma.trade.findMany({
     where: {
-      userId,
       walletId: dbWallet.id,
       mint,
-      strategy
+      strategy,
+      outAmount: { gt: 0 }
     }
   });
-}
-const tokenUrl = `https://birdeye.so/token/${mint}`;
-const short    = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
-const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
-const pctSold  = (percent * 100).toFixed(0);
-const gotSOL   = fmt(Number(quote.outAmount) / 1e9, 4);
-const gotUSD   = solUSD ? fmt(gotSOL * solUSD, 2) : "?";
-const time     = tsUTC();
 
-const alertMsg = `
+  if (stillOpen.length === 0) {
+    console.log(`🧹 No open trades left for ${mint}, deleting TP/SL rules...`);
+    await prisma.tpSlRule.deleteMany({
+      where: {
+        userId,
+        walletId: dbWallet.id,
+        mint,
+        strategy
+      }
+    });
+  }
+  const tokenUrl = `https://birdeye.so/token/${mint}`;
+  const short    = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+  const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
+  const pctSold  = (percent * 100).toFixed(0);
+  const gotSOL   = fmt(Number(quote.outAmount) / 1e9, 4);
+  const gotUSD   = solUSD ? fmt(gotSOL * solUSD, 2) : "?";
+  const time     = tsUTC();
+
+  const alertMsg = `
 💼 *${strategy} Sell Executed*  (${pctSold}%)
 
 🧾 *Mint:* \`${short}\`
@@ -590,9 +708,9 @@ const alertMsg = `
 📡 [View Transaction](${explorer})
 `.trim();
 
- if (!skipAlert) {
-await alertUser(userId, alertMsg, "Sell");
- }
+  if (!skipAlert) {
+    await alertUser(userId, alertMsg, "Sell");
+  }
 }
 
 
@@ -613,16 +731,22 @@ async function performManualSellByAmount(opts) {
     triggerType,
   } = opts;
 
-   const skipAlert = triggerType === "tp" || triggerType === "sl";
+  // ===== Guards =====
+  requireAlive();
+  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
+    throw new Error(`coolOff active for mint ${mint}`);
+  }
 
-let wallet;
-try {
-  wallet = await loadWalletKeypairArmAware(userId, walletId);
-} catch (e) {
-  if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
-  throw e;
-}
-  const decimals = await getMintDecimals(mint);
+  const skipAlert = triggerType === "tp" || triggerType === "sl";
+
+  let wallet;
+  try {
+    wallet = await loadWalletKeypairArmAware(userId, walletId);
+  } catch (e) {
+    if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
+    throw e;
+  }
+  const decimals = await getDecimalsCached(mint);
   let   rawAmount = BigInt(Math.floor(uiAmount * 10 ** decimals));
   if (rawAmount <= 0n) throw new Error("Amount too low.");
 
@@ -645,25 +769,26 @@ try {
     orderBy: { timestamp: "asc" }
   });
 
-// Handle untracked (imported) tokens with missing entryPrice
-let entryPrice = null;
-let notes = null;
-if (rowsAll.length === 1) {
-  const trade = rowsAll[0];
-  const isUntracked = trade.source === "imported" || trade.entryPrice === null;
-  if (isUntracked) {
-    notes = "Untracked token";
-    entryPrice = null;
+  // Handle untracked (imported) tokens with missing entryPrice
+  let entryPrice = null;
+  let notes = null;
+  if (rowsAll.length === 1) {
+    const trade = rowsAll[0];
+    const isUntracked = trade.source === "imported" || trade.entryPrice === null;
+    if (isUntracked) {
+      notes = "Untracked token";
+      entryPrice = null;
+    }
   }
-}
 
   const rows = rowsAll.filter(r => BigInt(r.outAmount) > 0n);
 
   const prefs = await getUserPreferencesByUserId(userId, context);
-  const slippageToUse =
-    prefs?.slippage ??
-    prefs?.defaultMaxSlippage ??
-    slippage;
+  let slippageToUse =
+    (prefs?.slippage ?? prefs?.defaultMaxSlippage ?? slippage);
+  if (prefs?.defaultMaxSlippage != null) {
+    slippageToUse = Math.min(Number(slippageToUse), Number(prefs.defaultMaxSlippage));
+  }
   const mevMode        = prefs?.mevMode === "secure" ? "secure" : "fast";
   const briberyAmount  = prefs?.briberyAmount ?? 0;
   const priorityFeeToUse = prefs?.defaultPriorityFee ?? 0;
@@ -678,6 +803,14 @@ if (rowsAll.length === 1) {
     briberyAmount,
   });
 
+  // TTL gate for sell-by-amount clicks
+  const sellId = idKeyForSell({ userId, walletId, mint, kind: "amt", value: uiAmount });
+  if (!idTtlCheckAndSet(sellId, 60)) {
+    const hit = _idemCache.get(sellId);
+    if (hit && (!hit.exp || hit.exp > Date.now())) return hit.res;
+    return { tx: null, message: "Suppressed duplicate click" };
+  }
+
   const slippageBps = Math.round(Number(slippageToUse) * 100);
 
   const quote = await getSwapQuote({
@@ -688,17 +821,23 @@ if (rowsAll.length === 1) {
   });
   if (!quote) throw new Error("No route.");
 
-  const tx = await executeSwap({
-    quote,
-    wallet,
-    shared,
-    priorityFee: priorityFeeToUse,
-    briberyAmount,
-  });
+  let tx;
+  try {
+    tx = await executeSwap({
+      quote,
+      wallet,
+      shared,
+      priorityFee: priorityFeeToUse,
+      briberyAmount,
+    });
+  } catch (err) {
+    _coolOffByMint[mint] = Date.now();
+    throw new Error("Sell-amount tx failed.");
+  }
   if (!tx) throw new Error("Sell-amount tx failed.");
 
   const exitPriceSOL = (Number(quote.outAmount) * 10 ** decimals) / (Number(rawAmount) * 1e9);
-  const solUSD       = await getTokenPriceApp(SOL_MINT);
+  const solUSD       = await getPxCached(SOL_MINT);
   const exitPriceUSD = solUSD ? +(exitPriceSOL * solUSD).toFixed(6) : null;
 
   const entryUsd  = rows[0].entryPriceUSD;
@@ -726,15 +865,18 @@ if (rowsAll.length === 1) {
     decimals,
   });
 
-const tokenUrl = `https://birdeye.so/token/${mint}`;
-const short    = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
-const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
-const soldAmount = fmt(uiAmount, 4);
-const gotSOL   = fmt(Number(quote.outAmount) / 1e9, 4);
-const gotUSD   = solUSD ? fmt(gotSOL * solUSD, 2) : "?";
-const time     = tsUTC();
+  // cache success
+  _idemCache.set(sellId, { res: { tx, message: "Sell complete (cached)" }, exp: Date.now() + 60_000 });
 
-const alertMsg = `
+  const tokenUrl = `https://birdeye.so/token/${mint}`;
+  const short    = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+  const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
+  const soldAmount = fmt(uiAmount, 4);
+  const gotSOL   = fmt(Number(quote.outAmount) / 1e9, 4);
+  const gotUSD   = solUSD ? fmt(gotSOL * solUSD, 2) : "?";
+  const time     = tsUTC();
+
+  const alertMsg = `
 💼 *${strategy} Sell Executed*  (${soldAmount} tokens)
 
 🧾 *Mint:* \`${short}\`
@@ -747,9 +889,9 @@ const alertMsg = `
 📡 [View Transaction](${explorer})
 `.trim();
 
- if (!skipAlert) {
-await alertUser(userId, alertMsg,  "Sell");
- }
+  if (!skipAlert) {
+    await alertUser(userId, alertMsg,  "Sell");
+  }
 }
 
 

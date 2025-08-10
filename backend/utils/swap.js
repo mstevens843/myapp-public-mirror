@@ -106,6 +106,11 @@ async function executeSwap({
   // NEW knobs (optional)
   computeUnitPriceMicroLamports,
   tipLamports,
+  // quorum / routing (optional – parity with turbo)
+  privateRpcUrl,
+  skipPreflight = false,
+  sendRawTransaction,
+  broadcastRawTransaction, // kept for symmetry, not used here
 }) {
   try {
     // Respect new knobs when present; fallback to legacy names.
@@ -145,9 +150,24 @@ async function executeSwap({
     }
 
     transaction.sign([wallet]);
+    // try to expose sig hint if available (quorum sender can use it)
+    let expectedSig = null;
+    try {
+      const s = (transaction.signatures && transaction.signatures[0])
+        ? (transaction.signatures[0].signature || transaction.signatures[0])
+        : null;
+      if (s) expectedSig = bs58.encode(s);
+    } catch (_) {}
+
     const serialized = transaction.serialize();
-    const signature  = await connection.sendRawTransaction(serialized);
-    await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+    const conn = privateRpcUrl ? new Connection(privateRpcUrl, "confirmed") : connection;
+    const sendFn = typeof sendRawTransaction === 'function'
+      ? sendRawTransaction
+      : conn.sendRawTransaction.bind(conn);
+
+    let signature = await sendFn(serialized, { skipPreflight, sigHint: expectedSig });
+    if (typeof signature !== 'string' && expectedSig) signature = expectedSig;
+   await conn.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
     return signature;
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
