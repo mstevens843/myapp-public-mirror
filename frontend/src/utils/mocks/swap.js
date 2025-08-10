@@ -84,6 +84,9 @@ async function executeSwapTurbo({
   briberyAmount = 0,
   privateRpcUrl,
   skipPreflight = true,
+  // quorum/rpc overrides
+  sendRawTransaction,
+  broadcastRawTransaction,
   computeUnitPriceMicroLamports,
   tipLamports,
 }) {

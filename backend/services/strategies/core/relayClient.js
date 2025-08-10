@@ -91,29 +91,25 @@ class RelayClient {
             throw new Error(`HTTP ${res.status}`);
           }
           const data = await res.json();
-          return { url, data };
+          return { url, data, ok: true };;
         } catch (err) {
-          return { url, error: err };
+          return { url, error: err, ok: false };
         }
       })();
     });
 
-    // Wait for the first fulfilled promise that did not return an error.
-    let winner = null;
-    let results = [];
-    for (const task of tasks) {
-      const result = await task;
-      results.push(result);
-      if (result && !result.error && result.data) {
-        winner = result;
-        break;
-      }
-    }
-
-    // If no relay responded successfully then return a graceful error.
-    if (!winner) {
+    // resolve on FIRST success (true fastest-wins)
+    let winner;
+    try {
+      winner = await Promise.any(
+        tasks.map(p => p.then(r => {
+          if (!r || !r.ok) throw r?.error || new Error('relay failed');
+          return r;
+        }))
+      );
+    } catch (_) {
       return { error: 'No relay reachable' };
-    }
+   }
 
     // record which relay won
     if (this.metrics && typeof this.metrics.increment === 'function') {

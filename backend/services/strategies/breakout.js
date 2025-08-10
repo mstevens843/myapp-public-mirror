@@ -111,7 +111,15 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote } = require("./core/quoteHelper");
-const { liveBuy, simulateBuy } = require("./core/tradeExecutor");
+// Extend tradeExecutor imports with additional execution shapes.  These
+// functions preserve the existing single‑shot semantics when
+// executionShape is undefined.
+const {
+  liveBuy,
+  simulateBuy,
+  executeTWAP,
+  executeAtomicScalp,
+} = require("./core/tradeExecutor");
 const { passes, explainFilterFail }               = require("./core/passes");
 const { createSummary, tradeExecuted }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
@@ -218,15 +226,16 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
     log("loop", `\nBreakout Tick @ ${new Date().toLocaleTimeString()}`);
     lastTickTimestamps[botId] = Date.now();
 
-    // If enabled by the UI, precompute custom breakout signals.  This
-    // asynchronous call is intentionally fire‑and‑forget; errors are
-    // logged but do not interrupt the main loop.  Real
-    // implementations should populate a cache that the strategy can
-    // consume downstream.
-    if (botCfg.useSignals) {
-      breakoutSignals(botCfg).catch((err) => {
-        log("error", `signal precompute failed: ${err.message || err}`);
-      });
+    // If enabled by the UI, precompute custom breakout signals.  The
+    // helper is synchronous and should be wrapped in a try/catch to
+    // avoid disrupting the main loop.  Configuration is not passed
+    // into the signal generator; it should operate on cached state.
+    if (botCfg?.useSignals) {
+      try {
+        breakoutSignals({});
+      } catch (_) {
+        /* swallow errors silently to preserve loop integrity */
+      }
     }
 
     /* NEW: stop instantly if we already blew past the fail cap */
@@ -388,10 +397,11 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "breakout" },
           // NEW: allow the UI to specify a custom execution shape; if
-          // undefined, the tradeExecutor will default to the standard
-          // single‑shot swap.  Supported values include "TWAP" and
-          // "ATOMIC" (case‑insensitive).
-          executionShape : botCfg.executionShape,
+          // undefined or falsy, the tradeExecutor will default to the
+          // standard single‑shot swap.  Supported values include
+          // "TWAP" and "ATOMIC" (case‑insensitive).  We coerce
+          // undefined to an empty string to aid downstream checks.
+          executionShape : botCfg?.executionShape || "",
           // NEW: attach the breakout risk policy so future executors
           // can consult it between fills.  Unused by default.
           riskPolicy     : breakoutRisk,
@@ -410,9 +420,17 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
       }
       snipedMints.add(mint);
 
-          // txHash = await execBuy({ quote, wallet, mint, meta });
-          txHash = await execBuy({ quote, mint, meta });
-          console.log("🎯 execBuy returned:", txHash);
+          // Choose an executor based on the requested execution shape.  When
+          // unspecified, fall back to a dry run or live swap based on the
+          // global DRY_RUN flag.  TWAP performs a simple laddered fill
+          // while ATOMIC executes an immediate scalp.
+          const exec = meta.executionShape === "TWAP"
+            ? executeTWAP
+            : meta.executionShape === "ATOMIC"
+            ? executeAtomicScalp
+            : (DRY_RUN ? simulateBuy : liveBuy);
+          txHash = await exec({ quote, mint, meta });
+          console.log("🎯 exec returned:", txHash);
         } catch (err) {
           const errMsg = err?.message || JSON.stringify(err) || String(err);
 

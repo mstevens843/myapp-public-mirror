@@ -19,7 +19,13 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote } = require("./core/quoteHelper");
-const { liveBuy, simulateBuy } = require("./core/tradeExecutor");
+// Include extended execution helpers for TWAP and atomic scalping
+const {
+  liveBuy,
+  simulateBuy,
+  executeTWAP,
+  executeAtomicScalp,
+} = require("./core/tradeExecutor");
 const { passes, explainFilterFail }               = require("./core/passes");
 const { createSummary, tradeExecuted }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
@@ -113,14 +119,16 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
    log("loop", `\n Trend Follower Tick @ ${new Date().toLocaleTimeString()}`);
    lastTickTimestamps[botId] = Date.now();
 
-   // Optionally precompute trend signals.  This runs asynchronously
-   // without blocking the tick loop; errors are logged.  When
-   // botCfg.useSignals is truthy the stubbed helper will return
-   // immediately, ready for future enhancements.
-   if (botCfg.useSignals) {
-     trendSignals(botCfg).catch((err) => {
-       log("error", `signal precompute failed: ${err.message || err}`);
-     });
+   // Optionally precompute trend signals.  Invoking the signal
+   // generator synchronously ensures that any thrown errors are
+   // caught locally rather than bubbling into the loop.  No cfg is
+   // passed to encourage the helper to consult internal caches.
+   if (botCfg?.useSignals) {
+     try {
+       trendSignals({});
+     } catch (_) {
+       /* suppress errors from the signal generator */
+     }
    }
    log("info", `[CONFIG] DELAY_MS: ${DELAY_MS}, PRIORITY_FEE: ${PRIORITY_FEE}, MAX_SLIPPAGE: ${MAX_SLIPPAGE}`);
    log("info", `[CONFIG] pumpWin: ${pumpWin}, volWin: ${volWin}`);
@@ -351,8 +359,10 @@ log("info", `[🐛 TP/SL DEBUG] tp=${botCfg.takeProfit ?? "null"}, sl=${botCfg.s
           tp              : botCfg.takeProfit,
           sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "trendFollower" },
-          // NEW: allow specifying a custom execution shape (e.g. "TWAP")
-          executionShape  : botCfg.executionShape,
+          // NEW: allow specifying a custom execution shape (e.g. "TWAP").
+          // Undefined or falsy shapes default to a single‑shot swap.  We
+          // coerce falsy values to an empty string for easier comparisons.
+          executionShape  : botCfg?.executionShape || "",
           // NEW: attach trend follower risk policy for future use
           riskPolicy      : trendRisk,
         };
@@ -371,9 +381,14 @@ log("info", `[🐛 TP/SL DEBUG] tp=${botCfg.takeProfit ?? "null"}, sl=${botCfg.s
       }
       snipedMints.add(mint);
           
-          // txHash = await execBuy({ quote, wallet, mint, meta });
-          txHash = await execBuy({ quote, mint, meta });
-          console.log("🎯 execBuy returned:", txHash);
+          // Choose appropriate executor based on requested execution shape.
+          const exec = meta.executionShape === "TWAP"
+            ? executeTWAP
+            : meta.executionShape === "ATOMIC"
+            ? executeAtomicScalp
+            : (DRY_RUN ? simulateBuy : liveBuy);
+          txHash = await exec({ quote, mint, meta });
+          console.log("🎯 exec returned:", txHash);
         } catch (err) {
           const errMsg = err?.message || JSON.stringify(err) || String(err);
 

@@ -48,15 +48,37 @@ const _coolOffByMint = Object.create(null);
 const _idemCache = new Map();
 
 // --- Error classification (NET / USER / UNKNOWN) ---
-const NET_ERRS = [/blockhash/i, /node is behind/i, /timed? out/i,
-/connection/i, /getblockheight timed out/i];
-const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i,
-/account in use/i, /slippage exceeded/i];
+const NET_ERRS  = [/blockhash/i, /node is behind/i, /timed? out/i, /connection/i, /getblockheight timed out/i, /account in use/i];
+const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i, /slippage exceeded/i];
+
 function classifyError(msg = '') {
   const lower = String(msg).toLowerCase();
   if (USER_ERRS.some(r => r.test(lower))) return 'USER';
   if (NET_ERRS.some(r => r.test(lower)))  return 'NET';
   return 'UNKNOWN';
+}
+
+const RETRY_PLAN = {
+  NET:     { refreshQuote: true, rotateRpcAt: 4, switchRouteAt: 3, bumpFee: true },
+  UNKNOWN: { refreshQuote: true, rotateRpcAt: Infinity, switchRouteAt: Infinity, bumpFee: false },
+  USER:    { refreshQuote: false, rotateRpcAt: Infinity, switchRouteAt: Infinity, bumpFee: false },
+};
+
+
+// ── ultra-light kill switch ──
+let __KILLED = false;
+function setKill(v) { __KILLED = !!v; }
+function requireAlive() { if (__KILLED) { const e = new Error('KILL_SWITCH_ACTIVE'); e.code='KILL'; throw e; }}
+
+// ── per-minute token bucket ──
+const __BUCKET = new Map(); // key -> {ts, used}
+function takeBudget(key, units, limitPerMin) {
+  if (!limitPerMin) return true;
+  const now = Date.now();
+  let b = __BUCKET.get(key);
+  if (!b || now - b.ts > 60_000) b = { ts: now, used: 0 };
+  if (b.used + units > limitPerMin) return false;
+  b.used += units; b.ts = now; __BUCKET.set(key, b); return true;
 }
 
 const {
@@ -94,7 +116,7 @@ const idempotencyStore = require("../../../utils/idempotencyStore"); // existing
 const RelayClient = require('./relays/relayClient');                 // new abstraction (feature-flag)
 const CoreIdemStore = require('./idempotencyStore');                 // crash-safe resume window (disk-backed)
 const { sizeTrade } = require('./liquiditySizer');                   // liquidity-aware sizing
-const { performProbe } = require('./probeBuyer');                    // micro-buy then scale
+// const { performProbe } = require('./probeBuyer');                    // micro-buy then scale
 
 //   Arm / envelope-crypto helpers
 const { getDEK } = require("../../../armEncryption/sessionKeyCache");
@@ -102,6 +124,7 @@ const {
   decryptPrivateKeyWithDEK,
 } = require("../../../armEncryption/envelopeCrypto");
 const { decrypt } = require("../../../middleware/auth/encryption");
+const sleep = (ms)=> new Promise(r=>setTimeout(r, ms));
 
 //   Ghost utilities
 const {
@@ -264,11 +287,12 @@ async function loadWalletKeypairArmAware(userId, walletId) {
  * a compute unit price in microLamports. Also returns any configured Jito
  * tip (lamports).
  */
-function getPriorityFee(cfg = {}, attempt = 0) {
+function getPriorityFee(cfg = {}, attempt = 0, bumps = {}) {
   const auto = !!cfg.autoPriorityFee;
   const min = Number(cfg.cuPriceMicroLamportsMin ?? 0) || 0;
   const max = Number(cfg.cuPriceMicroLamportsMax ?? min) || min;
   let cuMicro = 0;
+  let tipLamports = Math.max(0, Number(cfg.jitoTipLamports || 0) || 0);
   if (auto) {
     if (max > min) {
       const steps = 3;
@@ -278,9 +302,11 @@ function getPriorityFee(cfg = {}, attempt = 0) {
       cuMicro = min;
     }
   } else {
-    cuMicro = Number(cfg.priorityFeeLamports || 0) || 0; // treat as microLamports
+    const baseCu = Number(cfg.priorityFeeLamports || 0) || 0; // microLamports
+    const cuBump = Math.max(0, Number(bumps.bumpCuStep || 0)) * attempt;
+    cuMicro = baseCu + cuBump;
+    tipLamports += Math.max(0, Number(bumps.bumpTipStep || 0)) * attempt;
   }
-  const tipLamports = Math.max(0, Number(cfg.jitoTipLamports || 0) || 0);
   return { computeUnitPriceMicroLamports: Math.max(0, Math.floor(cuMicro)), tipLamports };
 }
 
@@ -361,6 +387,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     // NEW: retry + ttl
     quoteTtlMs = 600,
     retryPolicy = { max: 3, bumpCuStep: 2000, bumpTipStep: 1000, routeSwitch: true, rpcFailover: true },
+  rpcQuorum = 1,
+  rpcMaxFanout,
+  rpcStaggerMs = 50,
+  rpcTimeoutMs = 10_000,
 
     // routing flags remain same
     multiRoute,
@@ -417,6 +447,15 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     fallbackQuoteLatencyMs,
   } = meta;
 
+
+  if (autoPriorityFee && cuPriceMicroLamportsMax && cuPriceMicroLamportsMin &&
+    cuPriceMicroLamportsMax < cuPriceMicroLamportsMin) {
+  throw new Error('invalid CU price range: max < min');
+}
+if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
+  throw new Error('invalid quorum: quorum > maxFanout');
+}
+
   // --- Hot path metrics instrumentation ---
   const _hotStart = Date.now();
   let _quoteStart = Date.now();
@@ -462,6 +501,16 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   }
 
   const wallet = await loadWalletKeypairArmAware(userId, walletId);
+  // kill switch & budget guard (invisible to user)
+  requireAlive();
+  const notionalUsd = Number(meta?.notionalUsd || 0);
+  const perMinCap  = Number(meta?.limits?.perMinuteUsd || 0);
+  const bucketKey  = `${userId}:${walletId}`;
+  if (!takeBudget(bucketKey, Math.max(0, notionalUsd), perMinCap)) {
+    const e = new Error('BUDGET_EXCEEDED');
+    e.code = 'BUDGET';
+    throw e;
+  }
 
   // pick RPC for this attempt
   let currentRpcUrl = privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL ||
@@ -479,17 +528,20 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   } else if (typeof rpcEndpoints === 'string' && rpcEndpoints.trim()) {
     endpoints = rpcEndpoints.split(',').map(s => s.trim()).filter(Boolean);
   }
-  if (rpcFailover && endpoints.length >= 1) {
-    rpcPool = new RpcPool(endpoints);
-  }
+ if ((rpcFailover || Number(rpcQuorum) > 1) && endpoints.length >= 1) {
+   rpcPool = new RpcPool(endpoints, metricsLogger);
+ }
 
   // helper: refresh recent blockhash on primary (pre-send)
   async function _preSendRefresh() {
-    try {
-      await conn.getLatestBlockhash('confirmed');
-      metricsLogger.recordBlockhashRefresh?.(conn._rpcEndpoint || 'primary');
-    } catch (_) { /* ignore */ }
-  }
+  try {
+    const c = getCachedBlockhash?.();
+    // if prewarmer exposed expiry, honor it; else assume it’s fresh enough
+    if (c && (c.expiresAtMs ? c.expiresAtMs > Date.now() : true)) return;
+    await conn.getLatestBlockhash('confirmed');
+    metricsLogger.recordBlockhashRefresh?.(conn._rpcEndpoint || 'primary');
+  } catch (_) {}
+ }
 
   // ---- LEADER TIMING HOLD (pre-send) ----
   if (leaderTiming?.enabled && bundleStrategy !== 'private' && validatorIdentity) {
@@ -571,6 +623,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       amount: String(params.amount),
       slippage: params.slippage,
       mode: bundleStrategy,
+     allowedDexes: Array.isArray(allowedDexes) ? allowedDexes.join(',') : String(allowedDexes || ''),
+     excludedDexes: Array.isArray(excludedDexes) ? excludedDexes.join(',') : String(excludedDexes || ''),
+     splitTrade: !!splitTrade,
     };
     const cached = quoteCache.get(key);
     if (cached) return cached;
@@ -668,17 +723,25 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   });
 
   // Create an override sender using RpcPool when configured
-  const sendRawOverride = rpcPool
-    ? async (rawTx, sendOpts) => rpcPool.sendRawTransactionQuorum(rawTx, sendOpts || {})
-    : null;
+const sendRawOverride = rpcPool
+  ? async (rawTx, sendOpts) =>
+      rpcPool.sendRawTransactionQuorum(rawTx, {
+        quorum: rpcQuorum,
+        maxFanout: rpcMaxFanout,
+        staggerMs: rpcStaggerMs,
+        timeoutMs: rpcTimeoutMs,
+        ...(sendOpts || {}),
+      })
+  : null;
 
-  // Sender
+// Sender
   async function sendOnce(localQuote) {
     let txHash = null;
     let attempt = 0;
     const maxAttempts = Math.max(1, Number(retryPolicy?.max ?? 3));
     let jitoMode = !!useJitoBundle;
     let usedDirect = false;
+    let lastErrClass = 'NONE';
 
     // Pre-send blockhash prewarm for first attempt
     await _preSendRefresh();
@@ -759,7 +822,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           cuPriceMicroLamportsMax,
           priorityFeeLamports: basePriorityFeeLamports,
           jitoTipLamports,
-        }, attempt);
+        }, (lastErrClass === 'NET') ? attempt : 0, retryPolicy);
 
         // Direct AMM fallback when quote is stale & pool fresh/low-vol
         if (!usedDirect && directAmmFallback && attempt === 0) {
@@ -892,7 +955,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         _coolOffByMint[mint] = Date.now();
 
         attempt += 1;
-        const cls = classifyError(err?.message || err?.toString());
+       const cls = classifyError(err?.message || err?.toString());
+       lastErrClass = cls;
 
         // USER errors: surface immediately
         if (cls === 'USER') {
@@ -906,24 +970,21 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           throw err;
         }
 
-        // UNKNOWN: conservative single CU bump
-        if (cls === 'UNKNOWN') {
-          // rely on getPriorityFee bump via attempt index
-          metricsLogger.recordRetry?.();
+        const plan = RETRY_PLAN[cls] || RETRY_PLAN.UNKNOWN;
+        // Hot account / contention backoff (tiny jitter)
+        if (/account in use|already in use|busy/i.test(err?.message || '')) {
+          await sleep(120 + Math.floor(Math.random()*180));
         }
-
-        // NET: bump path per attempt
-        if (cls === 'NET') {
-          if (attempt === 3 && retryPolicy.routeSwitch) {
-            jitoMode = !jitoMode;
-          } else if (attempt >= 4 && retryPolicy.rpcFailover && endpoints.length > 1) {
-            const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
-            currentRpcUrl = endpoints[idx] || currentRpcUrl;
-            conn = new Connection(currentRpcUrl, 'confirmed');
-            try { ensurePrewarm(conn); } catch (_) {}
-          }
-          metricsLogger.recordRetry?.();
+        if (attempt === plan.switchRouteAt && retryPolicy.routeSwitch) {
+          jitoMode = !jitoMode;
         }
+        if (attempt >= plan.rotateRpcAt && retryPolicy.rpcFailover && endpoints.length > 1) {
+          const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
+          currentRpcUrl = endpoints[idx] || currentRpcUrl;
+          conn = new Connection(currentRpcUrl, 'confirmed');
+          try { ensurePrewarm(conn); } catch (_) {}
+        }
+        metricsLogger.recordRetry?.();
 
         // Refresh quote after changes
         try {
@@ -1360,6 +1421,52 @@ function ensurePrewarm(connection) {
   }
 }
 
+
+
+// ── housekeeping + shutdown ──
+let _sweeper = null;
+function startSweeper() {
+  if (_sweeper) return;
+  _sweeper = setInterval(() => {
+    const now = Date.now();
+
+    // expire id TTLs
+    for (const [k, exp] of _idTtlGate.entries()) {
+      if (exp <= now) _idTtlGate.delete(k);
+    }
+
+    // expire per-minute token bucket entries (>2min old)
+    for (const [k, v] of __BUCKET.entries()) {
+      if (!v || now - v.ts > 120_000) __BUCKET.delete(k);
+    }
+
+    // coolOff map: clear entries older than 10 minutes
+    for (const [m, ts] of Object.entries(_coolOffByMint)) {
+      if (now - ts > 10 * 60_000) delete _coolOffByMint[m];
+    }
+
+    // quote caches are self-evicting; nothing to do here
+    try { coreIdem.cleanupExpired?.(); } catch (_) {}
+    // expire ad-hoc idempotency cache
+    for (const [k, v] of _idemCache.entries()) {
+      if (v && v.exp && v.exp <= now) _idemCache.delete(k);
+    }
+  }, 60_000);
+}
+
+function stopExecutorBackground() {
+  if (_sweeper) { clearInterval(_sweeper); _sweeper = null; }
+  try { _prewarmStop?.(); } catch (_) {}
+}
+
+(function _boot() {
+  try { startSweeper(); } catch (_) {}
+  try {
+    process.once('SIGINT',  () => stopExecutorBackground());
+    process.once('SIGTERM', () => stopExecutorBackground());
+  } catch (_) {}
+})();
+
 /*
  * Public API wrapper class (unchanged aside from prewarm on construct)
  */
@@ -1486,3 +1593,5 @@ class TradeExecutorTurbo {
 
 module.exports = TradeExecutorTurbo;
 module.exports.execTrade = execTrade;
+module.exports.stopExecutorBackground = stopExecutorBackground;
+module.exports.setKill = setKill;

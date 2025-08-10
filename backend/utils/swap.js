@@ -167,6 +167,8 @@ async function executeSwapTurbo({
   briberyAmount = 0,
   privateRpcUrl,
   skipPreflight = true,
+ sendRawTransaction,
+  broadcastRawTransaction,
   // NEW knobs (optional)
   computeUnitPriceMicroLamports,
   tipLamports,
@@ -207,12 +209,23 @@ async function executeSwapTurbo({
       transaction = Transaction.from(transactionBuffer);
     }
 
-    transaction.sign([wallet]);
+ transaction.sign([wallet]);
+ let expectedSig = null;
+ try {
+   const s = (transaction.signatures && transaction.signatures[0])
+     ? (transaction.signatures[0].signature || transaction.signatures[0])
+     : null;
+   if (s) expectedSig = bs58.encode(s);
+ } catch (_) {}
     const serialized      = transaction.serialize();
     const turboConnection = privateRpcUrl ? new Connection(privateRpcUrl, "confirmed") : connection;
 
-    const signature = await turboConnection.sendRawTransaction(serialized, { skipPreflight });
-    await turboConnection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+  const sendFn = typeof sendRawTransaction === 'function'
+    ? sendRawTransaction
+    : turboConnection.sendRawTransaction.bind(turboConnection);
+ let signature = await sendFn(serialized, { skipPreflight, sigHint: expectedSig });
+ if (typeof signature !== 'string' && expectedSig) signature = expectedSig;    
+  await turboConnection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
     return signature;
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
@@ -261,9 +274,11 @@ async function executeSwapJitoBundle({
     }
 
     tx.sign([wallet]);
-    const result = await sendJitoBundle([tx], { jitoTipLamports, relayUrl: jitoRelayUrl || process.env.JITO_RELAY_URL });
-    // result may be bundle id or signature depending on relay implementation
-    return result;
+  const result = await sendJitoBundle([tx], { jitoTipLamports, relayUrl: jitoRelayUrl || process.env.JITO_RELAY_URL });
+  // Normalize: prefer a base58-ish signature shape, else return a tagged object.
+  const asStr = typeof result === 'string' ? result : (result?.signature || result?.result || null);
+  const looksSig = typeof asStr === 'string' && /^[1-9A-HJ-NP-Za-km-z]{43,88}$/.test(asStr);
+  return looksSig ? asStr : { bundleId: asStr || result || null };
   } catch (err) {
     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
     throw new Error(detail);

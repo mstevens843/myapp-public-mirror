@@ -30,7 +30,13 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote } = require("./core/quoteHelper");
-const { liveBuy, simulateBuy } = require("./core/tradeExecutor");
+// Include extended executors for TWAP and atomic scalping
+const {
+  liveBuy,
+  simulateBuy,
+  executeTWAP,
+  executeAtomicScalp,
+} = require("./core/tradeExecutor");
 const { passes, explainFilterFail } = require("./core/passes");
 const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
@@ -119,14 +125,16 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
 
     lastTickTimestamps[botId] = Date.now();
 
-    // Optionally precompute scalper signals (fire‑and‑forget).  If
-    // botCfg.useSignals is truthy this asynchronous helper will run in
-    // the background and any errors will be logged.  This does not
-    // block the main loop.
-    if (botCfg.useSignals) {
-      scalperSignals(botCfg).catch((err) => {
-        log("error", `signal precompute failed: ${err.message || err}`);
-      });
+    // Optionally precompute scalper signals.  Wrap in try/catch to
+    // prevent errors from bubbling into the main loop.  No
+    // configuration is passed; the signal helper should inspect
+    // cached microstructure state instead.
+    if (botCfg?.useSignals) {
+      try {
+        scalperSignals({});
+      } catch (_) {
+        /* suppress errors from signal generator */
+      }
     }
 
     /* NEW: stop instantly if we already blew past the fail cap */
@@ -253,8 +261,9 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
           sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "scalper" },
           // NEW: optional execution shape (e.g. "ATOMIC").  When undefined
-          // the default single‑shot swap will be used.
-          executionShape : botCfg.executionShape,
+          // or falsy, the default single‑shot swap will be used.
+          // Coerce to empty string for downstream checks.
+          executionShape : botCfg?.executionShape || "",
           // NEW: attach the scalper risk policy so future executors can
           // consult it between sub‑orders.  Currently unused.
           riskPolicy     : scalperRisk,
@@ -264,18 +273,22 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
         let txHash;
         try {
           log("info", "[🚀 BUY ATTEMPT] Scalping token…");
-          console.log("🔁 Sending to execBuy now…");
-
+          console.log("🔁 Sending to executor now…");
 
           if (snipedMints.has(mint)) {
-        log("warn", `⚠️ Already sniped ${mint} — skipping duplicate`);
-        continue;
-      }
-      snipedMints.add(mint);
-          
-          // txHash = await execBuy({ quote, wallet, mint, meta });
-          txHash = await execBuy({ quote, mint, meta });
-          console.log("🎯 execBuy returned:", txHash);
+            log("warn", `⚠️ Already sniped ${mint} — skipping duplicate`);
+            continue;
+          }
+          snipedMints.add(mint);
+
+          // Decide which executor to use based on the requested execution shape.
+          const exec = meta.executionShape === "TWAP"
+            ? executeTWAP
+            : meta.executionShape === "ATOMIC"
+            ? executeAtomicScalp
+            : (DRY_RUN ? simulateBuy : liveBuy);
+          txHash = await exec({ quote, mint, meta });
+          console.log("🎯 exec returned:", txHash);
         } catch (err) {
           const errMsg = err?.message || JSON.stringify(err) || String(err);
 

@@ -25,9 +25,20 @@
 
 const { incCounter, observeHistogram } = require('../logging/metrics');
 
+
+// minimal error classifier (keeps error labels consistent with executor)
+const NET_ERRS  = [/blockhash/i, /node is behind/i, /timed? out/i, /connection/i, /getblockheight timed out/i, /account in use/i];
+const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i, /slippage exceeded/i];
+function classifyError(err) {
+  const msg = (err && (err.message || String(err))) || '';
+  const m = msg.toLowerCase();
+  if (USER_ERRS.some(r => r.test(m))) return 'USER';
+  if (NET_ERRS.some(r => r.test(m)))  return 'NET';
+  return 'UNKNOWN';
+}
 /**
  * Optional wallet keypair loader (provided by manual executor).
- * This keeps global wallet state out of the hot path.
+ * This keeps global wallet state out of the hot patha.
  */
 let loadWalletKeypair;
 try {

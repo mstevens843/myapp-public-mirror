@@ -10,7 +10,13 @@ const { createSummary, tradeExecuted }      = require("./core/alerts");
 const wm                     = require("./core/walletManager");
 const guards                 = require("./core/tradeGuards");
 const { getSafeQuote }       = require("./core/quoteHelper");
-const { liveBuy, simulateBuy } = require("./core/tradeExecutor");
+// Include additional executors for TWAP and atomic scalping in manual mode
+const {
+  liveBuy,
+  simulateBuy,
+  executeTWAP,
+  executeAtomicScalp,
+} = require("./core/tradeExecutor");
 const { initTxWatcher }      = require("./core/txTracker");
 const {
   lastTickTimestamps,
@@ -115,13 +121,15 @@ module.exports = async function chadMode(cfg = {}) {
       log("loop", `\nChad Tick @ ${new Date().toLocaleTimeString()}`);
       lastTickTimestamps[botId] = Date.now();
 
-      // Optional: compute any manual mode signals.  This stub simply
-      // logs failures and returns immediately.  To enable, set
-      // cfg.useSignals on the UI.  It does not block the trading loop.
-      if (cfg.useSignals) {
-        chadSignals(cfg).catch((err) => {
-          log("error", `signal precompute failed: ${err.message || err}`);
-        });
+      // Optional: compute any manual mode signals.  The generator
+      // returns synchronously and errors are suppressed to avoid
+      // interrupting the main loop.  No configuration object is passed.
+      if (cfg?.useSignals) {
+        try {
+          chadSignals({});
+        } catch (_) {
+          /* ignore signal errors */
+        }
       }
 
       if (dumping) {
@@ -195,29 +203,33 @@ module.exports = async function chadMode(cfg = {}) {
 
         /* ── execute buy ─────────────────────────── */
         log("info", `[🚀 BUY ATTEMPT] Aping token ${mint}…`);
-        const txHash = await execTrade({
-          quote,
-          wallet,
-          mint,
-          meta: {
-            strategy        : "Chad Mode",
-            walletId        : cfg.walletId,
-            userId          : cfg.userId,
-            slippage        : SLIPPAGE,
-            category        : "ChadMode",
-            tpPercent       : cfg.tpPercent ?? 0,
-            slPercent       : cfg.slPercent ?? 0,
-            tp              : cfg.takeProfit,
-            sl              : cfg.stopLoss,
-            openTradeExtras : { strategy: "Chad Mode" },
-            // NEW: optional execution shape for manual mode; allow the UI
-            // to choose a custom executor.  When undefined the default
-            // single‑swap executor will be used.
-            executionShape  : cfg.executionShape,
-            // NEW: attach chad mode risk policy for future guardrails
-            riskPolicy      : chadRisk,
-          },
-        });
+        const meta = {
+          strategy        : "Chad Mode",
+          walletId        : cfg.walletId,
+          userId          : cfg.userId,
+          slippage        : SLIPPAGE,
+          category        : "ChadMode",
+          tpPercent       : cfg.tpPercent ?? 0,
+          slPercent       : cfg.slPercent ?? 0,
+          tp              : cfg.takeProfit,
+          sl              : cfg.stopLoss,
+          openTradeExtras : { strategy: "Chad Mode" },
+          // Permit TWAP or ATOMIC execution shapes; undefined or falsy
+          // values default to the single‑shot swap.  Coerce to empty
+          // string so downstream comparisons behave consistently.
+          executionShape  : cfg?.executionShape || "",
+          riskPolicy      : chadRisk,
+        };
+        // Pick an executor based on the requested execution shape.  When
+        // unspecified the DRY_RUN flag controls whether simulateBuy or
+        // liveBuy is used.  TWAP executes a laddered fill while ATOMIC
+        // performs a one‑shot scalp.
+        const exec = meta.executionShape === "TWAP"
+          ? executeTWAP
+          : meta.executionShape === "ATOMIC"
+          ? executeAtomicScalp
+          : (DRY_RUN ? simulateBuy : liveBuy);
+        const txHash = await exec({ quote, wallet, mint, meta });
 
         // trades++;
         sum.inc("buys");

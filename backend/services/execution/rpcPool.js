@@ -5,9 +5,9 @@
  * RPC endpoints the pool will return connections in a round–robin
  * fashion and can broadcast raw transactions to multiple endpoints
  * simultaneously.  The sendRawTransactionQuorum() helper will send
- * the provided raw transaction to each endpoint in parallel (with a
- * small stagger) and resolve as soon as the configured quorum of
- * acknowledgements is reached.  If no Connection class is available
+ * the provided raw transaction to a subset of endpoints in parallel
+ * (with a small stagger) and resolve as soon as the configured quorum
+ * of acknowledgements is reached. If no Connection class is available
  * (for example during tests) the pool falls back to storing plain
  * objects; test code can attach `sendRawTransaction` implementations
  * onto those objects.
@@ -40,17 +40,22 @@ class RpcPool {
    * @param {string[]} endpoints List of RPC URLs.  An empty array
    *   results in no connections being created.
    */
-  constructor(endpoints) {
+  constructor(endpoints, metrics) {
     this.endpoints = Array.isArray(endpoints) ? endpoints.slice() : [];
     this.connections = [];
-    this._rrIndex = 0;
+    this._rrIndex = 0;       // round-robin cursor
+    this._fanoutIdx = 0;     // start index for pickN
+    this.metrics = metrics || { increment(){} };
     // Eagerly build Connection instances if the library is available.
     this.connections = this.endpoints.map((ep) => {
       if (SolanaConnection) {
         try {
-          // Use a low commitment by default; callers may override on call.
-          return new SolanaConnection(ep);
-        } catch (err) {
+          // Use default commitment; callers can override per-send.
+          const conn = new SolanaConnection(ep);
+          // stamp endpoint for logs/metrics
+          conn._endpoint = ep;
+          return conn;
+        } catch (_) {
           // Fall through to a plain object if instantiation fails.
         }
       }
@@ -74,102 +79,182 @@ class RpcPool {
   }
 
   /**
-   * Sends the provided raw transaction to each RPC endpoint in the
-   * pool until a quorum of acknowledgements has been achieved.
+   * Pick N distinct connections using a rotating start (round-robin).
+   * Falls back to all connections if N is omitted or >= pool size.
+   * @param {number} n
+   * @returns {Object[]}
+   */
+  _pickN(n) {
+    const total = this.connections.length;
+    if (!total) return [];
+    const take = Math.max(1, Math.min(Number(n) || total, total));
+    const start = this._fanoutIdx % total;
+    const pick = [];
+    for (let i = 0; i < take; i++) {
+      pick.push(this.connections[(start + i) % total]);
+    }
+    this._fanoutIdx = (start + 1) % total; // rotate for next call
+    return pick;
+  }
+
+  /**
+   * Normalize a sendRawTransaction return into a signature string when possible.
+   * @param {any} res
+   * @returns {string|any}
+   */
+  _normalizeSig(res) {
+    if (typeof res === 'string') return res;
+    if (res && typeof res === 'object') {
+      if (typeof res.signature === 'string') return res.signature;
+      if (typeof res.result === 'string') return res.result;
+      if (res.value && typeof res.value === 'string') return res.value;
+    }
+    return res;
+  }
+
+  /**
+   * Heuristic: Some RPCs reply with an error that indicates the tx is already
+   * known/processed. We treat those as an acknowledgement.
+   * @param {Error|any} err
+   * @returns {boolean}
+   */
+  _looksLikeAlreadyProcessed(err) {
+    const msg = (err && (err.message || err.toString())) || '';
+    const m = String(msg).toLowerCase();
+    return (
+      m.includes('already processed') ||
+      m.includes('transaction already known') ||
+      m.includes('already known') ||
+      m.includes('already in block') ||
+      m.includes('txn already received') ||
+      m.includes('transaction signature already')
+    );
+  }
+
+  /**
+   * Sends the provided raw transaction to multiple RPC endpoints in the pool
+   * until a quorum of acknowledgements has been achieved.
    *
-   * By default the function requires a single successful result
-   * (quorum = 1).  Pass a larger `quorum` property inside opts to
-   * require multiple endpoints to confirm reception before resolving.
-   * If more than `connections.length` errors occur before the quorum
-   * threshold is met the promise rejects with the last error.
+   * Options:
+   *   - quorum (number): how many acks to consider success. Default 1.
+   *   - maxFanout (number): send to at most this many endpoints (round-robin).
+   *                         Default: all connections.
+   *   - staggerMs (number): delay between fanout sends, default 50ms.
+   *   - timeoutMs (number): overall timeout, default 10000ms.
+   *   - treatAlreadyProcessedAsOk (boolean): default true.
+   *   - ...sendOpts: passed to each connection's sendRawTransaction.
    *
-   * A small stagger (defaults to 50ms) can be configured via
-   * `opts.staggerMs` to avoid hammering all endpoints at exactly the
-   * same moment.  A per–request timeout (defaults to 10000ms) can be
-   * provided via `opts.timeoutMs` and will cause the promise to
-   * reject if the quorum is not met within the allotted time.
-   * Additional send options (such as `skipPreflight` or
-   * `maxRetries`) are passed through to each connection’s
-   * sendRawTransaction call.
+   * Resolves to the first successful signature (string) when possible,
+   * otherwise the first successful result.
    *
-   * @param {Buffer|string} rawTx The serialized transaction to send.
-   * @param {Object} [opts={}] Additional send options.
-   * @param {number} [opts.quorum=1] Number of acknowledgements to wait for.
-   * @param {number} [opts.staggerMs=50] Delay between sends per endpoint.
-   * @param {number} [opts.timeoutMs=10000] Maximum time to wait.
-   * @returns {Promise<any>} Resolves to the first successful result or
-   *   rejects if the quorum cannot be met.
+   * @param {Buffer|string} rawTx
+   * @param {Object} [opts={}]
+   * @returns {Promise<any>}
    */
   async sendRawTransactionQuorum(rawTx, opts = {}) {
     const {
-      quorum = 1,
+      quorum: _quorum = 1,
+      maxFanout,
       staggerMs = 50,
       timeoutMs = 10000,
+      treatAlreadyProcessedAsOk = true,
+      sigHint,
       ...sendOpts
     } = opts;
-    if (!this.connections.length) {
-      throw new Error('RpcPool has no connections');
-    }
-    // Track successes and failures.  When successCount reaches the
-    // quorum the promise resolves.  If errors outnumber possible
-    // remaining successes the promise rejects.
+
+    const poolSize = this.connections.length;
+    if (!poolSize) throw new Error('RpcPool has no connections');
+
+    const fanout = Math.max(1, Math.min(Number(maxFanout) || poolSize, poolSize));
+    const quorum = Math.max(1, Math.min(Number(_quorum) || 1, fanout));
+
+    const targets = this._pickN(fanout);
+
     let successCount = 0;
     let finished = false;
-    let firstRes; // keep track of the first successful result
+    let firstSig = null;
     const errors = [];
+
+    // Helper: after each outcome, check if meeting quorum is still possible
+    const checkImpossible = () => {
+      const remainingPossible = fanout - errors.length; // worst-case remaining successes
+      const needed = quorum - successCount;
+      return remainingPossible < needed;
+    };
+
     return new Promise((resolve, reject) => {
-      // Guard for timeout
       const timer = setTimeout(() => {
         if (finished) return;
         finished = true;
         if (successCount > 0) {
-          // Resolve with generic ok since at least one success occurred.
-          resolve({ ok: true });
+          resolve(firstSig || sigHint || { ok: true });
         } else {
           reject(errors[0] || new Error('sendRawTransactionQuorum timeout'));
         }
-      }, timeoutMs);
-      // Iterate over connections and schedule sends
-      this.connections.forEach((conn, idx) => {
-        const jitter = Math.floor(Math.random() * 5); // minimal jitter
-        const delay = idx * staggerMs + jitter;
+      }, Math.max(1, Number(timeoutMs) || 10000));
+
+      targets.forEach((conn, idx) => {
+        const jitter = Math.floor(Math.random() * 5);
+        const delay = idx * Math.max(0, Number(staggerMs) || 0) + jitter;
+
         setTimeout(async () => {
-          // If already finished there is nothing to do
           if (finished) return;
-          // Ensure the connection has a sendRawTransaction function
+
           const sendFn = conn && conn.sendRawTransaction;
           if (typeof sendFn !== 'function') {
-            errors.push(new Error('Connection missing sendRawTransaction'));
-            // If failures exceed possible successes, reject
-            if (errors.length > this.connections.length - quorum) {
-              if (!finished) {
-                finished = true;
-                clearTimeout(timer);
-                reject(errors[errors.length - 1]);
-              }
+            errors.push(new Error(`Connection missing sendRawTransaction (${conn?._endpoint || 'unknown'})`));
+            if (!finished && checkImpossible()) {
+              finished = true;
+              clearTimeout(timer);
+              reject(errors[errors.length - 1]);
             }
             return;
           }
+
           try {
             const res = await sendFn.call(conn, rawTx, sendOpts);
             if (finished) return;
+
             successCount += 1;
-            // Record the first successful result
-            if (!firstRes) firstRes = res;
-            // Once we’ve reached the quorum resolve with the first successful result
+            try { this.metrics.increment('rpc_quorum_ok_total', 1, { ep: conn._endpoint || 'unknown' }); } catch (_) {}
+            const sig = this._normalizeSig(res);
+              if (!firstSig && typeof sig === 'string') firstSig = sig;
+              if (!firstSig && sigHint) firstSig = sigHint;
+
             if (successCount >= quorum) {
               finished = true;
               clearTimeout(timer);
-              resolve(firstRes);
+              resolve(firstSig || res);
             }
           } catch (err) {
-            errors.push(err);
-            if (errors.length > this.connections.length - quorum) {
-              if (!finished) {
+            // Treat "already processed/known" as an ack
+            if (treatAlreadyProcessedAsOk && this._looksLikeAlreadyProcessed(err)) {
+              if (finished) return;
+              successCount += 1;
+
+              // try to extract any embedded signature from the error payload
+              let sig = null;
+              try {
+                const maybeObj = err && err.response && err.response.data;
+                if (maybeObj && typeof maybeObj.signature === 'string') sig = maybeObj.signature;
+              } catch (_) {}
+
+              if (!firstSig && typeof sig === 'string') firstSig = sig;
+
+              if (successCount >= quorum) {
                 finished = true;
                 clearTimeout(timer);
-                reject(err);
+                resolve(firstSig || sigHint || { ok: true });
               }
+              return;
+            }
+
+            errors.push(err);
+            try { this.metrics.increment('rpc_quorum_err_total', 1, { ep: conn._endpoint || 'unknown' }); } catch (_) {}
+            if (!finished && checkImpossible()) {
+              finished = true;
+              clearTimeout(timer);
+              reject(err);
             }
           }
         }, delay);

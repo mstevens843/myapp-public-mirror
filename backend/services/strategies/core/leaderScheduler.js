@@ -48,10 +48,9 @@ class LeaderScheduler {
       // Estimate slot time from performance sample if available
       try {
         const samples = await this.connection.getRecentPerformanceSamples(1);
-        if (samples && samples[0] && samples[0].samplePeriodSlots && samples[0].numSlots) {
+        if (samples && samples[0] && samples[0].samplePeriodSecs && samples[0].numSlots) {
           const secsPerSlot = samples[0].samplePeriodSecs / samples[0].numSlots;
-          this.slotTimeMs = secsPerSlot * 1000;
-        }
+       }
       } catch (e) {
         // swallow; fallback to default
       }

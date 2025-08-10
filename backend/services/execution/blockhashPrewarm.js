@@ -104,7 +104,7 @@ function getCachedBlockhash() {
       // Return a shallow copy to prevent accidental mutation of
       // internal state by consumers.
       const { blockhash, lastValidBlockHeight } = _cache;
-      return { blockhash, lastValidBlockHeight, ts };
+      return { blockhash, lastValidBlockHeight, ts, expiresAtMs: ts + ttlMs };
     }
     // Stale entry; clear it so subsequent calls don’t return an
     // expired blockhash and allow a fresh fetch.
