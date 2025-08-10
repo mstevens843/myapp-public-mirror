@@ -534,7 +534,7 @@ log("info", `Token feed in use → ${feedName}`);
   });
 };
 
-/* ── CLI helper ─────────────────────────────────────── */
+/* ── CLI helper ──────────────a───────────────────────── */
 if (require.main === module) {
   const fp = process.argv[2];
   if (!fp || !fs.existsSync(fp)) {
