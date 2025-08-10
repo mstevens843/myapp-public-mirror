@@ -379,4 +379,4 @@ if (require.main === module) {
     process.exit(1);
   }
   module.exports(JSON.parse(fs.readFileSync(fp, "utf8")));
-}
+}a

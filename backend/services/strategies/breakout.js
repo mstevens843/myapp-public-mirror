@@ -1,92 +1,3 @@
-/** Breakout Strategy Module 
- * - Monitors token price and volume spikes. 
- * - Detects breakout opportunities using thresholds.
- * - Executes swap when breakout conditions are met. 
- * 
- * Configurable: 
- * - Token list to monitor
- * - Price threshold (% increase)
- * - Volume threshold
- * 
- * Eventually Support: 
- * - Timeframe-based candles (e.g. 1m/5m)
- * - Telegram alerts
- * - Multi-token monitoring via dynamic feeds. 
- */
-
-
-/** Breakout Strategy Module 
- * - Monitors tokens for % price increase + volume spike.
- * - Enters position on breakout signal.
- * 
- * Includes:
- * - Token list config
- * - Honeypot protection
- * - Telegram alerts
- * - Analytics logging
- * - Wallet rotation
- * 
- * 
- *  * Finalized:
- * ✅ Runtime config: mint list, thresholds, wallet, volume
- * ✅ Honeypot + slippage protection
- * ✅ DRY_RUN + max volume cap
- * ✅ Telegram alerts + cooldowns
- * ✅ Unified logging via handleSuccessTrade
- */
-
-// backend/services/strategies/breakout.js
-/* Breakout Strategy – refactored to use core helpers */
-
-/* Breakout Strategy – refactored to shared helper stack */
-/* backend/services/strategies/breakout.js
- * ──────────────────────────────────────── */
-
-/* Breakout v2 – parity-upgraded (Sniper/DipBuyer style) */
-/** Breakout Strategy Module 
- * - Monitors token price and volume spikes. 
- * - Detects breakout opportunities using thresholds.
- * - Executes swap when breakout conditions are met. 
- * 
- * Configurable: 
- * - Token list to monitor
- * - Price threshold (% increase)
- * - Volume threshold
- * 
- * Eventually Support: 
- * - Timeframe-based candles (e.g. 1m/5m)
- * - Telegram alerts
- * - Multi-token monitoring via dynamic feeds. 
- */
-
-
-/** Breakout Strategy Module 
- * - Monitors tokens for % price increase + volume spike.
- * - Enters position on breakout signal.
- * 
- * Includes:
- * - Token list config
- * - Honeypot protection
- * - Telegram alerts
- * - Analytics logging
- * - Wallet rotation
- * 
- * 
- *  * Finalized:
- * ✅ Runtime config: mint list, thresholds, wallet, volume
- * ✅ Honeypot + slippage protection
- * ✅ DRY_RUN + max volume cap
- * ✅ Telegram alerts + cooldowns
- * ✅ Unified logging via handleSuccessTrade
- */
-
-// backend/services/strategies/breakout.js
-/* Breakout Strategy – refactored to use core helpers */
-
-/* Breakout Strategy – refactored to shared helper stack */
-/* backend/services/strategies/breakout.js
- * ──────────────────────────────────────── */
-
 /* Breakout v2 – parity-upgraded (Sniper/DipBuyer style) */
 const fs = require("fs");
 // const pLimit = require("p-limit");
@@ -112,7 +23,7 @@ const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote } = require("./core/quoteHelper");
 // Extend tradeExecutor imports with additional execution shapes.  These
-// functions preserve the existing single‑shot semantics when
+// functions preserve the existing single-shot semantics when
 // executionShape is undefined.
 const {
   liveBuy,
@@ -173,11 +84,10 @@ module.exports = async function breakoutStrategy(botCfg = {}) {
   const MAX_TOKEN_AGE_MIN= botCfg.maxTokenAgeMinutes != null
                               ? +botCfg.maxTokenAgeMinutes
                               : null;
-const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
+  const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
                               ? +botCfg.minTokenAgeMinutes
                               : null;
-                              
-                              
+
   const MIN_MARKET_CAP   = botCfg.minMarketCap != null ? +botCfg.minMarketCap : null;
   const MAX_MARKET_CAP   = botCfg.maxMarketCap != null ? +botCfg.maxMarketCap : null;
   const DRY_RUN          = botCfg.dryRun === true;
@@ -186,15 +96,32 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
     ? +botCfg.cooldown * 1000            // UI sends SECONDS
     : 60_000;                            // fallback: 60 000 ms 
     
-    // ── universal mode extensions ─────────────────────────
-    const DIP_THRESHOLD = +botCfg.dipThreshold || 0;  // < 0 triggers dip mode
-    const dipMode = DIP_THRESHOLD > 0;
-;
+  // ── universal mode extensions ─────────────────────────
+  const DIP_THRESHOLD = +botCfg.dipThreshold || 0;  // < 0 triggers dip mode
+  const dipMode = DIP_THRESHOLD > 0;
 
-    const DELAY_MS = +botCfg.delayBeforeBuyMs || 0;
-    const PRIORITY_FEE = +botCfg.priorityFeeLamports || 0;
+  const DELAY_MS = +botCfg.delayBeforeBuyMs || 0;
+  const PRIORITY_FEE = +botCfg.priorityFeeLamports || 0;
 
-    const VOLUME_SPIKE = +botCfg.volumeSpikeMult || 0;
+  const VOLUME_SPIKE = +botCfg.volumeSpikeMult || 0;
+
+  // ── NEW: volatility breakout options (feature-flagged) ─────────────────
+  const useVolatilityBreakout = botCfg.useVolatilityBreakout === true;
+  const volatilityOpts = {
+    squeezeThreshold   : +botCfg.squeezeThreshold || 0.002, // 0.2% band width
+    expansionMultiplier: +botCfg.expansionMultiplier || 2.0,
+    squeezeLookback    : +botCfg.squeezeLookback || 10,     // last N candles
+    minVolumeSurge     : +botCfg.minVolumeSurge || 2.0,     // × baseline
+  };
+
+  // ── NEW: additional gates (all optional) ───────────────────────────────
+  const maxPriceImpactPct = (botCfg.maxPriceImpactPct != null)
+    ? +botCfg.maxPriceImpactPct
+    : null; // extra guard on top of maxImpactPct in quote
+  const fakeoutCooldownMs = (botCfg.fakeoutCooldownMs != null)
+    ? +botCfg.fakeoutCooldownMs
+    : 30 * 60 * 1000; // default 30m
+  const timeOfDayFilter = botCfg.timeOfDayFilter || null; // { start:"HH:MM", end:"HH:MM" }
 
   /* safety toggle */
   const SAFETY_DISABLED =
@@ -213,9 +140,6 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
   let   fails     = 0;
   /* start background confirmation loop (non-blocking) */
   initTxWatcher("Breakout");
-
-
-
 
   /* ── tick ─────────────────────────────────────────── */
   async function tick() {
@@ -251,13 +175,11 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
       guards.assertTradeCap(trades, MAX_TRADES);
       guards.assertOpenTradeCap("Breakout", botId, MAX_OPEN_TRADES);
 
-        await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
-        if (!(await wm.ensureMinBalance(MIN_BALANCE_SOL, getWalletBalance, isAboveMinBalance))) {
-          log("warn", "Balance below min – skipping");
-          return;
-        }
-
-
+      await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
+      if (!(await wm.ensureMinBalance(MIN_BALANCE_SOL, getWalletBalance, isAboveMinBalance))) {
+        log("warn", "Balance below min – skipping");
+        return;
+      }
 
       /* fetch token list via resolver */
       const targets = await resolveTokenFeed("Breakout", botCfg);
@@ -273,12 +195,38 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           process.exit(0);
         }
 
+        // Cooldown gate
         const cooldownMs = cd.hit(mint);
         if (cooldownMs > 0) {
           // log("info", `⏳ Skipping ${mint}, still in cooldown for ${(cooldownMs / 1000).toFixed(0)}s`);
           continue;
         }
-        
+
+        // NEW: rug blacklist gate
+        if (typeof breakoutRisk.isBlacklisted === "function" && breakoutRisk.isBlacklisted(mint)) {
+          log("info", `Skipping blacklisted mint ${mint}`);
+          continue;
+        }
+
+        // NEW: fakeout cooldown gate
+        if (typeof breakoutRisk.inFakeoutCooldown === "function" &&
+            breakoutRisk.inFakeoutCooldown(mint, fakeoutCooldownMs)) {
+          log("info", `Cooldown active for ${mint} after fakeout; skipping`);
+          continue;
+        }
+
+        // NEW: optional time-of-day gate
+        if (timeOfDayFilter && timeOfDayFilter.start && timeOfDayFilter.end) {
+          const now   = new Date();
+          const [sH, sM] = String(timeOfDayFilter.start).split(":").map(Number);
+          const [eH, eM] = String(timeOfDayFilter.end).split(":").map(Number);
+          const start = new Date(now); start.setHours(sH||0, sM||0, 0, 0);
+          const end   = new Date(now); end.setHours(eH||23, eM||59, 59, 999);
+          if (now < start || now > end) {
+            log("info", `Outside trading window ${timeOfDayFilter.start}-${timeOfDayFilter.end} — skip`);
+            continue;
+          }
+        }
 
         log("info", `Token detected: ${mint}`);
         log("info", "Fetching price change + volume…");
@@ -286,19 +234,18 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
         const pumpWin = botCfg.priceWindow  || "30m";
         const volWin  = botCfg.volumeWindow || "1h";
 
-     const res = await limitBirdeye(() =>
-       passes(mint, {
-      entryThreshold     : ENTRY_THRESHOLD,
-      volumeThresholdUSD : VOLUME_THRESHOLD,
-      pumpWindow         : pumpWin,
-      volumeWindow       : volWin,
-      limitUsd           : LIMIT_USD,
-      minMarketCap       : MIN_MARKET_CAP,
-      maxMarketCap       : MAX_MARKET_CAP,
-      fetchOverview: (mint) =>
-      getTokenShortTermChange(null, mint, pumpWin, volWin),
-    }));
-
+        const res = await limitBirdeye(() =>
+          passes(mint, {
+            entryThreshold     : ENTRY_THRESHOLD,
+            volumeThresholdUSD : VOLUME_THRESHOLD,
+            pumpWindow         : pumpWin,
+            volumeWindow       : volWin,
+            limitUsd           : LIMIT_USD,
+            minMarketCap       : MIN_MARKET_CAP,
+            maxMarketCap       : MAX_MARKET_CAP,
+            fetchOverview      : (mint) => getTokenShortTermChange(null, mint, pumpWin, volWin),
+          })
+        );
 
         if (!res.ok) {
           log("warn", explainFilterFail(res, { 
@@ -312,25 +259,45 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           continue;
         }
 
-     const overview = res.overview;
-    log("info", "Passed price/volume check");
-    log("info", `[🎯 TARGET FOUND] ${mint}`);
-    summary.inc("filters");
+        const overview = res.overview;
+        log("info", "Passed price/volume check");
+        log("info", `[🎯 TARGET FOUND] ${mint}`);
+        summary.inc("filters");
+
         /* safety checks */
         if (!SAFETY_DISABLED) {
-           const safeRes = await isSafeToBuyDetailed(mint, botCfg.safetyChecks || {});
-           if (logSafetyResults(mint, safeRes, log, "breakout")) {
-             summary.inc("safetyFail");
-             continue;
-           }
-           summary.inc("safety");
-       } else {
+          const safeRes = await isSafeToBuyDetailed(mint, botCfg.safetyChecks || {});
+          if (logSafetyResults(mint, safeRes, log, "breakout")) {
+            summary.inc("safetyFail");
+            continue;
+          }
+          summary.inc("safety");
+        } else {
           log("info", "⚠️ Safety checks DISABLED – proceeding un-vetted");
-         }
+        }
+
+        // NEW: Volatility/squeeze breakout confirmation (feature-flag)
+        if (useVolatilityBreakout) {
+          let candles = Array.isArray(overview?.candles) ? overview.candles : [];
+          if (!candles.length) {
+            try {
+              const alt = await getTokenShortTermChange(null, mint, "5m", volWin);
+              if (alt && Array.isArray(alt.candles)) candles = alt.candles;
+            } catch (_) { /* ignore */ }
+          }
+          const volOk = breakoutSignals &&
+                        typeof breakoutSignals.detectVolatilityBreakout === "function"
+                        ? breakoutSignals.detectVolatilityBreakout(candles, volatilityOpts)
+                        : true; // if helper absent, don’t block
+          if (!volOk) {
+            log("info", "Volatility breakout conditions not met — skip");
+            summary.inc("volatilityReject");
+            continue;
+          }
+        }
 
         /* daily cap */
         guards.assertDailyLimit(SNIPE_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
-
 
         /* quote */
         log("info", "Getting swap quote…");
@@ -345,25 +312,25 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
             maxImpactPct : MAX_SLIPPAGE,
           });
 
-        if (!result.ok) {
-          const {
-            reason = "quoteFail",
-            message = "no message",
-            inputMint,
-            outputMint,
-            rawQuote,
-            quoteDebug
-          } = result;
+          if (!result.ok) {
+            const {
+              reason = "quoteFail",
+              message = "no message",
+              inputMint,
+              outputMint,
+              rawQuote,
+              quoteDebug
+            } = result;
 
-                  log("warn", `❌ Quote failed: ${reason.toUpperCase()} — ${message}`);
-          log("warn", `↳ Input: ${inputMint}`);
-          log("warn", `↳ Output: ${outputMint}`);
-          if (quoteDebug) log("warn", `↳ Debug: ${JSON.stringify(quoteDebug, null, 2)}`);
-          if (rawQuote) log("warn", `↳ Raw Quote: ${JSON.stringify(rawQuote, null, 2)}`);
+            log("warn", `❌ Quote failed: ${reason.toUpperCase()} — ${message}`);
+            log("warn", `↳ Input: ${inputMint}`);
+            log("warn", `↳ Output: ${outputMint}`);
+            if (quoteDebug) log("warn", `↳ Debug: ${JSON.stringify(quoteDebug, null, 2)}`);
+            if (rawQuote)   log("warn", `↳ Raw Quote: ${JSON.stringify(rawQuote, null, 2)}`);
           
-          summary.inc(reason);
-          continue;
-        }
+            summary.inc(reason);
+            continue;
+          }
           quote = result.quote;
 
         } catch (err) {
@@ -372,7 +339,12 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           continue;
         }
 
-
+        // NEW: extra price-impact guard (in addition to quote’s maxImpactPct)
+        if (maxPriceImpactPct != null && quote?.priceImpactPct > maxPriceImpactPct) {
+          log("warn", `❌ Impact ${ (quote.priceImpactPct*100).toFixed(2) }% > limit ${(maxPriceImpactPct*100).toFixed(2)}% — skip`);
+          summary.inc("impactTooHigh");
+          continue;
+        }
 
         // chad mode (priority fee)
         if (PRIORITY_FEE > 0) {
@@ -398,8 +370,8 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           openTradeExtras : { strategy: "breakout" },
           // NEW: allow the UI to specify a custom execution shape; if
           // undefined or falsy, the tradeExecutor will default to the
-          // standard single‑shot swap.  Supported values include
-          // "TWAP" and "ATOMIC" (case‑insensitive).  We coerce
+          // standard single-shot swap.  Supported values include
+          // "TWAP" and "ATOMIC" (case-insensitive).  We coerce
           // undefined to an empty string to aid downstream checks.
           executionShape : botCfg?.executionShape || "",
           // NEW: attach the breakout risk policy so future executors
@@ -408,17 +380,15 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
         };
 
         /* 3️⃣  execute (or simulate) the buy */
-        // const execFn  = DRY_RUN ? simulateBuy : liveBuy;
         let txHash;
         try {
           console.log("🔁 Sending to execBuy now…");
 
-
           if (snipedMints.has(mint)) {
-        log("warn", `⚠️ Already executed breakout ${mint} — skipping duplicate`);
-        continue;
-      }
-      snipedMints.add(mint);
+            log("warn", `⚠️ Already executed breakout ${mint} — skipping duplicate`);
+            continue;
+          }
+          snipedMints.add(mint);
 
           // Choose an executor based on the requested execution shape.  When
           // unspecified, fall back to a dry run or live swap based on the
@@ -444,6 +414,11 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           // Print error object raw (only in terminal)
           console.error("🪵 Full error object:", err);
 
+          // NEW: register fakeout to enforce cooldown on this mint
+          if (typeof breakoutRisk.recordFakeout === "function") {
+            try { breakoutRisk.recordFakeout(mint); } catch (_) {}
+          }
+
           summary.inc("execBuyFail");
           continue;
         }
@@ -461,13 +436,10 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
           `change5m=${((overview?.priceChange5m ?? 0) * 100).toFixed(2)}%`;
         log("info", statsLine);
 
-
-     /* bookkeeping */
-        /* 📍 Inside the token loop, after bookkeeping */
+        /* bookkeeping */
         todaySol += SNIPE_LAMPORTS / 1e9;
         trades++;
         summary.inc("buys");
-
 
         if (trades >= MAX_TRADES) {
           log("info", "🎯 Trade cap reached – breakout shutting down");
@@ -485,11 +457,10 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
         if (trades >= MAX_TRADES) break;
       }
 
+      fails = 0; // reset error streak
 
-            fails = 0;                                        // reset error streak
-              /* 📍 End of tick() */
-              } catch (err) {
-                   /* ────────────────────────────────────────────────
+    } catch (err) {
+      /* ────────────────────────────────────────────────
        * Hard-stop if the RPC or swap returns an
        * “insufficient lamports / balance” error.
        * This skips the normal retry counter and
@@ -503,47 +474,47 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
         return;                // <── bail right here
       }
 
-     /* otherwise count the failure and let the normal
+      /* otherwise count the failure and let the normal
          HALT_ON_FAILS logic decide */
       fails++;
-          if (fails >= HALT_ON_FAILS) {
-          log("error", "🛑 Error limit hit — breakout shutting down");
-          await summary.printAndAlert("Breakout halted on errors");
-          if (runningProcesses[botId]) runningProcesses[botId].finished = true;
-          clearInterval(loopHandle);
-          return;                       // bail out cleanly
-        }
-          summary.inc("errors");
-          log("error", err?.message || String(err));
-            await tradeExecuted({
-              userId     : botCfg.userId,
-              mint,
-              tx         : txHash,
-              wl         : botCfg.walletLabel || "default",
-              category   : "Breakout",
-              simulated  : DRY_RUN,
-              amountFmt  : `${(SNIPE_LAMPORTS / 1e9).toFixed(3)} ${BASE_MINT === SOL_MINT ? "SOL" : "USDC"}`,
-              impactPct  : (quote?.priceImpactPct || 0) * 100,
-            });
-        }
+      if (fails >= HALT_ON_FAILS) {
+        log("error", "🛑 Error limit hit — breakout shutting down");
+        await summary.printAndAlert("Breakout halted on errors");
+        if (runningProcesses[botId]) runningProcesses[botId].finished = true;
+        clearInterval(loopHandle);
+        return;                       // bail out cleanly
+      }
+      summary.inc("errors");
+      log("error", err?.message || String(err));
+      await tradeExecuted({
+        userId     : botCfg.userId,
+        mint       : "unknown",
+        tx         : undefined,
+        wl         : botCfg.walletLabel || "default",
+        category   : "Breakout",
+        simulated  : DRY_RUN,
+        amountFmt  : `${(SNIPE_LAMPORTS / 1e9).toFixed(3)} ${BASE_MINT === SOL_MINT ? "SOL" : "USDC"}`,
+        impactPct  : 0,
+      });
+    }
 
-        /* early-exit outside the for-loop */
-        if (trades >= MAX_TRADES) {
-          // ✅ summary before completion flag
-          await summary.printAndAlert("Breakout");
-          log("summary", "✅ Breakout completed (max-trades reached)");
+    /* early-exit outside the for-loop */
+    if (trades >= MAX_TRADES) {
+      // ✅ summary before completion flag
+      await summary.printAndAlert("Breakout");
+      log("summary", "✅ Breakout completed (max-trades reached)");
 
-          if (runningProcesses[botId]) runningProcesses[botId].finished = true;
-          clearInterval(loopHandle);
-          process.exit(0);
-        }
+      if (runningProcesses[botId]) runningProcesses[botId].finished = true;
+      clearInterval(loopHandle);
+      process.exit(0);
+    }
   }
 
   // ── token-feed banner ───────────────────────────────
-const feedName = botCfg.overrideMonitored
-  ? "custom token list (override)"
-  : (botCfg.tokenFeed || "new listings");   // falls back to breakout default
-log("info", `Token feed in use → ${feedName}`);
+  const feedName = botCfg.overrideMonitored
+    ? "custom token list (override)"
+    : (botCfg.tokenFeed || "new listings");   // falls back to breakout default
+  log("info", `Token feed in use → ${feedName}`);
 
   /* scheduler */
   const loopHandle = runLoop(tick, botCfg.loop === false ? 0 : INTERVAL_MS, {
@@ -561,65 +532,3 @@ if (require.main === module) {
   }
   module.exports(JSON.parse(fs.readFileSync(fp, "utf8")));
 }
-
-/** 
- * Additions :
- * - Wallet rotation
- * - Honeypot protection
- * - Telegram alerts
- * - Analytics logging
- * - Flexible config via .env
- * - Better price & volume detection falback
- */
-
-
-/** Additions 04/17 
- * ✅ inputMint, slippage, positionSize, interval	Swap hardcoded .env fallbacks for config
-✅ breakoutThreshold	Rename and apply to priceChange check
-✅ volumeSpikeMultiplier	Compare current volume to average
-✅ confirmationCandles	Stub logic now — future implementation
-✅ minLiquidity	Apply to volume threshold
-✅ takeProfit, stopLoss	Include in trade log for future exit logic
-✅ dryRun, maxDailyVolume, haltOnFailures	Add runtime behavior controls
-✅ cooldown	Prevent double-entry too fast
-*/
-
-/**
- * Adding volumeSpikeMultiplier
-What it does
-passes() already receives volumeWindow (e.g., "1h").
-volumeSpikeMultiplier compares the current window’s 
-volume to the average of the previous N windows (N is whatever your overview endpoint returns;
- Birdeye gives 24 samples for 1-hour windows):
- */
-
-/** 
- * Additions :
- * - Wallet rotation
- * - Honeypot protection
- * - Telegram alerts
- * - Analytics logging
- * - Flexible config via .env
- * - Better price & volume detection falback
- */
-
-
-/** Additions 04/17 
- * ✅ inputMint, slippage, positionSize, interval	Swap hardcoded .env fallbacks for config
-✅ breakoutThreshold	Rename and apply to priceChange check
-✅ volumeSpikeMultiplier	Compare current volume to average
-✅ confirmationCandles	Stub logic now — future implementation
-✅ minLiquidity	Apply to volume threshold
-✅ takeProfit, stopLoss	Include in trade log for future exit logic
-✅ dryRun, maxDailyVolume, haltOnFailures	Add runtime behavior controls
-✅ cooldown	Prevent double-entry too fast
-*/
-
-/**
- * Adding volumeSpikeMultiplier
-What it does
-passes() already receives volumeWindow (e.g., "1h").
-volumeSpikeMultiplier compares the current window’s 
-volume to the average of the previous N windows (N is whatever your overview endpoint returns;
- Birdeye gives 24 samples for 1-hour windows):
- */

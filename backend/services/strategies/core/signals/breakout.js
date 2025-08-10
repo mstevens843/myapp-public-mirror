@@ -1,80 +1,125 @@
 /**
- * Breakout signal generator.
+ * Breakout signal helpers.
  *
- * This helper inspects simple arrays of price, liquidity and volume
- * information and emits high‑level breakout cues.  It is deliberately
- * synchronous and lightweight so it can be invoked from the hot path
- * without blocking.  Real implementations might source these inputs
- * from a cached feed or in‑memory store.
+ * This module implements additional breakout detection logic to
+ * differentiate the Breakout strategy from Sniper and other mid‑tier
+ * strategies.  In particular, it exposes a helper to detect Bollinger
+ * Band squeezes and volatility expansions on a short window.  When the
+ * rolling standard deviation of price data drops below a squeeze
+ * threshold and subsequently expands above a separate expansion
+ * threshold while volume surges, a breakout is considered to be in
+ * progress.
  *
- * Expected keys on the `state` object:
- *  - prices: Array<number> of recent trade prices (ascending in time)
- *  - lp:     Array<number> of recent liquidity pool depths or reserves
- *  - volume: Array<number> of recent traded volume figures
- *
- * The returned array contains objects with a `type` property.  The
- * supported types are:
- *  - "squeeze"     → volatility contraction (stddev drop)
- *  - "liquidityPull" → sudden drop in liquidity depth
- *  - "expansion"    → price breakout accompanied by volume surge
- *
- * @param {Object} state input data; all properties optional
- * @returns {Array<Object>} list of detected signals
+ * Note:  This helper uses a very simple in‑process implementation of
+ * Bollinger Bands and does not make external network calls.  It expects
+ * callers to provide recent candle data in the form of an array of
+ * objects with `open`, `high`, `low`, `close`, and `volume`
+ * properties.  In production this data would be sourced from an in
+ * memory cache or a lightweight paid API, but for dry‑run mode dummy
+ * arrays can be passed in.
  */
-module.exports = function breakoutSignals(state = {}) {
-  const signals = [];
-  const prices = Array.isArray(state.prices) ? state.prices : [];
-  const lp     = Array.isArray(state.lp)     ? state.lp     : [];
-  const volume = Array.isArray(state.volume) ? state.volume : [];
 
-  // Volatility squeeze: compare the standard deviation of the last
-  // 10 price points against the prior 10 points.  A significant drop
-  // (70% or more) suggests a compression in volatility.
-  if (prices.length >= 20) {
-    const last10 = prices.slice(-10);
-    const prev10 = prices.slice(-20, -10);
-    const stdev = (arr) => {
-      const mean = arr.reduce((acc, val) => acc + val, 0) / arr.length;
-      const variance = arr.reduce((acc, val) => acc + Math.pow(val - mean, 2), 0) / arr.length;
-      return Math.sqrt(variance);
-    };
-    const stdLast = stdev(last10);
-    const stdPrev = stdev(prev10);
-    if (stdPrev > 0 && stdLast < 0.7 * stdPrev) {
-      signals.push({ type: "squeeze" });
-    }
-  }
+/* eslint-disable no-console */
 
-  // Liquidity pull: the mean liquidity depth over the most recent
-  // 5 samples is significantly lower than the mean of the previous
-  // 5 samples.  This can signal an impending move as liquidity is
-  // withdrawn.
-  if (lp.length >= 10) {
-    const last5 = lp.slice(-5);
-    const prev5 = lp.slice(-10, -5);
-    const mean = (arr) => arr.reduce((acc, val) => acc + val, 0) / arr.length;
-    const meanLast = mean(last5);
-    const meanPrev = mean(prev5);
-    if (meanPrev > 0 && meanLast < 0.85 * meanPrev) {
-      signals.push({ type: "liquidityPull" });
-    }
-  }
+/**
+ * Calculate the simple moving average (SMA) for an array of numbers.
+ * @param {number[]} values
+ * @returns {number}
+ */
+function sma(values) {
+  if (!values || values.length === 0) return 0;
+  const sum = values.reduce((a, b) => a + b, 0);
+  return sum / values.length;
+}
 
-  // Expansion: price appreciation of at least 3% over the last five
-  // ticks accompanied by a surge in recent volume relative to the
-  // 10‑period baseline.  A breakout without volume is often a trap;
-  // this condition guards against that scenario.
-  if (prices.length >= 6 && volume.length >= 10) {
-    const priceNow = prices[prices.length - 1];
-    const pricePrev = prices[prices.length - 6];
-    if (pricePrev > 0 && (priceNow - pricePrev) / pricePrev >= 0.03) {
-      const mean = (arr) => arr.reduce((acc, val) => acc + val, 0) / arr.length;
-      const volLast3 = mean(volume.slice(-3));
-      const volLast10 = mean(volume.slice(-10));
-      if (volLast10 > 0 && volLast3 > 1.8 * volLast10) {
-        signals.push({ type: "expansion" });
-      }
-    }
+/**
+ * Calculate the sample standard deviation for an array of numbers.
+ * @param {number[]} values
+ * @param {number} mean
+ * @returns {number}
+ */
+function stddev(values, mean) {
+  if (!values || values.length === 0) return 0;
+  const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+/**
+ * Compute Bollinger Band values for the provided candle data.  Returns
+ * an object containing the moving average (mid), the lower band and
+ * upper band.  The `window` parameter controls how many candles are
+ * considered.  A `multiplier` controls the width of the bands.
+ *
+ * @param {Array<{open:number, high:number, low:number, close:number, volume:number}>} candles
+ * @param {number} window
+ * @param {number} multiplier
+ */
+function computeBollinger(candles, window = 20, multiplier = 2) {
+  const closes = candles.slice(-window).map(c => c.close);
+  const avg = sma(closes);
+  const sd = stddev(closes, avg);
+  return {
+    mid: avg,
+    lower: avg - multiplier * sd,
+    upper: avg + multiplier * sd,
+    stddev: sd,
+  };
+}
+
+/**
+ * Detect a volatility breakout by comparing the recent standard
+ * deviations against thresholds.  A squeeze is detected when the
+ * standard deviation stays below `squeezeThreshold` for `squeezeLookback`
+ * consecutive candles.  A subsequent expansion is detected when the
+ * standard deviation exceeds `expansionMultiplier` × the average
+ * standard deviation of the squeeze period.  Volume must also exceed
+ * `minVolumeSurge` (relative to the average volume of the squeeze
+ * period).  If all conditions are met, the function returns true.
+ *
+ * @param {Array<{open:number, high:number, low:number, close:number, volume:number}>} candles
+ * @param {object} opts
+ * @param {number} opts.squeezeThreshold - maximum stddev during squeeze
+ * @param {number} opts.expansionMultiplier - multiplier for expansion
+ * @param {number} opts.squeezeLookback - number of candles to confirm squeeze
+ * @param {number} opts.minVolumeSurge - minimum volume multiplier on expansion
+ * @returns {boolean}
+ */
+function detectVolatilityBreakout(candles, opts = {}) {
+  const {
+    squeezeThreshold = 0.002,
+    expansionMultiplier = 2.0,
+    squeezeLookback = 10,
+    minVolumeSurge = 2.0,
+  } = opts;
+  if (!candles || candles.length < squeezeLookback + 2) return false;
+  // Compute stddev series for the entire window
+  const stdSeries = [];
+  const volumes = [];
+  for (let i = 0; i < candles.length; i++) {
+    const slice = candles.slice(Math.max(0, i - squeezeLookback + 1), i + 1);
+    const closes = slice.map(c => c.close);
+    const avg = sma(closes);
+    stdSeries.push(stddev(closes, avg));
+    volumes.push(sma(slice.map(c => c.volume)));
   }
-  return signals;
+  // Identify the squeeze: last squeezeLookback candles below threshold
+  const recentStd = stdSeries.slice(-squeezeLookback);
+  const recentVol = volumes.slice(-squeezeLookback);
+  const avgStd = sma(recentStd);
+  const avgVol = sma(recentVol);
+  const inSqueeze = recentStd.every(sd => sd < squeezeThreshold);
+  if (!inSqueeze) return false;
+  // Now check the latest candle for expansion and volume surge
+  const lastStd = stdSeries[stdSeries.length - 1];
+  const lastVol = candles[candles.length - 1].volume;
+  const expansion = lastStd > avgStd * expansionMultiplier;
+  const volSurge = lastVol > avgVol * minVolumeSurge;
+  return expansion && volSurge;
+}
+
+module.exports = {
+  sma,
+  stddev,
+  computeBollinger,
+  detectVolatilityBreakout,
 };

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from "react";
 import { toast } from "sonner";
-import { Info, CheckCircle, Shield, Timer, Lock, Unlock, Power } from "lucide-react";
+import { Info, CheckCircle, Shield, Timer, Lock, Unlock, Send } from "lucide-react";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { getTelegramChatId } from "@/utils/telegramApi";
@@ -20,7 +20,7 @@ import { supabase } from "@/lib/supabase";
 // Authenticated fetch helper for /api calls
 import { authFetch } from "@/utils/authFetch";
 
-// 🔐 Encrypted Wallet Session helpers
+// 🔐 Encrypted Wallet Session helpers (+ Return Balance helpers)
 import {
   getArmStatus,
   armEncryptedWallet,
@@ -30,20 +30,11 @@ import {
   formatCountdown,
   setupWalletProtection,
   removeWalletProtection,
+  getAutoReturnSettings,
+  saveAutoReturnSettings,
 } from "@/utils/encryptedWalletSession";
 
-// Confirmation modal for potentially destructive actions (e.g. overwriting
-// pass‑phrases on other wallets). We import the helper which renders a
-// ConfirmModal on demand and returns a promise resolved with the user's
-// choice. See src/hooks/useConfirm.jsx for implementation.
-// We no longer rely on the global confirm modal for wallet protection changes.
-// Leaving the import commented out to avoid unused variable warnings.
-// import { openConfirmModal } from "@/hooks/useConfirm";
 import { useLocation } from "react-router-dom";
-// NOTE: We intentionally do not import the openConfirmModal helper here.
-// The “Use for ALL wallets” toggle now uses a simple built‑in confirmation
-// dialog instead of the custom Radix modal to avoid mount/unmount issues.
-
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -60,14 +51,13 @@ const MyAccountTab = () => {
   const [activeWallet, setActiveWallet] = useState(null);
   const [telegramChatId, setTelegramChatId] = useState(null);
 
-
   /* 2-FA */
   const [is2FAEnabled, setIs2FAEnabled] = useState(false);
-  const [require2faLogin, setRequire2faLogin] = useState(false); // ★ NEW
-  const [require2faArm, setRequire2faArm] = useState(false);   // ★ NEW
-  const [hasGlobalPassphrase, setHasGlobalPassphrase] = useState(false); // ★ NEW
-  const [armUseForAll, setArmUseForAll] = useState(false);     // ★ NEW
-  const [armPassphraseHint, setArmPassphraseHint] = useState("");      // ★ NEW
+  const [require2faLogin, setRequire2faLogin] = useState(false);
+  const [require2faArm, setRequire2faArm] = useState(false);
+  const [hasGlobalPassphrase, setHasGlobalPassphrase] = useState(false);
+  const [armUseForAll, setArmUseForAll] = useState(false);
+  const [armPassphraseHint, setArmPassphraseHint] = useState("");
   const [qrCodeUrl, setQrCodeUrl] = useState(null);
   const [twoFAToken, setTwoFAToken] = useState("");
   const inputRef = useRef(null);
@@ -84,18 +74,16 @@ const MyAccountTab = () => {
   // 🔐 Protected Mode + Arm modal state
   const [requireArm, setRequireArm] = useState(false);
   const [armStatus, setArmStatus] = useState({ armed: false, msLeft: 0 });
-  const [warned, setWarned] = useState(false); // pre-expiry toast guard
+  const [warned, setWarned] = useState(false);
 
   const [armModalOpen, setArmModalOpen] = useState(false);
   const [armPassphrase, setArmPassphrase] = useState("");
-  const [armDuration, setArmDuration] = useState(240); // minutes: 4h default
+  const [armDuration, setArmDuration] = useState(240); // minutes
   const [armMigrateLegacy, setArmMigrateLegacy] = useState(false);
   const [armBusy, setArmBusy] = useState(false);
   const [extendBusy, setExtendBusy] = useState(false);
   const [disarmBusy, setDisarmBusy] = useState(false);
 
-  // Additional state for pass‑phrase confirmation on first arm and
-  // destructive overwrites
   const [armPassphraseConfirm, setArmPassphraseConfirm] = useState("");
   const [forceOverwrite, setForceOverwrite] = useState(false);
 
@@ -105,90 +93,66 @@ const MyAccountTab = () => {
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
 
+  // ── NEW: Auto-Return (Return Balance) state
+  const [autoReturnConfigured, setAutoReturnConfigured] = useState(false);
+  const [autoReturnDest, setAutoReturnDest] = useState("");
+  const [autoReturnDefaultEnabled, setAutoReturnDefaultEnabled] = useState(false);
+  const [autoReturnModalOpen, setAutoReturnModalOpen] = useState(false);
+  const [autoReturnSaving, setAutoReturnSaving] = useState(false);
+  const [armAutoReturn, setArmAutoReturn] = useState(false);
+
   /* ───────── Derived helpers ───────── */
-  // Determine whether the currently active wallet has its own pass‑phrase.
-  // We attempt to infer this from multiple potential fields on the wallet.
-  // Some API responses expose a boolean `hasPassphrase` flag, while others
-  // surface a `passphraseHash` property.  If either value is truthy we
-  // consider the wallet protected.  We intentionally coalesce to false
-  // when these fields are undefined to avoid incorrectly marking a wallet
-  // as unprotected.  If the user has a global pass‑phrase (hasGlobalPassphrase)
-  // then the wallet is also effectively protected.
+  const { type, phantomPublicKey, refreshProfile, passphraseHint } = useUser();
+  const isWeb3 = type === "web3";
+
+  // Determine whether current wallet has protection
   const activeWalletHasPassphrase = !!(
     activeWallet?.hasPassphrase ||
-    // Some endpoints expose `passphraseHash` instead of `hasPassphrase`.  A
-    // non‑null/undefined value indicates a wallet-level passphrase.
-    (activeWallet?.passphraseHash !== null && activeWallet?.passphraseHash !== undefined) ||
-    // Fallback: Prisma may expose an `isProtected` flag when a pass‑phrase or
-    // default pass‑phrase is set.  Treat this as protected if true.
+    (activeWallet?.passphraseHash !== null &&
+      activeWallet?.passphraseHash !== undefined) ||
     activeWallet?.isProtected
   );
-  const armMode = (!activeWalletHasPassphrase && !hasGlobalPassphrase) ? "firstTime" : "existing";
+  const armMode =
+    !activeWalletHasPassphrase && !hasGlobalPassphrase ? "firstTime" : "existing";
 
-  /**
-   * handleUseForAllToggle
-   * Invoked when the user toggles the "Use for ALL wallets" checkbox. If
-   * the checkbox is being turned on and there are existing wallets with
-   * custom pass‑phrases, a confirmation dialog is shown. If the user
-   * proceeds we set forceOverwrite=true so that the backend overwrites
-   * those wallets; otherwise we revert the toggle. When toggling off or
-   * when no custom wallets exist, forceOverwrite is reset.
-   *
-   * @param {boolean} checked - The new state of the checkbox
-   */
+  // Handle "Use for ALL wallets" confirmation
   const handleUseForAllToggle = (checked) => {
-    // When toggling on the “Use for ALL wallets” option, check if any
-    // existing wallets (excluding the currently selected one) already
-    // have a custom pass‑phrase configured. If so, warn the user that
-    // their pass‑phrases will be overwritten and prompt for confirmation.
     if (checked) {
       const customCount = wallets.filter((w) => {
         if (w.id === activeWallet?.id) return false;
-        const hasCustom = w.hasPassphrase ||
+        const hasCustom =
+          w.hasPassphrase ||
           (w.passphraseHash !== null && w.passphraseHash !== undefined) ||
           w.isProtected;
         return !!hasCustom;
       }).length;
 
       if (customCount > 0) {
-        // Use the built‑in browser confirm dialog for a quick and
-        // inline confirmation. This avoids the complexity of importing
-        // additional helpers or dealing with React unmount race conditions.
         const ok = window.confirm(
-          `This will overwrite the pass‑phrase on ${customCount} wallet${customCount > 1 ? 's' : ''}. Proceed?`
+          `This will overwrite the pass‑phrase on ${customCount} wallet${
+            customCount > 1 ? "s" : ""
+          }. Proceed?`
         );
         if (ok) {
           setArmUseForAll(true);
           setForceOverwrite(true);
         } else {
-          // If the user cancels, revert the toggle and ensure force
-          // overwrite is disabled.
           setArmUseForAll(false);
           setForceOverwrite(false);
         }
         return;
       }
     }
-    // Either toggling off or there are no custom wallets to overwrite.
     setArmUseForAll(checked);
     setForceOverwrite(false);
   };
-
-  /* ───────── Helpers ───────── */
-  // Destructure refreshProfile and passphraseHint from UserProvider so we can
-  // sync global context after changes and show pass‑phrase hints when
-  // unlocking or removing protection.  The passphraseHint comes from
-  // /auth/me and represents the user's global pass‑phrase hint.
-  const { type, phantomPublicKey, refreshProfile, passphraseHint } = useUser();
-  const isWeb3 = type === "web3";
-  
 
   /* ───────── Focus token field when QR shows ───────── */
   useEffect(() => {
     if (qrCodeUrl && inputRef.current) inputRef.current.focus();
   }, [qrCodeUrl]);
 
-  /* ───────── Fetch data ───────── */
+  /* ───────── Fetch primary data ───────── */
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -201,7 +165,6 @@ const MyAccountTab = () => {
         fetchActiveWallet(),
       ]);
 
-      // Fix email/username swap for web users
       if (type !== "web3") {
         if (!profileData.email && profileData.username?.includes("@")) {
           profileData.email = profileData.username;
@@ -213,8 +176,6 @@ const MyAccountTab = () => {
       }
 
       setProfile(profileData || null);
-      // We'll fetch additional auth details (2FA toggles, global passphrase)
-      // from /api/auth/me below. Fallback to profileData for basic info.
       setIs2FAEnabled(profileData?.is2FAEnabled || false);
       setRequire2faLogin(!!profileData?.require2faLogin);
       setRequireArm(!!profileData?.requireArmToTrade);
@@ -237,23 +198,37 @@ const MyAccountTab = () => {
     })();
   }, []);
 
-  // Load extended auth info (2FA toggles, global passphrase) on mount
+  // Extended auth info (2FA toggles, global passphrase) + auto-return settings
   useEffect(() => {
     (async () => {
       try {
-        const res = await authFetch('/api/auth/me', { method: 'GET' });
-        if (!res.ok) return;
-        const data = await res.json();
-        const u = data?.user;
-        if (u) {
-          setIs2FAEnabled(!!u.is2FAEnabled);
-          setRequire2faLogin(!!u.require2faLogin);
-          setRequire2faArm(!!u.require2faArm);
-          setRequireArm(!!u.requireArmToTrade);
-          setHasGlobalPassphrase(!!u.hasGlobalPassphrase);
+        const res = await authFetch("/api/auth/me", { method: "GET" });
+        if (res.ok) {
+          const data = await res.json();
+          const u = data?.user;
+          if (u) {
+            setIs2FAEnabled(!!u.is2FAEnabled);
+            setRequire2faLogin(!!u.require2faLogin);
+            setRequire2faArm(!!u.require2faArm);
+            setRequireArm(!!u.requireArmToTrade);
+            setHasGlobalPassphrase(!!u.hasGlobalPassphrase);
+          }
         }
       } catch (err) {
-        console.error('Failed to load auth/me:', err);
+        console.error("Failed to load auth/me:", err);
+      }
+
+      try {
+        const settings = await getAutoReturnSettings();
+        if (settings) {
+          setAutoReturnConfigured(!!settings.destPubkey);
+          setAutoReturnDest(settings.destPubkey || "");
+          setAutoReturnDefaultEnabled(!!settings.defaultEnabled);
+          setArmAutoReturn(!!settings.defaultEnabled);
+        }
+      } catch (err) {
+        // if endpoint missing that's fine; user can still arm without it
+        console.warn("Auto-Return settings not available:", err?.message);
       }
     })();
   }, []);
@@ -279,9 +254,7 @@ const MyAccountTab = () => {
     return () => timer && clearTimeout(timer);
   }, [activeWallet?.id]);
 
-  
-
-  // ⏱️ Local 1-second countdown between polls + pre-expiry toast at T-15m
+  // ⏱️ Local 1-second countdown
   useEffect(() => {
     if (!armStatus.armed || armStatus.msLeft <= 0) return;
     const tick = setInterval(() => {
@@ -293,6 +266,7 @@ const MyAccountTab = () => {
     return () => clearInterval(tick);
   }, [armStatus.armed]);
 
+  // Pre-expiry toast at T-15m
   useEffect(() => {
     if (!armStatus.armed) return;
     if (!warned && armStatus.msLeft > 0 && armStatus.msLeft <= PRE_EXPIRY_MS) {
@@ -307,13 +281,12 @@ const MyAccountTab = () => {
     }
   }, [armStatus.armed, armStatus.msLeft, warned]);
 
-
   const location = useLocation();
-useEffect(() => {
-  if (location.state?.openArm) setArmModalOpen(true);
-}, [location.state]);
+  useEffect(() => {
+    if (location.state?.openArm) setArmModalOpen(true);
+  }, [location.state]);
 
-  /* ───────── Profile actions ───────── */
+  /* ───────── Actions ───────── */
   const handleSaveProfile = async () => {
     if (await updateProfile(profile)) toast.success("Profile updated.");
     else toast.error("Failed to update profile.");
@@ -322,29 +295,24 @@ useEffect(() => {
   const handleChangePassword = async () => {
     if (!currentPassword || !newPassword || !confirmPassword)
       return toast.error("Fill out every password field.");
-
-    if (newPassword !== confirmPassword)
-      return toast.error("New passwords do not match.");
+    if (newPassword !== confirmPassword) return toast.error("New passwords do not match.");
 
     try {
       const {
         data: { user },
         error: userErr,
       } = await supabase.auth.getUser();
-
       if (userErr || !user) {
         console.error("Supabase getUser error:", userErr);
         return toast.error("Failed to verify user session.");
       }
 
       const userType = user.user_metadata?.type || "web";
-
       if (userType !== "web") {
         return toast.error("Password changes are only supported for Web accounts.");
       }
 
       const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
-
       if (updateError) {
         console.error("Supabase password update failed:", updateError.message);
         return toast.error("Failed to update password.");
@@ -368,7 +336,6 @@ useEffect(() => {
     } else toast.error("Failed to delete account.");
   };
 
-  /* ───────── 2FA actions ───────── */
   const handleEnable2FA = async () => {
     try {
       const res = await enable2FA();
@@ -405,9 +372,7 @@ useEffect(() => {
     } else toast.error("Failed to disable 2FA.");
   };
 
-
-    /* ───────── Toggles ───────── */
-  const handleToggleLogin2FA = async () => {                         // ★ NEW
+  const handleToggleLogin2FA = async () => {
     try {
       const next = !require2faLogin;
       const ok = await updateProfile({ require2faLogin: next });
@@ -418,9 +383,8 @@ useEffect(() => {
     } catch (e) {
       toast.error(e.message || "Failed to update setting.");
     }
-  }
+  };
 
-  // Toggle requiring 2FA when arming a wallet
   const handleToggleArm2FA = async () => {
     try {
       const next = !require2faArm;
@@ -434,7 +398,6 @@ useEffect(() => {
     }
   };
 
-  /* ───────── Protected Mode actions ───────── */
   const handleToggleProtectedMode = async () => {
     try {
       const next = !requireArm;
@@ -448,41 +411,33 @@ useEffect(() => {
 
   const handleOpenArm = () => {
     if (!activeWallet?.id) return toast.error("No active wallet selected.");
-    // When arming we require 2FA only if the user has enabled 2FA and
-    // require2faArm is on. Simply enabling 2FA isn't enough; the arm
-    // requirement gate is a separate toggle.
-    // If the user has requested 2FA for arm/unlock and they haven't set up 2FA
-    // yet, block unlocking existing wallets.  However, initial pass‑phrase
-    // setup should not require enabling 2FA.
     if (armMode !== "firstTime" && require2faArm && !is2FAEnabled) {
-      return toast.error("Enable 2FA before you can arm this wallet. Go to the Security tab to set up 2FA.");
+      return toast.error(
+        "Enable 2FA before you can arm this wallet. Go to the Security tab to set up 2FA."
+      );
     }
+    // initialize per-session checkbox from default
+    setArmAutoReturn(autoReturnDefaultEnabled);
     setArmModalOpen(true);
   };
 
   const handleArm = async () => {
-    // Basic validation: pass‑phrase is required. On first arm ensure the
-    // confirmation matches.
-    if (!armPassphrase) {
-      return toast.error("Enter your wallet pass‑phrase.");
-    }
+    if (!armPassphrase) return toast.error("Enter your wallet pass‑phrase.");
     if (armMode === "firstTime") {
-      if (!armPassphraseConfirm) {
-        return toast.error("Confirm your pass‑phrase.");
-      }
-      if (armPassphrase !== armPassphraseConfirm) {
+      if (!armPassphraseConfirm) return toast.error("Confirm your pass‑phrase.");
+      if (armPassphrase !== armPassphraseConfirm)
         return toast.error("Pass‑phrases do not match.");
-      }
     }
-    // If 2FA is required but no token provided, abort early.  Two‑factor
-    // authentication is only enforced when unlocking an existing wallet.
     if (armMode !== "firstTime" && require2faArm && is2FAEnabled && !twoFAToken) {
       return toast.error("Enter your 2FA code.");
+    }
+    if (armAutoReturn && !autoReturnDest) {
+      setAutoReturnModalOpen(true);
+      return toast.error("Set a safe wallet destination first.");
     }
     setArmBusy(true);
     try {
       if (armMode === "firstTime") {
-        // For first‑time setup we only protect the wallet; do not arm it yet.
         await setupWalletProtection({
           walletId: activeWallet.id,
           passphrase: armPassphrase,
@@ -493,19 +448,15 @@ useEffect(() => {
               : undefined,
           forceOverwrite,
         });
-        // Update local state to reflect that the wallet is now protected.  We
-        // leave the session unarmed so the user must explicitly unlock.
         setArmStatus({ armed: false, msLeft: 0 });
         setWarned(false);
         setArmModalOpen(false);
-        // Clear form fields
         setArmPassphrase("");
         setArmPassphraseConfirm("");
         setTwoFAToken("");
         setArmUseForAll(false);
         setForceOverwrite(false);
         setArmPassphraseHint("");
-        // Update wallet state locally so that the UI switches to existing mode
         if (activeWallet) {
           setActiveWallet((prev) =>
             prev && prev.id === activeWallet.id
@@ -515,7 +466,7 @@ useEffect(() => {
                   hasPassphrase: true,
                   passphraseHash: prev.passphraseHash || "set",
                 }
-              : prev,
+              : prev
           );
           setWallets((prev) =>
             prev.map((w) =>
@@ -526,14 +477,11 @@ useEffect(() => {
                     hasPassphrase: true,
                     passphraseHash: w.passphraseHash || "set",
                   }
-                : w,
-            ),
+                : w
+            )
           );
         }
-        // If the user applied the pass‑phrase globally, flag global state
-        if (armUseForAll) {
-          setHasGlobalPassphrase(true);
-        }
+        if (armUseForAll) setHasGlobalPassphrase(true);
         toast.success(
           armUseForAll
             ? "Pass‑phrase applied to all wallets. Your wallets are now protected."
@@ -543,15 +491,13 @@ useEffect(() => {
         const res = await armEncryptedWallet({
           walletId: activeWallet.id,
           passphrase: armPassphrase,
-          twoFactorToken:
-            armMode !== "firstTime" && require2faArm && is2FAEnabled
-              ? twoFAToken
-              : undefined,
+          twoFactorToken: require2faArm && is2FAEnabled ? twoFAToken : undefined,
           ttlMinutes: armDuration,
           migrateLegacy: armMigrateLegacy,
           applyToAll: armUseForAll,
-          passphraseHint: undefined,
           forceOverwrite,
+          autoReturnOnEnd: armAutoReturn,
+          autoReturnDest: autoReturnDest || undefined,
         });
         setArmStatus({
           armed: true,
@@ -570,19 +516,13 @@ useEffect(() => {
         );
       }
     } catch (e) {
-      // If the backend signals that 2FA is required (needs2FA) or returns
-      // a 403 Forbidden status, show a dedicated toast rather than a generic
-      // error. The underlying httpJson helper surfaces only the message,
-      // but our 2FA middleware returns an object without an `error` field,
-      // which results in the generic status text "Forbidden". We treat
-      // both markers as an indicator that 2FA setup is required.
       const msg = e.message || "";
       if (/needs2FA/i.test(msg) || /forbidden/i.test(msg)) {
-        toast.error(
-          "Enable 2FA before you can arm this wallet. Visit the Security tab."
-        );
+        toast.error("Enable 2FA before you can arm this wallet. Visit the Security tab.");
       } else {
-        toast.error(msg || (armMode === "firstTime" ? "Failed to set up protection." : "Failed to arm."));
+        toast.error(
+          msg || (armMode === "firstTime" ? "Failed to set up protection." : "Failed to arm.")
+        );
       }
     } finally {
       setArmBusy(false);
@@ -593,12 +533,15 @@ useEffect(() => {
     if (!activeWallet?.id) return;
     setExtendBusy(true);
     try {
-       await extendEncryptedWallet({
-         walletId: activeWallet.id,
-         twoFactorToken: twoFAToken || undefined,
-         ttlMinutes: minutes,
-       });
-      setArmStatus((prev) => ({ armed: true, msLeft: Math.max(prev.msLeft, 0) + minutes * 60 * 1000 }));
+      await extendEncryptedWallet({
+        walletId: activeWallet.id,
+        twoFactorToken: twoFAToken || undefined,
+        ttlMinutes: minutes,
+      });
+      setArmStatus((prev) => ({
+        armed: true,
+        msLeft: Math.max(prev.msLeft, 0) + minutes * 60 * 1000,
+      }));
       toast.success(`Session extended ${minutes} minutes.`);
     } catch (e) {
       toast.error(e.message || "Failed to extend.");
@@ -611,10 +554,10 @@ useEffect(() => {
     if (!activeWallet?.id) return;
     setDisarmBusy(true);
     try {
-       await disarmEncryptedWallet({
-         walletId: activeWallet.id,
-         twoFactorToken: twoFAToken || undefined,
-       });      
+      await disarmEncryptedWallet({
+        walletId: activeWallet.id,
+        twoFactorToken: twoFAToken || undefined,
+      });
       setArmStatus({ armed: false, msLeft: 0 });
       setWarned(false);
       toast.success("Automation disarmed.");
@@ -625,13 +568,8 @@ useEffect(() => {
     }
   };
 
-  /**
-   * Remove pass‑phrase protection from the currently active wallet.  This will
-   * prompt the user for the current pass‑phrase and then call the backend
-   * API to remove protection.  After success the local state is updated to
-   * reflect an unprotected wallet and the requireArm flag is cleared.
-   */
-  // Handle confirmation of remove protection in modal
+  // Remove protection
+  const [removeErrorShown, setRemoveErrorShown] = useState(false);
   const handleRemoveProtection = async () => {
     if (!activeWallet?.id) {
       setRemoveError("No active wallet selected.");
@@ -646,29 +584,24 @@ useEffect(() => {
     setRemoveError("");
     try {
       await removeWalletProtection({ walletId: activeWallet.id, passphrase });
-      // Reset Protected Mode requirement at user level
       try {
         await setRequireArmToTrade(false);
       } catch {}
       setRequireArm(false);
-      // Reload wallet list to update protection flags
-      const [allWallets, activeW] = await Promise.all([
-        loadWallet(),
-        fetchActiveWallet(),
-      ]);
+      const [allWallets, activeW] = await Promise.all([loadWallet(), fetchActiveWallet()]);
       setWallets(allWallets || []);
       setActiveWallet(activeW || null);
       toast.success("Protection removed.");
-      // Refresh global user context so Layout reflects updated protection state
       try {
         await refreshProfile();
       } catch (err) {
-        console.error('Failed to refresh profile after remove:', err);
+        console.error("Failed to refresh profile after remove:", err);
       }
       setRemoveModalOpen(false);
       setRemovePassphrase("");
     } catch (e) {
       setRemoveError(e.message || "Failed to remove protection.");
+      setRemoveErrorShown(true);
     } finally {
       setRemoveBusy(false);
     }
@@ -689,7 +622,7 @@ useEffect(() => {
         </span>
       </div>
 
-      {/* 🔐 Armed banner (sticky-ish) */}
+      {/* 🔐 Armed banner */}
       {armStatus.armed && (
         <div className="bg-emerald-700/50 border border-emerald-600 rounded-lg p-3 mb-6 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -708,11 +641,7 @@ useEffect(() => {
               <Timer className="mr-1" size={16} />
               Extend +2h
             </Button>
-            <Button
-              className="bg-red-600 text-white"
-              disabled={disarmBusy}
-              onClick={handleDisarm}
-            >
+            <Button className="bg-red-600 text-white" disabled={disarmBusy} onClick={handleDisarm}>
               <Lock className="mr-1" size={16} />
               Disarm
             </Button>
@@ -727,30 +656,20 @@ useEffect(() => {
         <div className="bg-zinc-800 p-4 rounded-lg">
           <h3 className="text-lg font-semibold">Profile Information</h3>
           <div className="mt-2 space-y-2">
-            {/* Web users: email + username */}
             {!isWeb3 && (
               <>
                 <label>Email (read-only)</label>
-                <input
-                  type="email"
-                  value={profile.email || ""}
-                  disabled
-                  className="w-full p-2 rounded"
-                />
-
+                <input type="email" value={profile.email || ""} disabled className="w-full p-2 rounded" />
                 <label>Username</label>
                 <input
                   type="text"
                   value={profile.username || ""}
-                  onChange={(e) =>
-                    setProfile((prev) => ({ ...prev, username: e.target.value }))
-                  }
+                  onChange={(e) => setProfile((prev) => ({ ...prev, username: e.target.value }))}
                   className="w-full p-2 rounded"
                 />
               </>
             )}
 
-            {/* Web3 users: Phantom public key only */}
             {isWeb3 && (
               <>
                 <label>Phantom Wallet</label>
@@ -759,10 +678,7 @@ useEffect(() => {
                     {showPhantom ? phantomPublicKey : "●●●●●●●●●●●●●●●●●●●"}
                   </span>
                   <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setShowPhantom(!showPhantom)}
-                      className="text-zinc-400 hover:text-white"
-                    >
+                    <button onClick={() => setShowPhantom(!showPhantom)} className="text-zinc-400 hover:text-white">
                       {showPhantom ? "Hide" : "Show"}
                     </button>
                     <button
@@ -780,10 +696,7 @@ useEffect(() => {
             )}
 
             {!isWeb3 && (
-              <Button
-                onClick={handleSaveProfile}
-                className="mt-2 bg-emerald-600 text-white"
-              >
+              <Button onClick={handleSaveProfile} className="mt-2 bg-emerald-600 text-white">
                 Save Profile
               </Button>
             )}
@@ -795,10 +708,7 @@ useEffect(() => {
           <div className="bg-zinc-800 p-4 rounded-lg">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold">Change Password</h3>
-              <button
-                onClick={() => setShowPasswordForm((prev) => !prev)}
-                className="text-sm text-emerald-400 hover:underline"
-              >
+              <button onClick={() => setShowPasswordForm((prev) => !prev)} className="text-sm text-emerald-400 hover:underline">
                 {showPasswordForm ? "Hide" : "Update"}
               </button>
             </div>
@@ -826,10 +736,7 @@ useEffect(() => {
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   className="w-full p-2 rounded text-black"
                 />
-                <Button
-                  onClick={handleChangePassword}
-                  className="bg-emerald-600 text-white"
-                >
+                <Button onClick={handleChangePassword} className="bg-emerald-600 text-white">
                   Change Password
                 </Button>
               </div>
@@ -847,21 +754,34 @@ useEffect(() => {
           <p className="text-sm">
             <span className="font-medium">Total Wallets:</span> {wallets.length}
           </p>
-          <a
-            href="/wallets"
-            className="inline-block mt-2 text-emerald-400 hover:underline text-sm"
-          >
+          <a href="/wallets" className="inline-block mt-2 text-emerald-400 hover:underline text-sm">
             Manage Wallets →
           </a>
         </div>
 
         {/* 🔐 Wallet Protection (Protected Mode) */}
         <div className="bg-zinc-800 p-4 rounded-lg">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            <Shield size={18} />
-            Wallet Protection
-          </h3>
-          {/* Explanation text for wallet protection and arming */}
+          <div className="flex items-start justify-between">
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              <Shield size={18} />
+              Wallet Protection
+            </h3>
+
+            {/* NEW: Auto-Return Setup button (top-right of the card) */}
+            {(activeWalletHasPassphrase || hasGlobalPassphrase) && (
+              <Button
+                variant="outline"
+                className="text-emerald-300 border-emerald-600 hover:bg-emerald-900/20"
+                onClick={() => setAutoReturnModalOpen(true)}
+                title="Configure a safe wallet to sweep balances to after a session ends"
+              >
+                <Send size={16} className="mr-2" />
+                Set up Auto‑Return
+              </Button>
+            )}
+          </div>
+
+          {/* Explanation text */}
           <p className="text-sm text-zinc-400 mt-1">
             Protect this wallet with a passphrase so bots can’t auto‑trade unless you unlock it.
           </p>
@@ -869,37 +789,45 @@ useEffect(() => {
             <strong>What is Arming?</strong> Arming unlocks your wallet for bot trading without exposing your private key. You control when the bot is allowed to trade by entering your passphrase and 2FA (if enabled). It lasts a few hours and auto‑locks again when it expires.
           </p>
 
+          {/* subtle status row for auto-return */}
+          {(activeWalletHasPassphrase || hasGlobalPassphrase) && (
+            <div className="mt-3 text-xs text-zinc-400">
+              Auto‑Return:{" "}
+              {autoReturnConfigured ? (
+                <span className="text-emerald-400">
+                  Configured {autoReturnDefaultEnabled ? "(default on)" : "(default off)"} →{" "}
+                  <span className="font-mono">{autoReturnDest.slice(0, 6)}…{autoReturnDest.slice(-6)}</span>
+                </span>
+              ) : (
+                <span className="text-amber-400">Not configured</span>
+              )}
+            </div>
+          )}
+
           <div className="mt-3 flex items-center justify-between">
-            {/* Left side: show Remove Protection when wallet is protected */}
             <div className="text-sm flex items-center">
-             {activeWalletHasPassphrase || hasGlobalPassphrase ? (
-               <Button
-                 variant="ghost"           
-                 className="text-red-400 bg-red-500/10 text-xs px-2 py-1"
-                 onClick={() => setRemoveModalOpen(true)}
-               >
-                 Remove&nbsp;Protection
-               </Button>
-             ) : (
-               <span className="text-zinc-500 text-xs">Protection&nbsp;not&nbsp;set</span>
-             )}
+              {activeWalletHasPassphrase || hasGlobalPassphrase ? (
+                <Button
+                  variant="ghost"
+                  className="text-red-400 bg-red-500/10 text-xs px-2 py-1"
+                  onClick={() => setRemoveModalOpen(true)}
+                >
+                  Remove&nbsp;Protection
+                </Button>
+              ) : (
+                <span className="text-zinc-500 text-xs">Protection&nbsp;not&nbsp;set</span>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
               {!armStatus.armed ? (
                 armMode === "firstTime" ? (
-                  <Button
-                    className="bg-emerald-600 text-white"
-                    onClick={handleOpenArm}
-                  >
+                  <Button className="bg-emerald-600 text-white" onClick={handleOpenArm}>
                     <Lock className="mr-1" size={16} />
                     Set Up Protection
                   </Button>
                 ) : (
-                  <Button
-                    className="bg-emerald-600 text-white"
-                    onClick={handleOpenArm}
-                  >
+                  <Button className="bg-emerald-600 text-white" onClick={handleOpenArm}>
                     <Unlock className="mr-1" size={16} />
                     Arm Now
                   </Button>
@@ -963,7 +891,6 @@ useEffect(() => {
                     onChange={(e) => setArmPassphraseConfirm(e.target.value)}
                     className="w-full p-2 rounded text-black"
                   />
-                  {/* Global pass‑phrase option on first arm */}
                   {hasGlobalPassphrase ? (
                     <div className="flex flex-col gap-1">
                       <label className="flex items-center gap-2 text-sm">
@@ -1008,16 +935,13 @@ useEffect(() => {
                     onChange={(e) => setArmPassphrase(e.target.value)}
                     className="w-full p-2 rounded text-black"
                   />
-                  {/* Show a subtle hint to help the user recall their pass‑phrase.  The
-                      hint is provided by the backend via /auth/me and is purely
-                      informational. */}
                   {passphraseHint && (
                     <p className="mt-1 text-xs text-zinc-500">Hint: {passphraseHint}</p>
                   )}
                 </>
               )}
 
-              {/* 2FA Code: show only when unlocking and required */}
+              {/* 2FA Code */}
               {armMode !== "firstTime" && require2faArm && is2FAEnabled && (
                 <>
                   <label className="text-sm">2FA Code</label>
@@ -1031,7 +955,7 @@ useEffect(() => {
                 </>
               )}
 
-              {/* Duration selector: only shown when unlocking */}
+              {/* Duration */}
               {armMode !== "firstTime" && (
                 <>
                   <label className="text-sm">Duration</label>
@@ -1047,7 +971,7 @@ useEffect(() => {
                 </>
               )}
 
-              {/* Legacy migration option (hide on first arm) */}
+              {/* Legacy migration */}
               {armMode !== "firstTime" && (
                 <label className="flex items-center gap-2 text-sm">
                   <input
@@ -1059,22 +983,96 @@ useEffect(() => {
                 </label>
               )}
 
+              {/* NEW: Auto-Return per-session checkbox */}
+              {armMode !== "firstTime" && (
+                <div className="mt-2 p-3 rounded bg-emerald-900/20 border border-emerald-800">
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={armAutoReturn}
+                      onChange={(e) => setArmAutoReturn(e.target.checked)}
+                    />
+                    Auto‑return all balances (keep ~0.01 SOL) to safe wallet when this session ends
+                  </label>
+                  {autoReturnDest ? (
+                    <p className="text-xs text-zinc-400 mt-1">
+                      Safe wallet: <span className="font-mono">{autoReturnDest.slice(0, 6)}…{autoReturnDest.slice(-6)}</span>
+                    </p>
+                  ) : (
+                    <div className="text-xs text-amber-400 mt-1 flex items-center justify-between">
+                      <span>No safe wallet configured yet.</span>
+                      <button
+                        className="underline text-emerald-400"
+                        onClick={() => setAutoReturnModalOpen(true)}
+                      >
+                        Set one up
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-2">
                 <Button variant="ghost" onClick={() => setArmModalOpen(false)}>
                   Cancel
                 </Button>
+                <Button className="bg-emerald-600 text-white" onClick={handleArm} disabled={armBusy}>
+                  {armBusy ? (armMode === "firstTime" ? "Saving…" : "Unlocking…") : armMode === "firstTime" ? "Set Up Protection" : "Unlock"}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* Auto-Return Setup Modal */}
+        <Dialog open={autoReturnModalOpen} onOpenChange={setAutoReturnModalOpen}>
+          <DialogContent>
+            <h3 className="text-xl font-bold mb-2">Set up Auto‑Return</h3>
+            <p className="text-sm text-zinc-400 mb-4">
+              Choose a safe wallet to sweep balances to after a session ends. We'll keep ~0.01 SOL for rent/fees.
+            </p>
+            <div className="space-y-3">
+              <label className="text-sm">Safe Wallet (public key)</label>
+              <input
+                type="text"
+                placeholder="Paste destination pubkey"
+                value={autoReturnDest}
+                onChange={(e) => setAutoReturnDest(e.target.value.trim())}
+                className="w-full p-2 rounded text-black"
+              />
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={autoReturnDefaultEnabled}
+                  onChange={(e) => setAutoReturnDefaultEnabled(e.target.checked)}
+                />
+                Enable Auto‑Return by default when arming
+              </label>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button variant="ghost" onClick={() => setAutoReturnModalOpen(false)}>
+                  Cancel
+                </Button>
                 <Button
                   className="bg-emerald-600 text-white"
-                  onClick={handleArm}
-                  disabled={armBusy}
+                  disabled={autoReturnSaving || !autoReturnDest}
+                  onClick={async () => {
+                    setAutoReturnSaving(true);
+                    try {
+                      await saveAutoReturnSettings({
+                        destPubkey: autoReturnDest,
+                        defaultEnabled: autoReturnDefaultEnabled,
+                      });
+                      setAutoReturnConfigured(true);
+                      toast.success("Auto‑Return destination saved.");
+                      setAutoReturnModalOpen(false);
+                    } catch (e) {
+                      toast.error(e.message || "Failed to save Auto‑Return settings.");
+                    } finally {
+                      setAutoReturnSaving(false);
+                    }
+                  }}
                 >
-                  {armBusy
-                    ? armMode === "firstTime"
-                      ? "Saving…"
-                      : "Unlocking…"
-                    : armMode === "firstTime"
-                    ? "Set Up Protection"
-                    : "Unlock"}
+                  {autoReturnSaving ? "Saving…" : "Save"}
                 </Button>
               </div>
             </div>
@@ -1101,29 +1099,20 @@ useEffect(() => {
                 onChange={(e) => setRemovePassphrase(e.target.value)}
                 className="w-full p-2 rounded text-black"
               />
-              {/* Display the global pass‑phrase hint when available so users
-                  attempting to remove protection can recall their pass‑phrase. */}
-              {passphraseHint && (
-                <p className="mt-1 text-xs text-zinc-500">Hint: {passphraseHint}</p>
-              )}
-              {removeError && (
-                <div className="rounded bg-red-500/20 p-2 text-sm text-red-400">
-                  {removeError}
-                </div>
-              )}
+              {passphraseHint && <p className="mt-1 text-xs text-zinc-500">Hint: {passphraseHint}</p>}
+              {removeError && <div className="rounded bg-red-500/20 p-2 text-sm text-red-400">{removeError}</div>}
               <div className="flex justify-end gap-2 pt-2">
-                <Button variant="ghost" onClick={() => {
-                  setRemoveModalOpen(false);
-                  setRemovePassphrase("");
-                  setRemoveError("");
-                }}>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setRemoveModalOpen(false);
+                    setRemovePassphrase("");
+                    setRemoveError("");
+                  }}
+                >
                   Cancel
                 </Button>
-                <Button
-                  className="bg-red-600 text-white"
-                  disabled={removeBusy}
-                  onClick={handleRemoveProtection}
-                >
+                <Button className="bg-red-600 text-white" disabled={removeBusy} onClick={handleRemoveProtection}>
                   {removeBusy ? "Removing…" : "Remove Protection"}
                 </Button>
               </div>
@@ -1142,10 +1131,7 @@ useEffect(() => {
             <span className="font-medium">Usage:</span>{" "}
             {usage.toLocaleString()} / {limit.toLocaleString()} CU
           </p>
-          <a
-            href="/payments"
-            className="inline-block mt-2 text-emerald-400 hover:underline text-sm"
-          >
+          <a href="/payments" className="inline-block mt-2 text-emerald-400 hover:underline text-sm">
             Manage Subscription →
           </a>
         </div>
@@ -1155,67 +1141,41 @@ useEffect(() => {
           <h3 className="text-lg font-semibold flex items-center gap-2">📲 Telegram Alerts</h3>
           {telegramChatId ? (
             <p className="text-sm mt-1">
-              Connected to Chat ID:{" "}
-              <span className="text-emerald-400">@{telegramChatId}</span>
+              Connected to Chat ID: <span className="text-emerald-400">@{telegramChatId}</span>
             </p>
           ) : (
             <p className="text-sm mt-1 text-red-400">Not connected</p>
           )}
-          <a
-            href="/telegram"
-            className="inline-block mt-2 text-emerald-400 hover:underline text-sm"
-          >
+          <a href="/telegram" className="inline-block mt-2 text-emerald-400 hover:underline text-sm">
             {telegramChatId ? "Manage Alerts →" : "Set up Alerts →"}
           </a>
         </div>
 
         {/* ───── Two-Factor Auth ───── */}
         <div className="bg-zinc-800 p-4 rounded-lg">
-          <h3 className="text-lg font-semibold flex items-center gap-2">
-            🔒 Two-Factor Authentication
-          </h3>
-
+          <h3 className="text-lg font-semibold flex items-center gap-2">🔒 Two-Factor Authentication</h3>
           {is2FAEnabled ? (
             <>
-              <p className="text-sm mt-1 text-emerald-400">
-                2FA is enabled on your account.
-              </p>
-
-              {/* 2FA toggles */}
+              <p className="text-sm mt-1 text-emerald-400">2FA is enabled on your account.</p>
               <div className="flex flex-col gap-2 mt-3">
                 <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={require2faLogin}
-                    onChange={handleToggleLogin2FA}
-                  />
+                  <input type="checkbox" checked={require2faLogin} onChange={handleToggleLogin2FA} />
                   <span>Require 2FA on Login (extra secure)</span>
                 </label>
                 <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={require2faArm}
-                    onChange={handleToggleArm2FA}
-                  />
+                  <input type="checkbox" checked={require2faArm} onChange={handleToggleArm2FA} />
                   <span>Require 2FA when arming (Arm‑to‑Trade)</span>
                 </label>
               </div>
-
               <Dialog open={disableDialogOpen} onOpenChange={setDisableDialogOpen}>
                 <DialogTrigger asChild>
-                  <Button
-                    className="mt-2 bg-red-600 text-white"
-                    onClick={() => setDisableDialogOpen(true)}
-                  >
+                  <Button className="mt-2 bg-red-600 text-white" onClick={() => setDisableDialogOpen(true)}>
                     Disable 2FA
                   </Button>
                 </DialogTrigger>
-
                 <DialogContent>
                   <h3 className="text-lg text-white mb-2">Confirm Disable 2FA</h3>
-                  <p className="text-sm text-gray-400 mb-4">
-                    Are you sure you want to disable two-factor authentication?
-                  </p>
+                  <p className="text-sm text-gray-400 mb-4">Are you sure you want to disable two-factor authentication?</p>
                   <div className="flex justify-end gap-2">
                     <Button variant="ghost" onClick={() => setDisableDialogOpen(false)}>
                       Cancel
@@ -1236,10 +1196,7 @@ useEffect(() => {
           ) : (
             <>
               <p className="text-sm mt-1 text-red-400">2FA is not enabled.</p>
-              <Button
-                className="mt-2 bg-emerald-600 text-white"
-                onClick={handleEnable2FA}
-              >
+              <Button className="mt-2 bg-emerald-600 text-white" onClick={handleEnable2FA}>
                 Enable 2FA
               </Button>
             </>
@@ -1262,9 +1219,7 @@ useEffect(() => {
                     <CheckCircle size={28} />
                     2FA Enabled!
                   </h3>
-                  <p className="text-zinc-400 mb-6 text-center max-w-xs">
-                    Your two-factor authentication is now active.
-                  </p>
+                  <p className="text-zinc-400 mb-6 text-center max-w-xs">Your two-factor authentication is now active.</p>
                   <Button
                     onClick={() => {
                       toast.success("2FA setup complete!");
@@ -1279,27 +1234,15 @@ useEffect(() => {
               ) : (
                 <>
                   <h3 className="text-xl font-bold mb-3">Setup Two-Factor Auth</h3>
-                  <p className="text-sm text-zinc-400 mb-4">
-                    Scan this QR in Google Authenticator and enter the 6-digit code
-                    below.
-                  </p>
+                  <p className="text-sm text-zinc-400 mb-4">Scan this QR in Google Authenticator and enter the 6-digit code below.</p>
                   <img src={qrCodeUrl} alt="2FA QR" className="mb-4 rounded shadow" />
-
                   {recoveryCodes.length > 0 && (
                     <div className="mb-4">
-                      <h4 className="text-md font-semibold text-emerald-400 mb-2">
-                        Backup Recovery Codes
-                      </h4>
-                      <p className="text-xs text-zinc-400 mb-2">
-                        Store these safely. Each can be used once if you lose your
-                        Authenticator.
-                      </p>
+                      <h4 className="text-md font-semibold text-emerald-400 mb-2">Backup Recovery Codes</h4>
+                      <p className="text-xs text-zinc-400 mb-2">Store these safely. Each can be used once if you lose your Authenticator.</p>
                       <div className="grid grid-cols-2 gap-2 mb-3">
                         {recoveryCodes.map((code) => (
-                          <div
-                            key={code}
-                            className="bg-zinc-900 p-2 rounded text-center text-white font-mono text-sm"
-                          >
+                          <div key={code} className="bg-zinc-900 p-2 rounded text-center text-white font-mono text-sm">
                             {code}
                           </div>
                         ))}
@@ -1315,7 +1258,6 @@ useEffect(() => {
                       </Button>
                     </div>
                   )}
-
                   <input
                     ref={inputRef}
                     type="text"
@@ -1324,10 +1266,7 @@ useEffect(() => {
                     onChange={(e) => setTwoFAToken(e.target.value)}
                     className="w-full p-3 rounded text-white mb-4 border-2 border-emerald-500"
                   />
-                  <Button
-                    onClick={handleVerify2FA}
-                    className="w-full bg-emerald-600 text-white"
-                  >
+                  <Button onClick={handleVerify2FA} className="w-full bg-emerald-600 text-white">
                     Verify & Enable 2FA
                   </Button>
                 </>
@@ -1345,10 +1284,7 @@ useEffect(() => {
               FAQ
             </a>{" "}
             or email{" "}
-            <a
-              href="mailto:support@yourapp.com"
-              className="text-emerald-400 hover:underline"
-            >
+            <a href="mailto:support@yourapp.com" className="text-emerald-400 hover:underline">
               support@yourapp.com
             </a>
             .
@@ -1358,18 +1294,14 @@ useEffect(() => {
         {/* ───── Danger Zone ───── */}
         <div className="bg-red-800/50 p-4 rounded-lg">
           <h3 className="text-lg font-semibold text-red-400">Danger Zone</h3>
-          <p className="text-sm text-red-300 mt-1">
-            Deleting your account is permanent and cannot be undone.
-          </p>
+          <p className="text-sm text-red-300 mt-1">Deleting your account is permanent and cannot be undone.</p>
           <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
             <DialogTrigger asChild>
               <Button className="bg-red-600 mt-3 text-white">Delete Account</Button>
             </DialogTrigger>
             <DialogContent>
               <h3 className="text-lg text-white mb-2">Confirm Account Deletion</h3>
-              <p className="text-sm text-gray-400 mb-4">
-                Are you sure? This will permanently delete your account and all data.
-              </p>
+              <p className="text-sm text-gray-400 mb-4">Are you sure? This will permanently delete your account and all data.</p>
               <div className="flex justify-end gap-2">
                 <Button variant="ghost" onClick={() => setShowDeleteDialog(false)}>
                   Cancel

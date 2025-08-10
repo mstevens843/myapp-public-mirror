@@ -46,14 +46,12 @@ export async function checkVaultBalance(payload) {
 
 /** ─────────────────────────────────────────────────────────────
  * Encrypted Wallet Session (Arm-to-Trade) client
- * Backend route file name: encryptedWalletSession.js
- * Assumed routes:
- *   POST /api/encrypted-wallet-session/arm
- *   POST /api/encrypted-wallet-session/extend
- *   POST /api/encrypted-wallet-session/disarm
- *   GET  /api/encrypted-wallet-session/status/:walletId
- *   POST /api/user/security/require-arm   (toggle Protected Mode)
- * You can tweak paths here if your backend mounts differently.
+ * Backend routes are assumed to live under /api/arm-encryption/*.
+ * For the new Return Balance feature you mentioned you moved into an
+ * "arm sessions" area, we try both route families so the frontend
+ * works regardless of where you mounted them:
+ *    /api/arm-sessions/return-balance/*
+ *    /api/arm-encryption/return-balance/* (or /auto-return/* legacy)
  * ──────────────────────────────────────────────────────────── */
 
 async function httpJson(path, init = {}) {
@@ -68,6 +66,19 @@ async function httpJson(path, init = {}) {
   return data;
 }
 
+// Try a list of endpoints until one works (first successful JSON)
+async function httpJsonTry(paths, init = {}) {
+  let lastErr;
+  for (const p of paths) {
+    try {
+      return await httpJson(p, init);
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("No endpoint available");
+}
+
 export async function getArmStatus(walletId) {
   return httpJson(`/api/arm-encryption/status/${walletId}`, {
     method: "GET",
@@ -77,12 +88,15 @@ export async function getArmStatus(walletId) {
 export async function armEncryptedWallet({
   walletId,
   passphrase,
-  twoFactorToken,                // 2FA code (middleware typically expects req.body.twoFactorToken)
-  ttlMinutes,           // optional; backend clamps/defaults
-  migrateLegacy = false, // set true to upgrade legacy colon-hex on the fly
+  twoFactorToken,               // 2FA code (middleware typically expects req.body.twoFactorToken)
+  ttlMinutes,                   // optional; backend clamps/defaults
+  migrateLegacy = false,        // set true to upgrade legacy colon-hex on the fly
   applyToAll = false,
   passphraseHint,
   forceOverwrite = false,
+  // ── NEW: Auto-Return at session end
+  autoReturnOnEnd = false,      // checkbox in Arm modal
+  autoReturnDest,               // optional override of saved safe wallet pubkey
 }) {
   const payload = {
     walletId,
@@ -97,6 +111,17 @@ export async function armEncryptedWallet({
     payload.passphraseHint = passphraseHint;
   }
   if (forceOverwrite) payload.forceOverwrite = true;
+
+  // Send both shapes so it works with either controller signature
+  // 1) Nested object
+  payload.autoReturn = {
+    enabled: !!autoReturnOnEnd,
+    destPubkey: autoReturnDest || undefined,
+  };
+  // 2) Flat flags (fallbacks used by some handlers)
+  payload.autoReturnEnabled = !!autoReturnOnEnd;
+  if (autoReturnDest) payload.destOverride = autoReturnDest;
+
   return httpJson(`/api/arm-encryption/arm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -108,7 +133,7 @@ export async function extendEncryptedWallet({ walletId, twoFactorToken, ttlMinut
   return httpJson(`/api/arm-encryption/extend`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletId, ttlMinutes, twoFactorToken, }),
+    body: JSON.stringify({ walletId, ttlMinutes, twoFactorToken }),
   });
 }
 
@@ -116,7 +141,7 @@ export async function disarmEncryptedWallet({ walletId, twoFactorToken }) {
   return httpJson(`/api/arm-encryption/disarm`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ walletId, twoFactorToken, }),
+    body: JSON.stringify({ walletId, twoFactorToken }),
   });
 }
 
@@ -128,13 +153,6 @@ export async function disarmEncryptedWallet({ walletId, twoFactorToken }) {
  * It does not unlock the wallet for trading – after setup you must call
  * armEncryptedWallet() separately to create a timed session.
  * 2FA codes are never required when setting up protection.
- *
- * @param {Object} params
- * @param {string} params.walletId – ID of the wallet to protect (required)
- * @param {string} params.passphrase – new pass‑phrase to encrypt with (required)
- * @param {boolean} [params.applyToAll] – apply this pass‑phrase to all wallets
- * @param {string} [params.passphraseHint] – optional hint shown to the user
- * @param {boolean} [params.forceOverwrite] – overwrite existing pass‑phrases on wallets when applyToAll
  */
 export async function setupWalletProtection({
   walletId,
@@ -158,12 +176,7 @@ export async function setupWalletProtection({
 
 /**
  * Remove pass‑phrase protection from a wallet.  The caller must supply
- * the walletId and the current passphrase.  After removal the wallet
- * reverts to legacy key storage and no longer requires unlocking.
- *
- * @param {Object} params
- * @param {string} params.walletId – the ID of the wallet (required)
- * @param {string} params.passphrase – current passphrase for the wallet (required)
+ * the walletId and the current passphrase.
  */
 export async function removeWalletProtection({ walletId, passphrase }) {
   const payload = { walletId, passphrase };
@@ -180,6 +193,36 @@ export async function setRequireArmToTrade(requireArm) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ requireArmToTrade: !!requireArm }),
+  });
+}
+
+// ──────────────────────────────────────────────────────────────
+// NEW: Auto-Return (Return Balance) helpers
+// We try both "arm-sessions" and "arm-encryption" families so you're covered.
+// ──────────────────────────────────────────────────────────────
+
+const RB_SETTINGS_PATHS = [
+  "/api/arm-sessions/return-balance/settings",
+  "/api/arm-encryption/return-balance/settings",
+  "/api/arm-encryption/auto-return/settings",
+];
+
+export async function getAutoReturnSettings() {
+  return httpJsonTry(RB_SETTINGS_PATHS, { method: "GET" });
+}
+
+/**
+ * Save/update the safe destination wallet for auto-return. You can also pass
+ * a defaultEnabled flag so users can opt-in by default.
+ */
+export async function saveAutoReturnSettings({ destPubkey, defaultEnabled }) {
+  const body = {};
+  if (typeof destPubkey === "string") body.destPubkey = destPubkey;
+  if (typeof defaultEnabled === "boolean") body.defaultEnabled = defaultEnabled;
+  return httpJsonTry(RB_SETTINGS_PATHS, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 

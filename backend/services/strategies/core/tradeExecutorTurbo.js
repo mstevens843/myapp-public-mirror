@@ -47,9 +47,27 @@ const _coolOffByMint = Object.create(null);
 /** idempotencyKey -> { res:any, exp?:number } */
 const _idemCache = new Map();
 
+
 // --- Error classification (NET / USER / UNKNOWN) ---
-const NET_ERRS  = [/blockhash/i, /node is behind/i, /timed? out/i, /connection/i, /getblockheight timed out/i, /account in use/i];
-const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i, /slippage exceeded/i];
+const NET_ERRS  = [
+  /blockhash/i, /node is behind/i, /timed? out/i, /connection/i,
+  /getblockheight timed out/i, /account in use/i,
+  /429|too many requests|rate limit/i               // NEW: RPC 429
+];
+const USER_ERRS = [
+  /slippage/i, /insufficient funds/i, /mint.*not found/i, /slippage exceeded/i,
+  /insufficient liquidity|not enough liquidity/i    // NEW: pool illiquidity
+];
+
+// Dev failure injector (safe no-op if module missing)
+let devInject = { 
+  maybe: async () => {}, 
+  maybeThrow: () => {}, 
+  maybeStaleBlockhash: () => false,
+  tag: (/* kind, labels */) => {}
+};
+try { devInject = require("../../dev/failureInjector"); } catch (_) {}
+
 
 function classifyError(msg = '') {
   const lower = String(msg).toLowerCase();
@@ -66,7 +84,7 @@ const RETRY_PLAN = {
 
 
 // ── ultra-light kill switch ──
-let __KILLED = false;
+let __KILLED = String(process.env.KILL_SWITCH || '').trim() === '1'; // NEW: env bootstrap
 function setKill(v) { __KILLED = !!v; }
 function requireAlive() { if (__KILLED) { const e = new Error('KILL_SWITCH_ACTIVE'); e.code='KILL'; throw e; }}
 
@@ -131,6 +149,8 @@ const {
   forwardTokens,
   checkFreezeAuthority,
 } = require("./ghost");
+
+
 
 // (Legacy placeholder kept for back-compat; no longer used when RpcPool is configured)
 // const RpcQuorumClient = require('./rpcQuorumClient');
@@ -445,6 +465,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     maxSlippagePct,
     forceFail,
     fallbackQuoteLatencyMs,
+        expectedSlipBoundPct,
+    poolAgeMs,
+    poolFreshnessTtlMs,
+    quoteLatencyThresholdMs,
   } = meta;
 
 
@@ -630,6 +654,7 @@ if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
     const cached = quoteCache.get(key);
     if (cached) return cached;
     const t0 = Date.now();
+    await devInject.maybe('aggregator_500');
     const fresh = await getSwapQuote({
       ...params,
       multiRoute,
@@ -675,13 +700,30 @@ if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
   // --- Dry-run short-circuit (no network) ---
   const isDryRun = simulated || Boolean(dryRun);
   if (isDryRun) {
+    const expectedSlipPct =
+      ((sizedQuote?.priceImpactPct ?? quote?.priceImpactPct ?? 0) * 100);
+
     const usedDirect = !!(directAmmFallback && shouldDirectAmmFallback({
+      // staleness
       quoteAgeMs: quoteLatencyMs,
-      fallbackQuoteLatencyMs,
+      quoteLatencyThresholdMs: quoteLatencyThresholdMs || fallbackQuoteLatencyMs, // prefer new knob
+      fallbackQuoteLatencyMs, // keep legacy
+
+      // freshness
+      poolAgeMs,
+      poolFreshnessTtlMs,
       poolFresh,
+
+      // slip bound
+      expectedSlipPct,
+      expectedSlipBoundPct,
+
+      // volatility gate (unchanged)
       volatilityPct,
       maxVolatilityPct,
     }));
+
+    if (usedDirect) inc('direct_fallback_chosen_total', 1);
 
     const parseLadder = (v) => {
       if (!v) return [];
@@ -824,16 +866,30 @@ const sendRawOverride = rpcPool
           jitoTipLamports,
         }, (lastErrClass === 'NET') ? attempt : 0, retryPolicy);
 
-        // Direct AMM fallback when quote is stale & pool fresh/low-vol
+        // Direct AMM fallback when quote is stale, pool fresh, slip within bound
         if (!usedDirect && directAmmFallback && attempt === 0) {
+          const expectedSlipPct =
+            ((localQuote?.priceImpactPct ?? sizedQuote?.priceImpactPct ?? 0) * 100);
+
           const doFallback = shouldDirectAmmFallback({
             quoteAgeMs: quoteLatencyMs,
+            quoteLatencyThresholdMs: quoteLatencyThresholdMs || fallbackQuoteLatencyMs,
             fallbackQuoteLatencyMs,
+            poolAgeMs,
+            poolFreshnessTtlMs,
             poolFresh,
+            expectedSlipPct,
+            expectedSlipBoundPct,
             volatilityPct,
             maxVolatilityPct,
           });
+
           if (doFallback) {
+            inc('direct_fallback_chosen_total', 1);
+
+            // Dev: simulate pool illiquidity before direct leg
+            devInject.maybeThrow('pool_illiquidity');
+
             const startSlot = await conn.getSlot();
             txHash = await directSwap({
               wallet,
@@ -848,7 +904,9 @@ const sendRawOverride = rpcPool
               broadcastRawTransaction: sendRawOverride,
             });
             const endSlot = await conn.getSlot();
+
             if (txHash) {
+              inc('direct_fallback_ok_total', 1);
               metricsLogger.recordInclusion?.(endSlot - startSlot);
               metricsLogger.recordSuccess?.();
               usedDirect = true;
@@ -867,6 +925,7 @@ const sendRawOverride = rpcPool
               } catch (_) {}
               break;
             } else {
+              inc('direct_fallback_fail_total', 1);
               metricsLogger.recordFail?.('direct-swap-fail');
             }
           }
@@ -989,6 +1048,10 @@ const sendRawOverride = rpcPool
         // Refresh quote after changes
         try {
           await _preSendRefresh();
+        // Dev: simulate stale blockhash (NET) & RPC 429 (NET)
+        devInject.maybeThrow('stale_blockhash'); // e.g. throw new Error('blockhash not found')
+        devInject.maybeThrow('rpc_429');         // e.g. throw new Error('429 Too Many Requests')
+
           const qRes = await getWarmQuote({
             inputMint: localQuote.inputMint,
             outputMint: localQuote.outputMint,

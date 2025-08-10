@@ -1,51 +1,48 @@
 /**
- * Trend Follower risk management policy.
+ * Trend follower risk policy.
  *
- * Aligns stops with a rolling VWAP and implements simple exit
- * criteria.  A stop is suggested at 2.5% below both entry and the
- * current VWAP.  Exits are triggered when price falls 1% below the
- * VWAP or when momentum continuation attempts repeatedly fail.
+ * Contains helpers for pyramiding and stop‑and‑reverse logic used by
+ * the Trend Follower strategy.  Pyramiding adds fixed risk per add
+ * when the trend continues in favour, while the SAR option flips the
+ * position when the trend alignment reverses.  These helpers are pure
+ * functions; side effects are handled in the main strategy body.
  */
+
+/* eslint-disable no-console */
+
+/**
+ * Compute the risk allocation for the next add when pyramiding.  Each
+ * add increases exposure by a fraction of the account equity.  The
+ * function returns the maximum position size that should be added.
+ *
+ * @param {number} equity
+ * @param {number} riskFraction
+ * @param {number} currentRisk
+ * @param {number} maxRisk
+ * @returns {number}
+ */
+function nextPyramidAdd(equity, riskFraction = 0.01, currentRisk = 0, maxRisk = 0.05) {
+  // If already above risk threshold, no more adds
+  if (currentRisk >= maxRisk) return 0;
+  const remaining = maxRisk - currentRisk;
+  const addRisk = Math.min(remaining, riskFraction);
+  return equity * addRisk;
+}
+
+/**
+ * Determine whether a SAR (stop‑and‑reverse) should occur based on
+ * previous and current trend directions.  Returns true if the trend
+ * flips from bullish to bearish or vice versa.
+ *
+ * @param {number} prevDir - 1 = bullish, -1 = bearish, 0 = none
+ * @param {number} currDir - 1 = bullish, -1 = bearish, 0 = none
+ */
+function shouldSAR(prevDir, currDir) {
+  if (prevDir === 0 || currDir === 0) return false;
+  return prevDir !== currDir;
+}
+
 module.exports = {
-  /**
-   * Compute the next stop price for a trend follower position.
-   *
-   * @param {Object} position
-   * @param {number} position.entryPrice - entry price of the trade
-   * @param {number} position.vwap - current rolling VWAP
-   * @returns {number|null} suggested stop price or null
-   */
-  nextStop(position = {}) {
-    if (position.entryPrice == null || position.vwap == null) return null;
-    const entry = Number(position.entryPrice);
-    const vwap  = Number(position.vwap);
-    const stopEntry = entry * (1 - 0.025);
-    const stopVwap  = vwap  * (1 - 0.025);
-    return Math.max(stopEntry, stopVwap);
-  },
-
-  /**
-   * Determine whether the trend follower should exit.
-   *
-   * @param {Object} position
-   * @param {number} [position.failedContinuations] - count of failed continuation attempts
-   * @param {Object} market
-   * @param {number} [market.price] - current trade price
-   * @param {number} [market.vwap] - current rolling VWAP
-   * @returns {boolean} true if exit conditions are met
-   */
-  shouldExit(position = {}, market = {}) {
-    if (market.price != null && market.vwap != null) {
-      if (market.price < market.vwap * (1 - 0.01)) {
-        return true;
-      }
-    }
-    if (typeof position.failedContinuations === 'number' && position.failedContinuations >= 2) {
-      return true;
-    }
-    return false;
-  },
-
-  // Use the same TWAP ladder as breakout by default
-  twapSlices: [0.2, 0.3, 0.5],
+  nextPyramidAdd,
+  shouldSAR,
 };

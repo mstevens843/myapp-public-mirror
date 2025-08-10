@@ -1,46 +1,72 @@
 /**
- * Trend Follower signal generator.
+ * Trend follower signal helpers.
  *
- * Computes simple momentum metrics over a rolling set of ticks.  A
- * tick should describe the direction of trade (up/down) and its
- * signed size.  When the net flow is positive and more than 60% of
- * the ticks are up, an uptrend signal is emitted.  Conversely, when
- * the net flow is negative and down ticks dominate, a downtrend
- * signal is emitted.  This helper is synchronous and suitable for
- * repeated invocation in tight loops.
- *
- * Each element of `state.ticks` is expected to be an object with at
- * least a numeric `size` and a `direction` ("up"|"down") or `side`
- * ("buy"|"sell").  Unknown directions default to down.
- *
- * @param {Object} state input containing a `ticks` array
- * @returns {Array<Object>} array of signals
+ * Provides multiâ€‘timeframe moving average crossovers and trailing stop
+ * calculations used by the Trend Follower strategy.  The helpers
+ * compute exponential moving averages (EMAs) over arbitrary windows
+ * and expose functions to determine trend alignment across short,
+ * medium and long timeframes.  A stopâ€‘andâ€‘reverse signal can be
+ * generated when the ordering of EMAs flips.
  */
-module.exports = function trendFollowerSignals(state = {}) {
-  const signals = [];
-  const ticks = Array.isArray(state.ticks) ? state.ticks : [];
-  const total = ticks.length;
-  if (total === 0) return signals;
-  let netFlow = 0;
-  let upCount = 0;
-  let downCount = 0;
-  for (const tick of ticks) {
-    const size = Number(tick.size || 0);
-    const dir = (tick.direction || tick.side || '').toLowerCase();
-    if (dir === 'up' || dir === 'buy') {
-      netFlow += size;
-      upCount++;
-    } else {
-      netFlow -= size;
-      downCount++;
-    }
+
+/* eslint-disable no-console */
+
+/**
+ * Compute an exponential moving average for a series of values.  Uses
+ * a simple recursive definition: EMA_t = alpha * price_t + (1 - alpha) * EMA_{t-1}.
+ *
+ * @param {number[]} values
+ * @param {number} period
+ * @returns {number}
+ */
+function ema(values, period) {
+  if (!values || values.length === 0) return 0;
+  const alpha = 2 / (period + 1);
+  let emaPrev = values[0];
+  for (let i = 1; i < values.length; i++) {
+    emaPrev = alpha * values[i] + (1 - alpha) * emaPrev;
   }
-  const upBias = upCount / total;
-  const downBias = downCount / total;
-  if (netFlow > 0 && upBias > 0.6) {
-    signals.push({ type: 'uptrend' });
-  } else if (netFlow < 0 && downBias > 0.6) {
-    signals.push({ type: 'downtrend' });
+  return emaPrev;
+}
+
+/**
+ * Determine whether the EMAs of short, medium and long periods are
+ * aligned.  Returns 1 for bullish alignment (short > medium > long),
+ * -1 for bearish alignment (short < medium < long), and 0 for
+ * undecided/mixed.
+ *
+ * @param {number[]} prices
+ * @param {number[]} periods - [short, medium, long]
+ * @returns {number}
+ */
+function trendAlignment(prices, periods = [10, 30, 60]) {
+  if (prices.length < Math.max(...periods)) return 0;
+  const [s, m, l] = periods;
+  const emaS = ema(prices.slice(-s * 3), s);
+  const emaM = ema(prices.slice(-m * 3), m);
+  const emaL = ema(prices.slice(-l * 3), l);
+  if (emaS > emaM && emaM > emaL) return 1;
+  if (emaS < emaM && emaM < emaL) return -1;
+  return 0;
+}
+
+/**
+ * Compute a trailing stop price given the highest achieved price and a
+ * trailing percentage.  For long positions, the stop sits below the
+ * high by trailingPct; for shorts, above the low by trailingPct.
+ * @param {number} extremePrice - highest (for long) or lowest (for short)
+ * @param {number} trailingPct
+ * @param {boolean} isLong
+ */
+function trailingStop(extremePrice, trailingPct = 0.02, isLong = true) {
+  if (isLong) {
+    return extremePrice * (1 - trailingPct);
   }
-  return signals;
+  return extremePrice * (1 + trailingPct);
+}
+
+module.exports = {
+  ema,
+  trendAlignment,
+  trailingStop,
 };

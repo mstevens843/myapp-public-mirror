@@ -53,9 +53,6 @@ const scalperRisk    = require("./risk/scalperPolicy");
 
 /* ──────────────────────────────────────────────── */
 
-
-
-
 module.exports = async function scalperStrategy(botCfg = {}) {
   const botId = botCfg.botId || "manual";
   const log   = strategyLog("scalper", botId, botCfg);
@@ -95,6 +92,13 @@ module.exports = async function scalperStrategy(botCfg = {}) {
   const execBuy         = DRY_RUN ? simulateBuy : liveBuy;
   const MIN_BALANCE_SOL = 0.20;
   const VOLUME_SPIKE = +botCfg.volumeSpikeMultiplier || null;
+
+  /* ── NEW (add-only): scalper-specific knobs ───── */
+  const useSignals     = botCfg.useSignals === true;
+  const maxHoldSeconds = +botCfg.maxHoldSeconds || 30;          // hard timeout
+  const takeProfitPct  = botCfg.takeProfitPct != null ? +botCfg.takeProfitPct : 0.03; // +3%
+  const stopLossPct    = botCfg.stopLossPct   != null ? +botCfg.stopLossPct   : 0.01; // -1%
+
   /* safety toggle */
   const SAFETY_DISABLED =
     botCfg.disableSafety === true ||
@@ -103,14 +107,18 @@ module.exports = async function scalperStrategy(botCfg = {}) {
   const snipedMints = new Set();
 
   /* ── bootstrap ───────────────────────────────── */
- log("info", `🔗 Loading single wallet from DB (walletId: ${botCfg.walletId})`);
-await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
+  log("info", `🔗 Loading single wallet from DB (walletId: ${botCfg.walletId})`);
+  await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
   const cd = createCooldown(COOLDOWN_MS);
   initTxWatcher("Scalper");
 
   let todaySol = 0;
   let trades   = 0;
   let fails    = 0;
+
+  // ── NEW (add-only): open position tracker (for hold-time / TP/SL) ──
+  // shape: { entryPrice, entryTime, takeProfit, stopLoss, isLong }
+  const openPositions = new Map();
 
   /* ── tick ────────────────────────────────────── */
   async function tick() {
@@ -181,7 +189,7 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
           minMarketCap       : MIN_MARKET_CAP,
           maxMarketCap       : MAX_MARKET_CAP,
           fetchOverview: (mint) =>
-      getTokenShortTermChange(null, mint, pumpWin, volWin),
+            getTokenShortTermChange(null, mint, pumpWin, volWin),
         }));
 
         // log("info", `[CONFIG] volumeSpikeMult: ${VOLUME_SPIKE || "—"}`);
@@ -212,11 +220,34 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
           log("info", "⚠️ Safety checks DISABLED");
         }
 
+        // ── NEW (add-only): optional microstructure signal gate ──
+        if (useSignals) {
+          try {
+            // In production you’d pass true microstructure snapshots; keep stub light.
+            const samples = [{ price: ov?.price || 1, volume: 1 }];
+            const fills   = [{ side: "buy", size: 1 }];
+            const sig = scalperSignals.generateScalperSignal(
+              samples,
+              samples[samples.length - 1].price,
+              fills,
+              ENTRY_THRESHOLD
+            );
+            if (!sig) {
+              log("info", "Signal gate: no edge — skip");
+              summary.inc("signalReject");
+              continue;
+            }
+            log("info", `Signal gate: ${sig.type || "mean-revert"} OK`);
+          } catch (e) {
+            log("warn", `signal gen failed: ${e.message}`);
+          }
+        }
+
         guards.assertDailyLimit(POSITION_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
 
         /* quote */
         log("info", "Getting swap quote…");
-          const result = await getSafeQuote({
+        const result = await getSafeQuote({
           inputMint    : BASE_MINT,
           outputMint   : mint,
           amount       : POSITION_LAMPORTS,
@@ -234,19 +265,26 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
             quoteDebug
           } = result;
 
-        log("info", "[🚀 BUY ATTEMPT] Executing scalp buy…");
+          log("info", "[🚀 BUY ATTEMPT] Executing scalp buy…");
 
-        log("warn", `❌ Quote failed: ${reason.toUpperCase()} — ${message}`);
-        log("warn", `↳ Input: ${inputMint}`);
-        log("warn", `↳ Output: ${outputMint}`);
-        if (quoteDebug) log("warn", `↳ Debug: ${JSON.stringify(quoteDebug, null, 2)}`);
-        if (rawQuote) log("warn", `↳ Raw Quote: ${JSON.stringify(rawQuote, null, 2)}`);
+          log("warn", `❌ Quote failed: ${reason.toUpperCase()} — ${message}`);
+          log("warn", `↳ Input: ${inputMint}`);
+          log("warn", `↳ Output: ${outputMint}`);
+          if (quoteDebug) log("warn", `↳ Debug: ${JSON.stringify(quoteDebug, null, 2)}`);
+          if (rawQuote) log("warn", `↳ Raw Quote: ${JSON.stringify(rawQuote, null, 2)}`);
           
           summary.inc(reason);
           continue;
         }
-        quote = result.quote;
+
+        // NEW: declare quote locally (add-only fix)
+        let quote = result.quote;
         log("info", `Quote impact ${(quote.priceImpactPct * 100).toFixed(2)} %`);
+
+        // NEW: derive entry price & compute TP/SL using risk policy
+        const entryPrice = quote.price;
+        const { takeProfit, stopLoss } =
+          scalperRisk.computeTpSl(entryPrice, takeProfitPct, stopLossPct);
 
         const meta = {
           strategy        : "Scalper",
@@ -261,14 +299,13 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
           sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "scalper" },
           // NEW: optional execution shape (e.g. "ATOMIC").  When undefined
-          // or falsy, the default single‑shot swap will be used.
+          // or falsy, the default single-shot swap will be used.
           // Coerce to empty string for downstream checks.
           executionShape : botCfg?.executionShape || "",
           // NEW: attach the scalper risk policy so future executors can
-          // consult it between sub‑orders.  Currently unused.
+          // consult it between sub-orders.  Currently unused.
           riskPolicy     : scalperRisk,
         };
-
 
         let txHash;
         try {
@@ -307,7 +344,14 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
         }
         console.log("🎯 execBuy returned:", txHash);
 
-
+        // NEW: track open position for max-hold enforcement
+        openPositions.set(mint, {
+          entryPrice,
+          entryTime: Date.now(),
+          takeProfit,
+          stopLoss,
+          isLong: true,
+        });
 
         const buyMsg  = DRY_RUN
             ? `[🎆 BOUGHT SUCCESS] ${mint}`
@@ -322,29 +366,36 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
           `change5m=${((ov?.priceChange5m ?? 0) * 100).toFixed(2)}%`;
         log("info", statsLine);
 
-
         todaySol += POSITION_LAMPORTS / 1e9;
         trades++; 
         summary.inc("buys");
               
-      if (trades >= MAX_TRADES) {
-        log("info", "🎯 Trade cap reached – scalper shutting down");
-        await summary.printAndAlert("Scalper");
-        log("summary", "✅ Scalper completed (max-trades reached)");
-        if (runningProcesses[botId]) runningProcesses[botId].finished = true;
-        clearInterval(loopHandle);
-        process.exit(0);
-      }
+        if (trades >= MAX_TRADES) {
+          log("info", "🎯 Trade cap reached – scalper shutting down");
+          await summary.printAndAlert("Scalper");
+          log("summary", "✅ Scalper completed (max-trades reached)");
+          if (runningProcesses[botId]) runningProcesses[botId].finished = true;
+          clearInterval(loopHandle);
+          process.exit(0);
+        }
 
         /* stop if trade cap hit mid-loop */
         if (trades >= MAX_TRADES) break;
       }
 
+      // ── NEW (add-only): evaluate open positions for max-hold exit ──
+      for (const [mint, pos] of openPositions) {
+        if (scalperRisk.shouldForceClose(pos.entryTime, maxHoldSeconds)) {
+          log("info", `Force closing ${mint} after max hold time ${maxHoldSeconds}s (tracking cleanup only)`);
+          openPositions.delete(mint);
+          // NOTE: If you want to actually sell, wire an executor here.
+        }
+      }
 
       fails = 0;                                        // reset error streak
-        /* 📍 End of tick() */
-        } catch (err) {
-             /* ────────────────────────────────────────────────
+      /* 📍 End of tick() */
+    } catch (err) {
+      /* ────────────────────────────────────────────────
        * Hard-stop if the RPC or swap returns an
        * “insufficient lamports / balance” error.
        * This skips the normal retry counter and
@@ -357,45 +408,45 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
         clearInterval(loopHandle);
         return;                // <── bail right here
       }
-          fails++;
-          if (fails >= HALT_ON_FAILS) {
-          log("error", "🛑 Error limit hit — scalper shutting down");
-          await summary.printAndAlert("Sniper halted on errors");
-          if (runningProcesses[botId]) runningProcesses[botId].finished = true;
-          clearInterval(loopHandle);
-          return;                       // bail out cleanly
-        }
-          summary.inc("errors");
-          log("error", err?.message || String(err));
-            await tradeExecuted({
-              userId     : botCfg.userId,
-              mint,
-              tx         : txHash,
-              wl         : botCfg.walletLabel || "default",
-              category   : "Scalper",
-              simulated  : DRY_RUN,
-              amountFmt  : `${(SNIPE_LAMPORTS / 1e9).toFixed(3)} ${BASE_MINT === SOL_MINT ? "SOL" : "USDC"}`,
-              impactPct  : (quote?.priceImpactPct || 0) * 100,
-            });
-        }
-
-    // ✅ moved outside catch
-      if (trades >= MAX_TRADES) {
-        log("info", "🎯 Trade cap reached – scalper shutting down");
-        await summary.printAndAlert("Scalper");
-        log("summary", "✅ Scalper completed (max-trades reached)");
+      fails++;
+      if (fails >= HALT_ON_FAILS) {
+        log("error", "🛑 Error limit hit — scalper shutting down");
+        await summary.printAndAlert("Sniper halted on errors");
         if (runningProcesses[botId]) runningProcesses[botId].finished = true;
         clearInterval(loopHandle);
-        process.exit(0);
+        return;                       // bail out cleanly
       }
+      summary.inc("errors");
+      log("error", err?.message || String(err));
+      await tradeExecuted({
+        userId     : botCfg.userId,
+        mint,
+        tx         : txHash,
+        wl         : botCfg.walletLabel || "default",
+        category   : "Scalper",
+        simulated  : DRY_RUN,
+        amountFmt  : `${(POSITION_LAMPORTS / 1e9).toFixed(3)} ${BASE_MINT === "So11111111111111111111111111111111111111112" ? "SOL" : "USDC"}`,
+        impactPct  : (quote?.priceImpactPct || 0) * 100,
+      });
     }
+
+    // ✅ moved outside catch
+    if (trades >= MAX_TRADES) {
+      log("info", "🎯 Trade cap reached – scalper shutting down");
+      await summary.printAndAlert("Scalper");
+      log("summary", "✅ Scalper completed (max-trades reached)");
+      if (runningProcesses[botId]) runningProcesses[botId].finished = true;
+      clearInterval(loopHandle);
+      process.exit(0);
+    }
+  }
   
 
   // ── token-feed banner ───────────────────────────────
-const feedName = botCfg.overrideMonitored
-  ? "custom token list (override)"
-  : (botCfg.tokenFeed || "monitored tokens");
-log("info", `Token feed in use → ${feedName}`);
+  const feedName = botCfg.overrideMonitored
+    ? "custom token list (override)"
+    : (botCfg.tokenFeed || "monitored tokens");
+  log("info", `Token feed in use → ${feedName}`);
 
   /* scheduler */
   const loopHandle = runLoop(tick, botCfg.loop === false ? 0 : INTERVAL_MS, {
@@ -424,8 +475,6 @@ if (require.main === module) {
  * - Analytics Logging
  * - Clean error handling + structure
  */
-
-
 
 /** 
  * Additions: 

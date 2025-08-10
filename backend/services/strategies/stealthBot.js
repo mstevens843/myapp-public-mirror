@@ -1,7 +1,14 @@
-/* stealthBot.js – simple “split buy” across many wallets
-   - one target token
-   - same SOL size for each wallet
-   - fires every ROT_MS if loop ≠ false (can be 0 for “buy once”) */
+/*
+ * Updated StealthBot strategy with optional auto-consolidation support.
+ *
+ * This module is based off of the upstream stealthBot implementation from
+ * the public myapp repository.  The original behaviour has been preserved
+ * exactly when no new configuration is supplied.  When the caller
+ * specifies a `forwardDest` along with an `autoForward` mode the bot
+ * will forward purchased tokens out of the burner wallets to a cold
+ * wallet via the ghost utility.  See the README for configuration
+ * examples and additional context.
+ */
 
 const { Connection, PublicKey } = require("@solana/web3.js");
 const prisma                   = require("../../prisma/prisma");
@@ -13,14 +20,18 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const { getSafeQuote } = require("./core/quoteHelper");
 const { liveBuy, simulateBuy } = require("./core/tradeExecutor");
-const { isSafeToBuyDetailed } = require("../utils/safety/safetyCheckers/botIsSafeToBuy");
+const { isSafeToBuyDetailed } = 
+  require("../utils/safety/safetyCheckers/botIsSafeToBuy");
 const { logSafetyResults } = require("./logging/logSafetyResults");
-// const { initTxWatcher }        = require("./core/txTracker");
 const {
   lastTickTimestamps,
   runningProcesses,
-}                               = require("../utils/strategy_utils/activeStrategyTracker");
+}                               = 
+  require("../utils/strategy_utils/activeStrategyTracker");
 const { getWalletBalance, isAboveMinBalance } = require("../utils");
+
+// Bring in ghost helpers for forwarding tokens
+const ghost = require("./core/ghost");
 
 module.exports = async function stealthBot(cfg = {}) {
   if (!cfg.tokenMint) {
@@ -43,7 +54,19 @@ module.exports = async function stealthBot(cfg = {}) {
     emitHealth(botId, { status: 'stopped' });
   });
 
-  /* ── load & decrypt wallets from DB (post‑migration) ── */
+  /* ───── auto-forward settings ───── */
+  // forwardDest: base58 address to consolidate into
+  // autoForward: "onEachBuy" | "onFinish" | "off" (default)
+  // solFloorLamports: leave this many lamports in each wallet when forwarding
+  const forwardDest       = cfg.forwardDest || null;
+  const autoForward       = cfg.autoForward || "off";
+  const solFloorLamports  = +cfg.solFloorLamports || 0;
+
+  // NEW: optionally forward *all* SPL positions (not just the bought mint)
+  // before USDC and SOL. Keep false to preserve legacy behaviour.
+  const forwardAllSpl     = cfg.forwardAllSpl === true;
+
+  /* ── load & decrypt wallets from DB (post-migration) ── */
   const walletIdByLabel = {};
   try {
     const walletRows = await prisma.wallet.findMany({
@@ -80,18 +103,84 @@ module.exports = async function stealthBot(cfg = {}) {
   const DRY_RUN       = cfg.dryRun === true;
   const execTrade     = DRY_RUN ? simulateBuy : liveBuy;
 
-  // initTxWatcher("StealthBot");
+  // NEW: per-wallet slippage jitter to de-cluster signatures (e.g., 0.25 = 0.25%)
+  const SLIPPAGE_JITTER   = (+cfg.slippageJitterPct || 0) / 100;
 
   let fails = 0,
       todaySol = 0,
       rounds = 0;
+
+  async function forwardAllForWallet(wallet) {
+    // Skip if no destination specified or autoForward is off
+    if (!forwardDest) return;
+    const destPub = new PublicKey(forwardDest);
+    try {
+      // Randomize delay up to 3 seconds to avoid MEV clustering
+      const jitter = Math.random() * 3000;
+      await new Promise(r => setTimeout(r, jitter));
+
+      // ── SPL positions first ─────────────────────────────
+      if (forwardAllSpl) {
+        try {
+          const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+          // sweep every SPL token account with non-zero balance (ghost sweeps amount=0)
+          const tokenAccts = await conn.getParsedTokenAccountsByOwner(
+            wallet.publicKey,
+            { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") }
+          );
+          for (const ta of tokenAccts.value) {
+            const mint = ta.account.data.parsed.info.mint;
+            const uiAmt = +ta.account.data.parsed.info.tokenAmount.uiAmount;
+            if (!uiAmt) continue;
+            if (mint === USDC_MINT) continue; // handle USDC next
+            if (mint === cfg.tokenMint) {
+              // still sweep the bought token first for priority
+              const tx1 = await ghost.forwardTokens(conn, mint, wallet, destPub, 0);
+              log("info", `Auto-forward SPL ${mint.slice(0,6)}… tx=${tx1 || "n/a"}`);
+            } else {
+              const txX = await ghost.forwardTokens(conn, mint, wallet, destPub, 0);
+              log("info", `Auto-forward SPL ${mint.slice(0,6)}… tx=${txX || "n/a"}`);
+            }
+          }
+        } catch (e) {
+          log("warn", `forwardAllSpl scan failed: ${e.message}`);
+        }
+      } else {
+        // legacy: forward the purchased token only
+        const tx0 = await ghost.forwardTokens(conn, cfg.tokenMint, wallet, destPub, 0);
+        log("info", `Auto-forward SPL (bought) tx=${tx0 || "n/a"}`);
+      }
+
+      // ── USDC second ─────────────────────────────────────
+      const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+      const txU = await ghost.forwardTokens(conn, USDC_MINT, wallet, destPub, 0);
+      log("info", `Auto-forward USDC tx=${txU || "n/a"}`);
+
+      // ── SOL last, leave floor ──────────────────────────
+      const bal = await conn.getBalance(wallet.publicKey);
+      const amountToSend = bal - solFloorLamports;
+      if (amountToSend > 0) {
+        const txS = await ghost.forwardTokens(
+          conn,
+          "So11111111111111111111111111111111111111112",
+          wallet,
+          destPub,
+          amountToSend
+        );
+        log("info", `Auto-forward SOL ${(amountToSend/1e9).toFixed(4)} tx=${txS || "n/a"}`);
+      }
+      log("info", `Auto-forwarded funds from ${wallet.publicKey.toBase58()}`);
+    } catch (err) {
+      log("error", `autoForward error: ${err.message}`);
+    }
+  }
 
   async function tick() {
     // Capture loop start for health metrics
     const _healthStart = Date.now();
     try {
       const loaded = wm.all(); // get all loaded Keypairs
-      log("info", `🧰 Loaded ${loaded.length} wallets:`);
+      log("info", ` Loaded ${loaded.length} wallets:`);
       loaded.forEach((kp, idx) =>
         log("info", `   wallet-${idx + 1}: ${kp.publicKey.toBase58()}`)
       );
@@ -119,26 +208,31 @@ module.exports = async function stealthBot(cfg = {}) {
           continue;
         }
 
-        /* daily‑limit guard */
+        /* daily-limit guard */
         guards.assertDailyLimit(POS_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
 
         /* random delay per wallet */
         if (DELAY_MAX_MS > 0) {
-          const wait =
-            Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS) + DELAY_MIN_MS;
+          const wait = Math.random() * (DELAY_MAX_MS - DELAY_MIN_MS) + DELAY_MIN_MS;
           await new Promise((r) => setTimeout(r, wait));
         }
 
-        /* per‑wallet spend with jitter */
+        /* per-wallet spend with jitter */
         const jitterFactor = 1 + (Math.random() * 2 - 1) * SIZE_JITTER; // ±pct
         const spendLamports = Math.round(POS_LAMPORTS * jitterFactor);
+
+        // NEW: per-wallet slippage jitter
+        const slippageForWallet = Math.max(
+          0,
+          SLIPPAGE * (1 + (Math.random() * 2 - 1) * SLIPPAGE_JITTER)
+        );
 
         /* quote + buy */
         const { ok, quote } = await getSafeQuote({
           inputMint: "So11111111111111111111111111111111111111112", // SOL
           outputMint: cfg.tokenMint,
           amount: spendLamports,
-          slippage: SLIPPAGE,
+          slippage: slippageForWallet,
           maxImpactPct: MAX_IMPACT,
         });
         if (!ok) {
@@ -151,38 +245,33 @@ module.exports = async function stealthBot(cfg = {}) {
           if (logSafetyResults(cfg.tokenMint, safeRes, log, "stealthbot")) continue;
         }
 
-
-
-        log("info", "[🚀 BUY ATTEMPT] Executing stealth split-buy…");
+        log("info", "[ BUY ATTEMPT] Executing stealth split-buy…");
         await execTrade({
           quote,
           mint: cfg.tokenMint,
           meta: {
             strategy   : "Stealth Bot",
-            walletId   : walletIdByLabel[label],     // 🆕  per‑wallet ID
+            walletId   : walletIdByLabel[label],
             userId     : cfg.userId,
-            slippage   : SLIPPAGE,
+            slippage   : slippageForWallet,
             category   : "stealthbot",
             tpPercent  : cfg.tpPercent ?? TAKE_PROFIT,
             slPercent  : cfg.slPercent ?? STOP_LOSS,
-           tp         : cfg.takeProfit,
+            tp         : cfg.takeProfit,
             sl         : cfg.stopLoss,
             openTradeExtras: { strategy: "stealth" },
           },
         });
-        
 
         log(
           "info",
-          `🥷 [${label}] bought ${(spendLamports / 1e9).toFixed(3)} SOL of ${cfg.tokenMint.slice(
-            0,
-            4
-          )}…`
+          ` [${label}] bought ${(spendLamports / 1e9).toFixed(3)} SOL of ${cfg.tokenMint.slice(0, 4)}…`
         );
 
-       const statsLine =
+        const statsLine =
           `[STATS] impact=${(quote.priceImpactPct * 100).toFixed(2)}% ` +
-          `spentSOL=${(spendLamports / 1e9).toFixed(3)}`;
+          `spentSOL=${(spendLamports / 1e9).toFixed(3)} ` +
+          `slip=${slippageForWallet}%`;
         log("info", statsLine);
 
         /* optional Telegram ping (comment out if you don’t want it) */
@@ -195,21 +284,18 @@ module.exports = async function stealthBot(cfg = {}) {
           amountFmt  : `${(spendLamports / 1e9).toFixed(3)} SOL`,
           impactPct  : null,                // add if available
           usdValue   : null,                // add if available
-          entryPriceUSD : null,            
+          entryPriceUSD : null,
           tpPercent  : null,
           slPercent  : null,
         });
- 
+
         todaySol += spendLamports / 1e9;
-        summary.inc("buys"); 
-        /* emit mini‑event for UI */
-        process.emit("stealthbot:stat", {
-          botId,
-          wallet: label,
-          spend: spendLamports,
-          ts: Date.now(),
-          ok: true,
-        });
+        summary.inc("buys");
+
+        // Auto-forward after each buy if requested
+        if (autoForward === "onEachBuy" && forwardDest) {
+          await forwardAllForWallet(wallet);
+        }
       }
 
       fails = 0;
@@ -259,7 +345,7 @@ module.exports = async function stealthBot(cfg = {}) {
   const hardStop = async (reason) => {
     /* treat “completed” as success, everything else as error */
     const lvl   = reason === "completed" ? "summary" : "error";
-    const emoji = reason === "completed" ? "✅" : "🛑";
+    const emoji = reason === "completed" ? "✅" : "";
 
     log(lvl, `${emoji} StealthBot ${reason}`);
 
@@ -269,7 +355,16 @@ module.exports = async function stealthBot(cfg = {}) {
         ? "StealthBot run completed"
         : `StealthBot halted: ${reason}`
     );
-  }
+
+    // Forward any remaining funds when the run finishes
+    if (autoForward === "onFinish" && forwardDest) {
+      for (const w of cfg.wallets) {
+        const label  = typeof w === "string" ? w : w.label;
+        const wallet = wm.byLabel(label);
+        if (wallet) await forwardAllForWallet(wallet);
+      }
+    }
+  };
 
   await tick();
   log("summary", "✅ StealthBot completed (single-shot)");

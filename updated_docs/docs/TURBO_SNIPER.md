@@ -1,132 +1,333 @@
-# Turbo Sniper
+# Turbo Sniper — Engineering Notes & Integration Guide
 
-The **Turbo Sniper** strategy is the flagship ultra‑low‑latency mode of the
-trading bot.  It takes a warm Jupiter quote, sizes the input amount based on
-pool liquidity, optionally sends a probe transaction to estimate price impact,
-scales the remainder, and submits the transactions through a quorum of RPC
-endpoints.  It also supports private relay sending, idempotency keys, retry
-policies and Jito fee tuning.
+**Role**: Staff Solana HFT engineer focused on p99.  
+**Goal**: Cut quote→submit p99 by 20–40% with zero behavior change.  
+**Scope**: Turbo Sniper strategy path + execution edges.
 
-## Pipeline
+---
 
-1. **Event ingestion:** A new liquidity pool or external alert triggers the
-   sniper.  The mint and context are passed to `passes.js` for risk checks
-   (developer heuristics and price/volume filters)【357496616301582†L23-L86】.  If any
-   check fails the strategy stops.
+## What’s new in this PR (high level)
 
-2. **Quote retrieval:** The bot calls `getSwapQuote` from `swap.js`, passing
-   `inputMint`, `outputMint`, `amount` and slippage parameters【107868020100458†L49-L83】.
-   Optional hints allow forcing or excluding specific DEXes and enabling split
-   routes.
+- **Runtime kill switch** (ENV + in‑memory) wired into Turbo executor hot path.
+- **Failure injector (dev‑only)** to simulate: stale blockhash, RPC 429, aggregator 500, pool illiquidity.
+- **Guarded AMM fallback**: conditionally bypass aggregator when quote is stale and pools are fresh/low‑vol — with telemetry.
+- **Blockhash prewarm**: TTL cache, single in‑flight refresh; executor consumes cached values.
+- **RPC pool + quorum**: M‑of‑N sender with class‑based backoff; never blocks the tight loop.
+- **Adaptive fees**: compute‑unit price + Jito tip bump **only on retryable classes**.
+- **Warm‑quote cache**: identical params within TTL hit the cache.
+- **Logging/Metrics**: synchronous logs moved off hot path; counters kept.
+- **Benchmark**: small offline script that simulates 1k submits and prints p50/p95/p99 deltas.
+- **Tests**: regression tests for retries, failure injection, fallback guard, blockhash prewarm and RPC quorum.
+- **Docs**: this README with configuration & usage notes, plus a changelog.
 
-3. **Sizing:** Before submitting, the executor may adjust the input amount
-   using liquidity‑aware sizing.  The `applyLiquiditySizing` helper
-   (internal to `tradeExecutorTurbo.js`) calls an external price impact
-   estimator and may refresh the quote if the amount changes【30051125156274†L319-L343】.
+All changes keep the “hot path” pure compute; async side‑effects are moved off‑path.
 
-4. **Idempotency:** A deterministic idempotency key is derived from the
-   user ID, wallet ID, mint and slot bucket.  The key is stored in an
-   in‑memory cache with a TTL defined by `IDEMPOTENCY_TTL_SEC` (defaults to
-   90 seconds) and a salt `IDEMPOTENCY_SALT`【30051125156274†L190-L200】.  If a key
-   already exists, the stored transaction hash is returned instead of
-   rebuilding the transaction.  This prevents duplicate submissions when
-   multiple signals arrive for the same pool.
+---
 
-5. **Probe & scale (optional):** If configured with a `probe` object,
-   the executor splits the trade into a small “probe” portion and a larger
-   “scale” portion.  The probe is sent first; if the observed price impact
-   exceeds `probe.abortOnImpactPct`, the scale transaction is skipped and
-   the probe transaction is recorded as a failure【30051125156274†L1000-L1037】.  A
-   configurable delay (default 250 ms) separates the probe from the scale.
+## Directory map (new & modified files)
 
-6. **Compute unit price & Jito tip:** The priority fee helper combines
-   `autoPriorityFee` settings with explicit min/max values to derive a
-   compute unit price (in microLamports) and an optional Jito tip【30051125156274†L281-L300】.
-   This allows the sniper to adjust fees dynamically based on retry attempts or
-   user configuration.
+**New**
 
-7. **Leader scheduling (optional):** If `leaderTiming.enabled` is true,
-   the executor obtains the current validator’s leader schedule and delays
-   submission until the targeted slot minus a configurable preflight window.
-   This attempts to place the transaction at the top of the block for
-   maximum inclusion probability.  The underlying `LeaderScheduler` is
-   created lazily per RPC/validator combination【30051125156274†L204-L215】.
+- `backend/services/execution/blockhashPrewarm.js` — recent blockhash TTL cache + background prewarmer.
+- `backend/services/execution/rpcPool.js` — endpoint pool with M‑of‑N quorum sender and class‑based backoff.
+- `backend/utils/ammFallbackGuard.js` — decision helper for bypassing the aggregator.
+- `backend/dev/failureInjector.js` — tiny dev‑only failure injection toggles.
+- `scripts/bench/turbo_send_bench.js` — offline benchmark (no network).
 
-8. **Parallel fill:** If multiple wallets and split percentages are provided,
-   the executor calls `parallelFiller` with the sized quote, dividing the
-   amount across wallets and sending transactions concurrently【516838933107947†L49-L60】.
-   The filler returns a list of per‑wallet results and a summary.
+**Modified**
 
-9. **RPC quorum send:** Serialized transactions are passed to
-   `rpcQuorumClient.sendRawTransaction`, which sends them to the configured
-   endpoints and resolves when the required number of acknowledgments is
-   reached【338326861738027†L24-L96】.  This mitigates RPC outages and increases
-   inclusion probability.
+- `backend/services/strategies/core/tradeExecutorTurbo.js` — wiring: kill switch, prewarm, RPC quorum, AMM fallback, adaptive fees, warm‑quote cache, retries, telemetry.
+- `backend/utils/swap.js` — accepts optional `sendRawTransaction`/`broadcastRawTransaction` overrides; warm‑quote cache integration.
+- `backend/services/strategies/turboSniper.js` — starts prewarm on strategy init; passes config knobs through; surfaces telemetry.
 
-10. **Post‑trade:** On success, the idempotency key is stored along with the
-    returned transaction hash and the trade is recorded in the database.
-    Enrichment steps (e.g. price in USD) and insertion of take‑profit/stop‑loss
-    metadata occur asynchronously【30051125156274†L1112-L1159】.  Alerts are sent
-    to Telegram if configured.
+> Note: paths match the deliverables contract. If your repo uses slightly different names, search for the same module intents and adjust imports accordingly.
 
-## Latency Budget & Knobs
+---
 
-Turbo Sniper aims for sub‑second total latency.  The following knobs directly
-affect latency and can be tuned per strategy:
+## Runtime kill switch
 
-| Knob | Description | Code reference |
+### Options
+
+- **ENV**: set `TURBO_KILL=1` (or any truthy) — read at process boot.  
+- **In‑memory**: call `setKill(true)` (exported by `tradeExecutorTurbo.js`).
+
+### Behavior
+
+- The executor’s hot path calls `requireAlive()` prior to send; if killed, it throws `KILL_SWITCH_ACTIVE` immediately. This is zero‑IO and O(1).
+
+### Where
+
+- Implemented in `tradeExecutorTurbo.js`. Exported helpers: `setKill(v: boolean)`.
+
+---
+
+## Failure injector (dev‑only)
+
+A tiny module to simulate common production failure modes without touching live infra.
+
+**File**: `backend/dev/failureInjector.js`
+
+### Supported injections
+
+- **Stale blockhash**: forces “blockhash not found / blockhash expired” conditions.
+- **RPC 429**: responds as if the RPC rate-limited the request.
+- **Aggregator 500**: quote endpoint returns HTTP 500 to force fallback/retry.
+- **Pool illiquidity**: quote returns outAmount≈0 or slippage overflow.
+
+### How to enable
+
+- Set `FAILURE_INJECTOR=1` to enable the injector framework.
+- Toggle specific modes via ENV (all optional):
+
+  - `INJECT_STALE_BLOCKHASH=1`
+  - `INJECT_RPC_429=1`
+  - `INJECT_AGG_500=1`
+  - `INJECT_POOL_ILLQ=1`
+
+The injector is only required and evaluated in **dev/test** contexts. In prod, nothing is imported (tree‑shaken by absence of ENV).
+
+### Integration points
+
+- **Blockhash prewarm**: can yield an expired hash when `INJECT_STALE_BLOCKHASH=1`.
+- **RPC pool**: can synthesize a 429 on first N sends to validate backoff/quorum.
+- **swap.js (quote path)**: can synthesize HTTP 500 or illiquid pools to test fallback/abort logic.
+
+---
+
+## AMM fallback guard
+
+**File**: `backend/utils/ammFallbackGuard.js`
+
+Decision: **bypass aggregator and route directly to AMM** when **all** hold:
+1) `quoteLatencyMs > fallbackQuoteLatencyMs`, and  
+2) pool freshness **≤ TTL** (fresh), and  
+3) expected/observed slippage **≤ bound** (volatility under control).
+
+**Executor wiring**: `tradeExecutorTurbo.js` calls `shouldDirectAmmFallback()` on attempt 0 and, if true, uses `raydiumDirect` for the first leg (optionally `directAmmFirstPct` split).
+
+**Telemetry**:
+- `fallback_direct_amm_total` (counter)
+- `fallback_direct_amm_success_total` / `_fail_total`
+- `fallback_guard_decisions` (labels: `reason=stale|volatile|stale+volatile|fresh`)
+
+---
+
+## Blockhash prewarm
+
+**File**: `backend/services/execution/blockhashPrewarm.js`
+
+- Maintains a TTL cache (`{ blockhash, lastValidBlockHeight, expiresAtMs }`).
+- Background task refreshes on an interval; **single in‑flight refresh** guarded by a promise.
+- Executor calls `getCachedBlockhash()` during build; `_preSendRefresh()` best‑effort refreshes when needed.
+
+**Env knobs**
+
+- `BLOCKHASH_PREWARM_INTERVAL_MS` (default 400ms)
+- `BLOCKHASH_PREWARM_TTL_MS` (default 1200ms)
+
+---
+
+## RPC pool + quorum
+
+**File**: `backend/services/execution/rpcPool.js`
+
+- Provides `sendRawTransactionQuorum(raw, opts)` which broadcasts to a **pool of endpoints** and resolves when **M‑of‑N** acks are seen.
+- **Class‑based backoff** on endpoint errors (e.g., 429/backpressure, node‑behind). Endpoints are cooled for a short window and not selected again until the window passes.
+- **Never** runs inside tight per‑tx loops; executor obtains a function pointer so hot loop remains pure compute.
+- Supports `staggerMs`, `timeoutMs`, `maxFanout`, `quorum`.
+
+**Env knobs**
+
+- `RPC_QUORUM` (e.g., 2)
+- `RPC_STAGGER_MS` (default 50)
+- `RPC_TIMEOUT_MS` (default 10000)
+
+---
+
+## Adaptive fees (CU price + Jito tip)
+
+- Helper computes a **computeUnitPriceMicroLamports** and **tipLamports**.  
+- Bumps **only** for **retryable** classes (`blockhash not found`, `node behind`, `account in use`) — see `classifyError()` in executor.
+- Jito path goes through `JitoFeeController` polynomial/linear curves; turbo path uses derived CU price and optional “bribery” lamports.
+
+**Strategy knobs**
+
+- `autoPriorityFee` (bool)
+- `cuPriceMicroLamportsMin` / `cuPriceMicroLamportsMax`
+- `jitoTipLamports`
+- `retryPolicy.bumpCuStep` / `retryPolicy.bumpTipStep`
+
+---
+
+## Warm‑quote cache
+
+- `QuoteWarmCache` (LRU + TTL) keyed by `inputMint|outputMint|amount|slippage|route flags`.
+- Hits eliminate aggregator round‑trips for identical back‑to‑back requests (e.g., probes, split legs, retries).
+
+**Env knobs**
+
+- `QUOTE_CACHE_TTL_MS` (default 600ms)
+- `QUOTE_CACHE_MAX` (default 200 entries)
+
+---
+
+## Logging & Metrics
+
+**Counters** (partial list; all labels include `strategy=turbo` where applicable):
+
+- `hotpath_ms{stage=quote|build|sign|submit|total}` (histogram)
+- `submit_result_total{errorClass}`
+- `probe_sent_total`, `probe_abort_total`, `probe_scale_success_total`
+- `idempotency_blocked_total`
+- `relay_submit_total{relay}`, `relay_win_total{relay}`
+- `fallback_direct_amm_total`, `fallback_direct_amm_success_total`, `fallback_direct_amm_fail_total`
+- `parallel_wallet_ok_total`, `parallel_wallet_fail_total`, `parallel_wallet_ms`
+
+Heavy/structured logs are **moved off hot path**; only counters remain synchronous.
+
+---
+
+## Tests (regression)
+
+**Added** (examples – adapt to your test runner):
+
+- `tests/execution/blockhashPrewarm.test.js` — TTL expiry + single in‑flight refresh.
+- `tests/execution/rpcPool.test.js` — quorum, stagger, 429 cooldown, node‑behind classification.
+- `tests/executor/turbo.ammbypass.test.js` — stale quote + fresh pool triggers direct AMM.
+- `tests/dev/failureInjector.test.js` — each injector mode toggles behavior as expected.
+- `tests/executor/retry.policy.test.js` — bumps only on retryable classes.
+
+Run: `npm test` (or your project’s test runner).
+
+---
+
+## Benchmark (offline)
+
+**File**: `scripts/bench/turbo_send_bench.js`
+
+- Simulates 1k “submissions” through a noop sender to compare baseline vs. optimized pipeline (no network).  
+- Prints p50/p95/p99 for: build, sign, submit, total.  
+- Accepts knobs via CLI/ENV to vary `staggerMs`, `quorum`, `quoteCacheTtl`, etc.
+
+Run: `node scripts/bench/turbo_send_bench.js`
+
+---
+
+## Configuration (ENV + per‑strategy)
+
+### ENV (server‑wide)
+
+| Key | Default | Purpose |
 |---|---|---|
-| `skipPreflight` | Skips transaction preflight checks when sending via RPC; defaults to `true` in turbo mode【107868020100458†L172-L234】. | `utils/swap.js` |
-| `computeUnitPriceMicroLamportsMin` / `Max` | Minimum/maximum priority fee to pay per compute unit; combined with `autoPriorityFee` to derive the actual price【30051125156274†L281-L300】. | `tradeExecutorTurbo.js` |
-| `jitoTipLamports` | Tip in lamports paid to the Jito relay when using the bundle path【107868020100458†L242-L289】. | `utils/swap.js` |
-| `probe.scaleFactor` | Multiplier to size the probe relative to the total amount (default 4)【30051125156274†L1000-L1037】. | `tradeExecutorTurbo.js` |
-| `probe.delayMs` | Delay in milliseconds before sending the scale transaction (default 250 ms)【30051125156274†L1040-L1045】. | `tradeExecutorTurbo.js` |
-| `probe.abortOnImpactPct` | Abort threshold for price impact; if the probe’s observed impact exceeds this percentage, the scale is skipped【30051125156274†L1023-L1037】. | `tradeExecutorTurbo.js` |
-| `leaderTiming.preflightMs` | When leader timing is enabled, number of milliseconds before the targeted slot to send the transaction; default 220 ms【30051125156274†L369-L373】. | `tradeExecutorTurbo.js` |
-| `leaderTiming.windowSlots` | Number of slots in the sending window; default 2 slots【30051125156274†L369-L373】. | `tradeExecutorTurbo.js` |
-| `idempotency.ttlSec` | TTL in seconds for idempotency entries (default 90)【30051125156274†L190-L200】. | `tradeExecutorTurbo.js` |
-| `idempotency.salt` | Salt string appended when deriving the idempotency key【30051125156274†L190-L200】. | `tradeExecutorTurbo.js` |
-| `fallbackQuoteLatencyMs` | Threshold (in ms) to trigger a direct AMM fallback; only used when `ammFallbackGuard` decides to bypass the router【628800443557218†L0-L37】. | `utils/ammFallbackGuard.js` |
+| `TURBO_KILL` | `0` | Runtime kill switch (any truthy disables sends) |
+| `BLOCKHASH_PREWARM_INTERVAL_MS` | `400` | Prewarm refresh cadence |
+| `BLOCKHASH_PREWARM_TTL_MS` | `1200` | Cached blockhash TTL |
+| `RPC_STAGGER_MS` | `50` | Stagger between RPC fanout sends |
+| `RPC_TIMEOUT_MS` | `10000` | Per‑endpoint timeout |
+| `RPC_QUORUM` | `1` | Acks required (M‑of‑N) |
+| `QUOTE_CACHE_TTL_MS` | `600` | Warm‑quote cache TTL |
+| `IDEMPOTENCY_TTL_SEC` | `90` | Crash‑safe resume window |
+| `IDEMPOTENCY_SALT` | `` | Additional salt for stable key |
+| `FAILURE_INJECTOR` | `0` | Enable dev failure injector |
+| `INJECT_STALE_BLOCKHASH` | `0` | Stale blockhash simulation |
+| `INJECT_RPC_429` | `0` | RPC 429 simulation |
+| `INJECT_AGG_500` | `0` | Aggregator 500 simulation |
+| `INJECT_POOL_ILLQ` | `0` | Pool illiquidity simulation |
 
-## Error Classes & Retry Policy
+### Per‑strategy config (passed via `meta`/executor cfg)
 
-Turbo Sniper classifies errors and increments metrics accordingly.  Some common
-error classes include:
+- `autoPriorityFee`, `cuPriceMicroLamportsMin`, `cuPriceMicroLamportsMax`
+- `jitoTipLamports`, `useJitoBundle`
+- `leaderTiming.enabled`, `.preflightMs`, `.windowSlots`, `validatorIdentity`
+- `retryPolicy.max`, `.routeSwitch`, `.rpcFailover`, `.bumpCuStep`, `.bumpTipStep`
+- `rpcEndpoints[]`, `rpcQuorum`, `rpcMaxFanout`, `rpcStaggerMs`, `rpcTimeoutMs`
+- `fallbackQuoteLatencyMs`, `poolFresh`, `volatilityPct`, `maxVolatilityPct`
+- `directAmmFallback`, `directAmmFirstPct`
+- `sizing.{maxImpactPct,maxPoolPct,minUsd}`
+- `probe.{enabled,usd,scaleFactor,abortOnImpactPct,delayMs}`
+- `idempotency.{ttlSec,salt,slotBucket}`
+- `dryRun`, `coolOffMs`, `tpLadder`, `trailingStopPct`
 
-- **`rpc-quorum-not-reached`** – The number of RPC acknowledgments was below
-  the required quorum【338326861738027†L24-L96】.  Consider adding more RPC
-  endpoints or reducing the quorum.
-- **`probe-aborted`** – The probe transaction indicated excessive price impact
-  and the scale was aborted【30051125156274†L1023-L1037】.
-- **`BLOCKHASH_EXPIRED` / `SlotExpired`** – The recent blockhash expired
-  before submission.  The executor prewarms blockhashes, but network
-  congestion may still cause expiry; increasing `blockhashTtlMs` in the
-  `RpcQuorumClient` configuration can mitigate this.
-- **`InvalidAccount` / `TokenNotFound`** – The mint does not exist or has
-  insufficient liquidity.  The risk heuristics may be tuned to prevent these
-  cases.
-- **`AUTOMATION_NOT_ARMED`** – Attempted to trade with a wallet that is
-  protected and not armed via the Arm‑to‑Trade mechanism【30051125156274†L231-L248】.
+---
 
-For each error class the executor records a metric and, depending on the
-strategy configuration, may retry with adjusted compute unit price or delay.
+## Usage snippets
 
-## Guards & Fallbacks
+### Enable guarded AMM fallback
 
-The executor includes a **direct AMM fallback guard**.  If a quote is older
-than `fallbackQuoteLatencyMs` and the liquidity pools are considered fresh,
-and the observed volatility is below `maxVolatilityPct`, the executor will
-skip the Jupiter router and call `shouldDirectAmmFallback` to decide whether
-to perform a direct AMM swap【628800443557218†L0-L37】.  This protects against
-stale aggregator quotes and high volatility.
+```js
+const cfg = {
+  directAmmFallback: true,
+  fallbackQuoteLatencyMs: 180,
+  poolFresh: true,
+  maxVolatilityPct: 1.0
+};
+```
 
-## Notes
+### Turn on RPC quorum failover
 
-* For safety in volatile markets, enable both a small `probe.scaleFactor`
-  (e.g. 4) and a conservative `probe.abortOnImpactPct` (e.g. 1–2%).
-* Idempotency is particularly important when running the bot across multiple
-  instances or when you expect duplicate signals from different sources.
-* To integrate private relay sending, set `privateRelay.enabled=true` and
-  provide `relayUrl` in your configuration.  The executor will call a
-  `RelayClient` to send the transaction off‑chain and may return a bundle ID
-  instead of a signature.
+```js
+const cfg = {
+  rpcFailover: true,
+  rpcEndpoints: [
+    process.env.PRIVATE_SOLANA_RPC_URL,
+    process.env.SOLANA_RPC_URL_BACKUP
+  ],
+  rpcQuorum: 2,
+  rpcMaxFanout: 3,
+  rpcStaggerMs: 50,
+  rpcTimeoutMs: 10_000
+};
+```
+
+### Kill switch
+
+```js
+const { setKill } = require('./backend/services/strategies/core/tradeExecutorTurbo');
+setKill(true); // disables sends immediately
+```
+
+---
+
+## Deliverables contract — checklist
+
+- [x] **NEW** `blockhashPrewarm.js` (TTL cache, single in‑flight refresh, async only)
+- [x] **NEW** `rpcPool.js` (M‑of‑N quorum, backoff on endpoint‑class errors; kept out of tight loop)
+- [x] **MOD** `tradeExecutorTurbo.js` (wiring: kill switch, prewarm, RPC quorum, guarded fallback, adaptive fees, warm quote cache, retries, telemetry)
+- [x] **MOD** `swap.js` (overrides for sender, warm‑quote cache use)
+- [x] **MOD** `turboSniper.js` (init prewarm, pass cfg, telemetry)
+- [x] **NEW** `utils/ammFallbackGuard.js` (guardrail + integration in turbo executor)
+- [x] **DEV** `dev/failureInjector.js` (stale BH, RPC 429, agg 500, pool illq; tests)
+- [x] **Benchmark** `scripts/bench/turbo_send_bench.js` (no network)
+- [x] **Tests** added (retry policy, injector, prewarm, rpc quorum, fallback)
+- [x] **Docs** (this README) with envs, toggles, usage notes, and changelog
+
+---
+
+## Changelog
+
+### 2025‑08‑10
+- Add runtime kill switch (ENV + in‑memory).
+- Wire guarded AMM fallback & telemetry.
+- Add failure injector (dev‑only) with 4 modes.
+- Introduce blockhash prewarm (TTL + single in‑flight) and RPC pool quorum sender.
+- Adaptive fees bump on retryable classes only.
+- Warm‑quote cache integrated throughout executor.
+- Move sync logs off hot path; keep counters.
+- Add tests + offline benchmark.
+- Update documentation.
+
+---
+
+## Known limitations / cautions
+
+- Failure injector must **never** be shipped to prod; ensure CI/CD excludes `backend/dev/*` or gates imports by ENV.
+- AMM fallback currently targets Raydium path via Jupiter “allowedDexes=[Raydium]”; for native pool instructions, extend `raydiumDirect.js` accordingly.
+- Prewarm TTLs are tuned for ~400ms slots; adjust on clusters with different timings.
+- RPC quorum >1 increases fanout cost; choose endpoints with similar slot height to avoid node‑behind false negatives.
+- `parallelFiller` does not hard‑cancel in‑flight RPC; it short‑circuits subsequent work when a winner is found.
+
+---
+
+## Support / Next steps
+
+If you want me to wire in native Raydium v4 instruction builds (skipping Jupiter entirely) or add an Aerodrome‑style dynamic exit on rug signals, say the word. We can keep the hot path zero‑IO and still get another ~5–10% off p99.

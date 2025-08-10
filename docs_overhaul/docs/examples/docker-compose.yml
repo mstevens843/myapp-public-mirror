@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  backend:
+    image: node:18
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: sh -c "npm install && node backend/index.js"
+    env_file:
+      - ../.env
+    environment:
+      # Expose additional environment variables here if needed
+      NODE_ENV: production
+    ports:
+      - "3000:3000" # API server port
+    depends_on:
+      - db
+
+  frontend:
+    image: node:18
+    working_dir: /app
+    volumes:
+      - ..:/app
+    command: sh -c "npm install --prefix frontend && npm run build --prefix frontend && npm run start --prefix frontend"
+    env_file:
+      - ../.env
+    environment:
+      NODE_ENV: production
+    ports:
+      - "8080:8080" # Web UI port
+    depends_on:
+      - backend
+
+  db:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_DB: myapp
+      POSTGRES_USER: myappuser
+      POSTGRES_PASSWORD: myapppass
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  db_data:

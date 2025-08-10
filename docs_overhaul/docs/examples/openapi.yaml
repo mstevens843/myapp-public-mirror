@@ -1,0 +1,268 @@
+openapi: 3.0.3
+info:
+  title: MyApp Trading Bot API
+  version: 0.1.0
+  description: >-
+    This OpenAPI specification provides a starter scaffold for the bot’s REST
+    and WebSocket interfaces.  It includes placeholders for authentication,
+    trading and wallet operations.  Update this file as you implement or
+    document actual endpoints.
+
+servers:
+  - url: https://api.example.com/v1
+    description: Production server
+  - url: http://localhost:3000/v1
+    description: Development server
+
+tags:
+  - name: auth
+    description: Authentication and session management
+  - name: strategies
+    description: Manage and query strategies
+  - name: trades
+    description: Execute and query trades and positions
+  - name: wallets
+    description: Wallet import, activation and balances
+  - name: utilities
+    description: Utility endpoints (metrics, health, configs)
+
+components:
+  securitySchemes:
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: session_id
+    BearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Short machine‑readable error code
+            message:
+              type: string
+              description: Human‑readable error message
+            details:
+              type: object
+              description: Additional error context
+    AuthChallenge:
+      type: object
+      required: [nonce]
+      properties:
+        nonce:
+          type: string
+          description: Challenge nonce to be signed by the wallet
+        expiresIn:
+          type: integer
+          description: Seconds until the challenge expires
+    AuthSession:
+      type: object
+      required: [sessionId, userId, expiresAt]
+      properties:
+        sessionId:
+          type: string
+        userId:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+paths:
+  /auth/challenge:
+    post:
+      tags: [auth]
+      summary: Request an authentication challenge
+      description: >-
+        Generates a nonce for the caller to sign with their wallet.
+      requestBody:
+        description: Wallet address requesting authentication
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address:
+                  type: string
+      responses:
+        '200':
+          description: Challenge created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthChallenge'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /auth/session:
+    post:
+      tags: [auth]
+      summary: Exchange signature for session
+      description: >-
+        Verifies the signed nonce and returns a session cookie.  The client
+        should include the signature and the original nonce.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, signature, nonce]
+              properties:
+                address:
+                  type: string
+                signature:
+                  type: string
+                nonce:
+                  type: string
+      responses:
+        '200':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+          headers:
+            Set-Cookie:
+              description: Session cookie for authenticated requests
+              schema:
+                type: string
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /strategies:
+    get:
+      tags: [strategies]
+      summary: List strategies
+      description: Returns a list of available strategies and their status.
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: List of strategies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [name, enabled]
+                  properties:
+                    name:
+                      type: string
+                    enabled:
+                      type: boolean
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /trades:
+    post:
+      tags: [trades]
+      summary: Execute a trade
+      description: >-
+        Executes a trade using the specified strategy.  The exact fields
+        depend on the strategy; this endpoint is a placeholder.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [strategy, inputMint, outputMint, amount]
+              properties:
+                strategy:
+                  type: string
+                inputMint:
+                  type: string
+                outputMint:
+                  type: string
+                amount:
+                  type: string
+                slippageBps:
+                  type: integer
+                  minimum: 0
+                options:
+                  type: object
+                  description: Additional strategy-specific options
+      responses:
+        '200':
+          description: Trade executed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  signature:
+                    type: string
+        '400':
+          description: Invalid request or strategy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded or subscription limit reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /wallets:
+    get:
+      tags: [wallets]
+      summary: List wallets
+      description: Returns a list of imported wallets and their balances.
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: List of wallets
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    address:
+                      type: string
+                    balance:
+                      type: string
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+# End of specification

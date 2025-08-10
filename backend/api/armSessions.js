@@ -913,6 +913,88 @@ router.post(
   }
 );
 
+
+/**
+ * GET /api/auto-return/status
+ *
+ * Returns the authenticated user’s current auto‑return configuration.  The
+ * destination public key, default enabled flag and verification timestamp
+ * are exposed.  If no configuration exists the result may contain null
+ * values or omitted fields.
+ */
+router.get('/status', async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: {
+        autoReturnEnabledDefault: true,
+        autoReturnDestPubkey: true,
+        autoReturnDestVerifiedAt: true,
+        autoReturnGraceSeconds: true,
+        autoReturnSweepTokens: true,
+        autoReturnSolMinKeepLamports: true,
+        autoReturnFeeBufferLamports: true,
+        autoReturnExcludeMints: true,
+        autoReturnUsdcMints: true,
+      },
+    });
+    return res.json(user || {});
+  } catch (err) {
+    console.error('autoReturn GET status error:', err);
+    res.status(500).json({ error: 'Failed to load auto‑return status' });
+  }
+});
+
+/**
+ * POST /api/auto-return/setup
+ *
+ * Configure the auto‑return settings for the authenticated user.  The
+ * payload may include a new destination public key and/or default flag.
+ * When a destination pubkey is provided we mark it as verified
+ * immediately; a real implementation should perform a tiny test transfer
+ * and require a signature/2FA challenge before persisting the change.
+ */
+router.post('/setup', async (req, res) => {
+  const {
+    enabled,
+    destPubkey,
+    graceSeconds,
+    sweepTokens,
+    solMinKeepLamports,
+    feeBufferLamports,
+    excludeMints,
+    usdcMints,
+  } = req.body || {};
+  // Basic pubkey validation: must be a non‑empty string.  In production
+  // you’d parse using bs58 and ensure the correct length.
+  if (destPubkey !== undefined && destPubkey !== null) {
+    if (typeof destPubkey !== 'string' || destPubkey.trim().length === 0) {
+      return res.status(400).json({ error: 'Invalid destination pubkey' });
+    }
+  }
+  try {
+    const patch = {};
+    if (enabled !== undefined) patch.autoReturnEnabledDefault = !!enabled;
+    if (destPubkey !== undefined) {
+      patch.autoReturnDestPubkey = destPubkey;
+      // Immediately mark as verified; this should be replaced with a real
+      // verification handshake (e.g. send 0.000001 SOL and wait for receipt).
+      patch.autoReturnDestVerifiedAt = new Date();
+    }
+    if (graceSeconds !== undefined) patch.autoReturnGraceSeconds = parseInt(graceSeconds);
+    if (sweepTokens !== undefined) patch.autoReturnSweepTokens = !!sweepTokens;
+    if (solMinKeepLamports !== undefined) patch.autoReturnSolMinKeepLamports = BigInt(solMinKeepLamports);
+    if (feeBufferLamports !== undefined) patch.autoReturnFeeBufferLamports = BigInt(feeBufferLamports);
+    if (excludeMints !== undefined) patch.autoReturnExcludeMints = Array.isArray(excludeMints) ? excludeMints : [excludeMints];
+    if (usdcMints !== undefined) patch.autoReturnUsdcMints = Array.isArray(usdcMints) ? usdcMints : [usdcMints];
+    await prisma.user.update({ where: { id: req.user.id }, data: patch });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('autoReturn POST setup error:', err);
+    res.status(500).json({ error: 'Failed to update auto‑return settings' });
+  }
+});
+
 module.exports = router;
 
 
@@ -920,85 +1002,3 @@ module.exports = router;
 
 
 
-
-
-
-
-
-// // backend/api/armSession.js
-// const express = require('express');
-// const { body, validationResult } = require('express-validator');
-// const sessionMgr = require('../armEcncryption/armSessionManager');
-// const { unwrapDEK } = require('../armEncryption/armEncryption');
-
-// // Replace this with your real 2FA verification
-// const verify2FA = async (userId, code) => true;
-
-// const router = express.Router();
-// const TTL_PRESETS = { '2h': 2 * 60 * 60 * 1000, '4h': 4 * 60 * 60 * 1000, '8h': 8 * 60 * 60 * 1000 };
-
-// router.post('/start', [
-//   body('walletId').notEmpty(),
-//   body('passphrase').isString().isLength({ min: 1 }),
-//   body('ttl').isString(),
-//   body('code').isString().optional(),
-// ], async (req, res) => {
-//   const errors = validationResult(req);
-//   if (!errors.isEmpty()) return res.status(400).json({ error: 'Invalid params', details: errors.array() });
-//   const { user } = req;
-//   const { walletId, passphrase, ttl, ttlMs, code } = req.body;
-//   if (!(await verify2FA(user.id, code)))
-//     return res.status(401).json({ error: 'Invalid 2FA code' });
-//   const wallet = await req.prisma.wallet.findUnique({ where: { id: walletId, userId: user.id } });
-//   if (!wallet || !wallet.isProtected)
-//     return res.status(400).json({ error: 'Wallet not protected or not found' });
-//   const dek = await unwrapDEK(wallet, passphrase);
-//   const ttlFinal = ttl === 'custom'
-//     ? Math.min(Math.max(Number(ttlMs), 5 * 60 * 1000), 24 * 60 * 60 * 1000)
-//     : (TTL_PRESETS[ttl] || TTL_PRESETS['4h']);
-//   sessionMgr.arm(user.id, walletId, dek, ttlFinal);
-//   res.json({
-//     walletId,
-//     label: wallet.label,
-//     expiresAt: Date.now() + ttlFinal,
-//   });
-// });
-
-// router.post('/extend', [
-//   body('walletId').notEmpty(),
-//   body('ttl').isString(),
-//   body('code').isString().optional(),
-// ], async (req, res) => {
-//   const { user } = req;
-//   const { walletId, ttl, code } = req.body;
-//   if (!(await verify2FA(user.id, code)))
-//     return res.status(401).json({ error: 'Invalid 2FA code' });
-//   const extraMs = TTL_PRESETS[ttl] || TTL_PRESETS['2h'];
-//   const ok = sessionMgr.extend(user.id, walletId, extraMs);
-//   if (!ok) return res.status(400).json({ error: 'No active session to extend' });
-//   res.json({ expiresAt: Date.now() + extraMs });
-// });
-
-// router.post('/disarm', [
-//   body('walletId').notEmpty(),
-//   body('code').isString().optional(),
-// ], async (req, res) => {
-//   const { user } = req;
-//   const { walletId, code } = req.body;
-//   if (!(await verify2FA(user.id, code)))
-//     return res.status(401).json({ error: 'Invalid 2FA code' });
-//   sessionMgr.disarm(user.id, walletId);
-//   res.json({ ok: true });
-// });
-
-// // GET /arm-session/status/:walletId
-// // Returns whether the session is armed and milliseconds left.
-// router.get('/status/:walletId', requireAuth, async (req, res) => {
-//   const { walletId } = req.params;
-//   if (!walletId) return res.status(400).json({ error: 'walletId required' });
-//   const { armed, msLeft } = sessionMgr.status(req.user.id, walletId);
-//   return res.json({ walletId, armed, msLeft });
-// });
-
-
-// module.exports = router;
