@@ -32,6 +32,15 @@ const { getWalletBalance,  isAboveMinBalance, } = require("../utils");
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SOL_MINT  = "So11111111111111111111111111111111111111112";
 
+// ----------------------------------------------------------------------
+// Extended helper imports (signals + risk)
+//
+// These optional modules provide stubbed signal generation and risk
+// policies for the Trend Follower.  They will only be used when
+// enabled via botCfg.useSignals or botCfg.executionShape.
+const trendSignals = require("./signals/trendFollower");
+const trendRisk    = require("./risk/trendFollowerPolicy");
+
 
 
 
@@ -103,6 +112,16 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
 
    log("loop", `\n Trend Follower Tick @ ${new Date().toLocaleTimeString()}`);
    lastTickTimestamps[botId] = Date.now();
+
+   // Optionally precompute trend signals.  This runs asynchronously
+   // without blocking the tick loop; errors are logged.  When
+   // botCfg.useSignals is truthy the stubbed helper will return
+   // immediately, ready for future enhancements.
+   if (botCfg.useSignals) {
+     trendSignals(botCfg).catch((err) => {
+       log("error", `signal precompute failed: ${err.message || err}`);
+     });
+   }
    log("info", `[CONFIG] DELAY_MS: ${DELAY_MS}, PRIORITY_FEE: ${PRIORITY_FEE}, MAX_SLIPPAGE: ${MAX_SLIPPAGE}`);
    log("info", `[CONFIG] pumpWin: ${pumpWin}, volWin: ${volWin}`);
 
@@ -323,15 +342,19 @@ log("info", `[🐛 TP/SL DEBUG] tp=${botCfg.takeProfit ?? "null"}, sl=${botCfg.s
         const meta = {
           strategy        : "Trend Follower",
           walletId        : botCfg.walletId,
-          // publicKey: wallet?.publicKey || null, 
+          // publicKey: wallet?.publicKey || null,
           userId          : botCfg.userId,
           slippage        : SLIPPAGE,
           category        : "Trendfollower",
           tpPercent       : botCfg.tpPercent ?? TAKE_PROFIT,
           slPercent       : botCfg.slPercent ?? STOP_LOSS,
-          tp: botCfg.takeProfit,         // ✅ FIXED
-          sl: botCfg.stopLoss,
+          tp              : botCfg.takeProfit,
+          sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "trendFollower" },
+          // NEW: allow specifying a custom execution shape (e.g. "TWAP")
+          executionShape  : botCfg.executionShape,
+          // NEW: attach trend follower risk policy for future use
+          riskPolicy      : trendRisk,
         };
 
         /* execute or simulate */

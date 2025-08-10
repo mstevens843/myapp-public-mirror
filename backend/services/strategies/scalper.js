@@ -35,6 +35,16 @@ const { passes, explainFilterFail } = require("./core/passes");
 const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
 
+// ----------------------------------------------------------------------
+// Extended helper imports (signals + risk)
+//
+// The following modules are optional stubs for scalper mode.  They
+// expose asynchronous signal generation and pure risk policies.  They
+// will only be used when enabled via botCfg.useSignals or
+// botCfg.executionShape.
+const scalperSignals = require("./signals/scalper");
+const scalperRisk    = require("./risk/scalperPolicy");
+
 /* ──────────────────────────────────────────────── */
 
 
@@ -108,6 +118,16 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
     log("loop", `\nScalper Tick @ ${new Date().toLocaleTimeString()}`);
 
     lastTickTimestamps[botId] = Date.now();
+
+    // Optionally precompute scalper signals (fire‑and‑forget).  If
+    // botCfg.useSignals is truthy this asynchronous helper will run in
+    // the background and any errors will be logged.  This does not
+    // block the main loop.
+    if (botCfg.useSignals) {
+      scalperSignals(botCfg).catch((err) => {
+        log("error", `signal precompute failed: ${err.message || err}`);
+      });
+    }
 
     /* NEW: stop instantly if we already blew past the fail cap */
     if (fails >= HALT_ON_FAILS) {
@@ -223,15 +243,21 @@ await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
         const meta = {
           strategy        : "Scalper",
           walletId        : botCfg.walletId,
-          // publicKey: wallet?.publicKey || null, 
+          // publicKey: wallet?.publicKey || null,
           userId          : botCfg.userId,
           slippage        : SLIPPAGE,
           category        : "Scalper",
           tpPercent       : botCfg.tpPercent ?? TAKE_PROFIT,
           slPercent       : botCfg.slPercent ?? STOP_LOSS,
-          tp: botCfg.takeProfit,         // ✅ FIXED
-          sl: botCfg.stopLoss,
+          tp              : botCfg.takeProfit,
+          sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "scalper" },
+          // NEW: optional execution shape (e.g. "ATOMIC").  When undefined
+          // the default single‑shot swap will be used.
+          executionShape : botCfg.executionShape,
+          // NEW: attach the scalper risk policy so future executors can
+          // consult it between sub‑orders.  Currently unused.
+          riskPolicy     : scalperRisk,
         };
 
 
@@ -374,6 +400,17 @@ if (require.main === module) {
   }
   module.exports(JSON.parse(fs.readFileSync(fp, "utf8")));
 }
+
+
+
+/** 
+ * Additions: 
+ * - Multi-wallet rotation
+ * - Honeypot Protection Check
+ * - Telegram trade alerts 
+ * - Analytics Logging
+ * - Clean error handling + structure
+ */
 
 
 

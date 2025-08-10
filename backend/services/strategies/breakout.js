@@ -43,6 +43,51 @@
  * ──────────────────────────────────────── */
 
 /* Breakout v2 – parity-upgraded (Sniper/DipBuyer style) */
+/** Breakout Strategy Module 
+ * - Monitors token price and volume spikes. 
+ * - Detects breakout opportunities using thresholds.
+ * - Executes swap when breakout conditions are met. 
+ * 
+ * Configurable: 
+ * - Token list to monitor
+ * - Price threshold (% increase)
+ * - Volume threshold
+ * 
+ * Eventually Support: 
+ * - Timeframe-based candles (e.g. 1m/5m)
+ * - Telegram alerts
+ * - Multi-token monitoring via dynamic feeds. 
+ */
+
+
+/** Breakout Strategy Module 
+ * - Monitors tokens for % price increase + volume spike.
+ * - Enters position on breakout signal.
+ * 
+ * Includes:
+ * - Token list config
+ * - Honeypot protection
+ * - Telegram alerts
+ * - Analytics logging
+ * - Wallet rotation
+ * 
+ * 
+ *  * Finalized:
+ * ✅ Runtime config: mint list, thresholds, wallet, volume
+ * ✅ Honeypot + slippage protection
+ * ✅ DRY_RUN + max volume cap
+ * ✅ Telegram alerts + cooldowns
+ * ✅ Unified logging via handleSuccessTrade
+ */
+
+// backend/services/strategies/breakout.js
+/* Breakout Strategy – refactored to use core helpers */
+
+/* Breakout Strategy – refactored to shared helper stack */
+/* backend/services/strategies/breakout.js
+ * ──────────────────────────────────────── */
+
+/* Breakout v2 – parity-upgraded (Sniper/DipBuyer style) */
 const fs = require("fs");
 // const pLimit = require("p-limit");
 // const limitBirdeye = pLimit(2);   // 2 concurrent
@@ -81,6 +126,16 @@ const registerTpSl       = require("./core/tpSlRegistry");
 /* constants */
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SOL_MINT  = "So11111111111111111111111111111111111111112";
+
+// ----------------------------------------------------------------------
+// Extended helper imports
+//
+// When additional execution shapes or risk policies are enabled for
+// breakout mode, the modules below provide stub implementations.  They
+// are optional: unless botCfg.useSignals or botCfg.executionShape are
+// supplied by the UI, they will not impact performance.
+const breakoutSignals = require("./signals/breakout");
+const breakoutRisk    = require("./risk/breakoutPolicy");
 
 /* ──────────────────────────────────────────────────── */
 module.exports = async function breakoutStrategy(botCfg = {}) {
@@ -162,6 +217,17 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
     
     log("loop", `\nBreakout Tick @ ${new Date().toLocaleTimeString()}`);
     lastTickTimestamps[botId] = Date.now();
+
+    // If enabled by the UI, precompute custom breakout signals.  This
+    // asynchronous call is intentionally fire‑and‑forget; errors are
+    // logged but do not interrupt the main loop.  Real
+    // implementations should populate a cache that the strategy can
+    // consume downstream.
+    if (botCfg.useSignals) {
+      breakoutSignals(botCfg).catch((err) => {
+        log("error", `signal precompute failed: ${err.message || err}`);
+      });
+    }
 
     /* NEW: stop instantly if we already blew past the fail cap */
     if (fails >= HALT_ON_FAILS) {
@@ -312,15 +378,23 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
         const meta = {
           strategy        : "Breakout",
           walletId        : botCfg.walletId,
-          // publicKey: wallet?.publicKey || null, 
+          // publicKey: wallet?.publicKey || null,
           userId          : botCfg.userId,
           slippage        : SLIPPAGE,
           category        : "Breakout",
           tpPercent       : botCfg.tpPercent ?? TAKE_PROFIT,
           slPercent       : botCfg.slPercent ?? STOP_LOSS,
-          tp: botCfg.takeProfit,  
-          sl: botCfg.stopLoss,
+          tp              : botCfg.takeProfit,
+          sl              : botCfg.stopLoss,
           openTradeExtras : { strategy: "breakout" },
+          // NEW: allow the UI to specify a custom execution shape; if
+          // undefined, the tradeExecutor will default to the standard
+          // single‑shot swap.  Supported values include "TWAP" and
+          // "ATOMIC" (case‑insensitive).
+          executionShape : botCfg.executionShape,
+          // NEW: attach the breakout risk policy so future executors
+          // can consult it between fills.  Unused by default.
+          riskPolicy     : breakoutRisk,
         };
 
         /* 3️⃣  execute (or simulate) the buy */
@@ -469,6 +543,37 @@ if (require.main === module) {
   }
   module.exports(JSON.parse(fs.readFileSync(fp, "utf8")));
 }
+
+/** 
+ * Additions :
+ * - Wallet rotation
+ * - Honeypot protection
+ * - Telegram alerts
+ * - Analytics logging
+ * - Flexible config via .env
+ * - Better price & volume detection falback
+ */
+
+
+/** Additions 04/17 
+ * ✅ inputMint, slippage, positionSize, interval	Swap hardcoded .env fallbacks for config
+✅ breakoutThreshold	Rename and apply to priceChange check
+✅ volumeSpikeMultiplier	Compare current volume to average
+✅ confirmationCandles	Stub logic now — future implementation
+✅ minLiquidity	Apply to volume threshold
+✅ takeProfit, stopLoss	Include in trade log for future exit logic
+✅ dryRun, maxDailyVolume, haltOnFailures	Add runtime behavior controls
+✅ cooldown	Prevent double-entry too fast
+*/
+
+/**
+ * Adding volumeSpikeMultiplier
+What it does
+passes() already receives volumeWindow (e.g., "1h").
+volumeSpikeMultiplier compares the current window’s 
+volume to the average of the previous N windows (N is whatever your overview endpoint returns;
+ Birdeye gives 24 samples for 1-hour windows):
+ */
 
 /** 
  * Additions :

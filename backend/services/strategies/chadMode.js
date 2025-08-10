@@ -19,6 +19,15 @@ const {
 const getTokenShortTermChange = require("./paid_api/getTokenShortTermChanges");
 const { getWalletBalance, isAboveMinBalance } = require("../utils");
 
+// ----------------------------------------------------------------------
+// Extended helper imports (signals + risk)
+//
+// Chad mode is manual by design.  The following modules provide stubs
+// for symmetry with other strategies.  They will only be used if
+// explicitly enabled via cfg.useSignals or cfg.executionShape.
+const chadSignals = require("./signals/chadmode");
+const chadRisk    = require("./risk/chadmodePolicy");
+
 module.exports = async function chadMode(cfg = {}) {
   const botId = cfg.botId || "manual";
   const log   = strategyLog("chadmode", botId, cfg);
@@ -106,6 +115,15 @@ module.exports = async function chadMode(cfg = {}) {
       log("loop", `\nChad Tick @ ${new Date().toLocaleTimeString()}`);
       lastTickTimestamps[botId] = Date.now();
 
+      // Optional: compute any manual mode signals.  This stub simply
+      // logs failures and returns immediately.  To enable, set
+      // cfg.useSignals on the UI.  It does not block the trading loop.
+      if (cfg.useSignals) {
+        chadSignals(cfg).catch((err) => {
+          log("error", `signal precompute failed: ${err.message || err}`);
+        });
+      }
+
       if (dumping) {
         log("warn", "⏸ Waiting for auto-dump to complete");
         processing = false;
@@ -182,16 +200,22 @@ module.exports = async function chadMode(cfg = {}) {
           wallet,
           mint,
           meta: {
-            strategy : "Chad Mode",
-            walletId : cfg.walletId,
-            userId   : cfg.userId,
-            slippage : SLIPPAGE,
-            category : "ChadMode",
-            tpPercent: cfg.tpPercent ?? 0,
-            slPercent: cfg.slPercent ?? 0,
-            tp       : cfg.takeProfit,
-            sl       : cfg.stopLoss,
-            openTradeExtras: { strategy: "Chad Mode" },
+            strategy        : "Chad Mode",
+            walletId        : cfg.walletId,
+            userId          : cfg.userId,
+            slippage        : SLIPPAGE,
+            category        : "ChadMode",
+            tpPercent       : cfg.tpPercent ?? 0,
+            slPercent       : cfg.slPercent ?? 0,
+            tp              : cfg.takeProfit,
+            sl              : cfg.stopLoss,
+            openTradeExtras : { strategy: "Chad Mode" },
+            // NEW: optional execution shape for manual mode; allow the UI
+            // to choose a custom executor.  When undefined the default
+            // single‑swap executor will be used.
+            executionShape  : cfg.executionShape,
+            // NEW: attach chad mode risk policy for future guardrails
+            riskPolicy      : chadRisk,
           },
         });
 

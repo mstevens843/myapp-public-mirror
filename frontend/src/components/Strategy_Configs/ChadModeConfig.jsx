@@ -14,6 +14,10 @@ const ChadModeConfig = ({ config = {}, setConfig, disabled }) => {
     autoSell : { dumpPct: 100, randomJitterMs: 0 },
     useMultiTargets: false,
     targetTokens: "",
+    // NEW: optional signals for manual mode (disabled by default)
+    useSignals: false,
+    // NEW: allow selecting an execution shape (empty for default single swap)
+    executionShape: "",
   };
 const merged = useMemo(() => ({ ...defaults, ...config }), [config]);
 
@@ -200,6 +204,44 @@ const merged = useMemo(() => ({ ...defaults, ...config }), [config]);
             className="px-3 py-2 rounded-md bg-zinc-800 border border-zinc-700"
           />
         </label>
+
+        {/* ——— Signals & Execution Shape (manual) —— */}
+        <div className="grid sm:grid-cols-2 gap-4 mt-4">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="useSignals"
+              checked={!!merged.useSignals}
+              onChange={() =>
+                setConfig((p) => ({ ...p, useSignals: !p.useSignals }))
+              }
+              disabled={disabled}
+              className="accent-emerald-500 w-4 h-4"
+            />
+            <span className="flex items-center gap-1">
+              Enable Signals <StrategyTooltip name="useSignals" />
+            </span>
+          </label>
+
+          <label className="flex flex-col text-sm font-medium">
+            <span className="flex items-center gap-1">
+              Execution Shape <StrategyTooltip name="executionShape" />
+            </span>
+            <select
+              name="executionShape"
+              value={merged.executionShape ?? ""}
+              onChange={(e) =>
+                setConfig((p) => ({ ...p, executionShape: e.target.value }))
+              }
+              disabled={disabled}
+              className="px-3 py-2 rounded-md bg-zinc-800 border border-zinc-700"
+            >
+              <option value="">Default</option>
+              <option value="TWAP">TWAP</option>
+              <option value="ATOMIC">Atomic Scalp</option>
+            </select>
+          </label>
+        </div>
         <label className="flex flex-col text-sm font-medium">
           Panic-Dump % (drop)
           <input

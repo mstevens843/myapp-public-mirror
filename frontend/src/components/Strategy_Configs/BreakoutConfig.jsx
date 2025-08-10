@@ -12,6 +12,9 @@ export const OPTIONAL_FIELDS = [
   "minLiquidity",
   "monitoredTokens",
   "overrideMonitored",
+  // Expose new advanced toggles
+  "useSignals",
+  "executionShape",
 ];
 
 const feedOptions = [
@@ -32,6 +35,10 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
     tokenFeed             : "monitored",
     monitoredTokens       : "",
     overrideMonitored     : false,
+    // NEW: disable signals by default so Breakout behaves like Sniper
+    useSignals           : false,
+    // NEW: default execution shape (empty string defers to single swap)
+    executionShape       : "",
   };
   const merged = useMemo(() => ({ ...defaults, ...config }), [config]);
 
@@ -146,6 +153,49 @@ const summaryTokenList = merged.overrideMonitored
             className={inp}
           />
         </label>
+
+        {/* ——— Signals & Execution Shape —— */}
+        <div className="grid sm:grid-cols-2 gap-4 mt-4">
+          {/* Toggle to enable custom signal computation on the backend */}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              name="useSignals"
+              checked={!!merged.useSignals}
+              onChange={() =>
+                setConfig((p) => ({ ...p, useSignals: !p.useSignals }))
+              }
+              disabled={disabled}
+              className="accent-emerald-500 w-4 h-4"
+            />
+            <span className="flex items-center gap-1">
+              Enable Signals <StrategyTooltip name="useSignals" />
+            </span>
+          </label>
+
+          {/* Select the execution shape for breakout orders */}
+          <label className="flex flex-col text-sm font-medium">
+            <span className="flex items-center gap-1">
+              Execution Shape <StrategyTooltip name="executionShape" />
+            </span>
+            <div className="relative">
+              <select
+                name="executionShape"
+                value={merged.executionShape ?? ""}
+                onChange={(e) =>
+                  setConfig((p) => ({ ...p, executionShape: e.target.value }))
+                }
+                disabled={disabled}
+                className={`${inp} appearance-none pr-10`}
+              >
+                <option value="">Default</option>
+                <option value="TWAP">TWAP</option>
+                <option value="ATOMIC">Atomic Scalp</option>
+              </select>
+              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+            </div>
+          </label>
+        </div>
       </div>
 
       {/* ——— Shared controls ——— */}

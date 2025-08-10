@@ -27,6 +27,10 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
     volumeThreshold: 500,
     volumeWindow   : "5m",
     volumeSpikeMultiplier: "", 
+    // NEW: disable signals by default; toggled on in advanced settings
+    useSignals: false,
+    // NEW: default execution shape (empty = single swap)
+    executionShape: "",
   };
   const merged = useMemo(() => ({ ...defaults, ...config }), [config]);
 
@@ -156,6 +160,46 @@ const summaryVolumeWindow = volumeWins.includes(merged.volumeWindow) ? merged.vo
           className={inp}
         />
       </label>
+
+      {/* ——— Signals & Execution Shape —— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="useSignals"
+            checked={!!merged.useSignals}
+            onChange={() =>
+              setConfig((p) => ({ ...p, useSignals: !p.useSignals }))
+            }
+            disabled={disabled}
+            className="accent-emerald-500 w-4 h-4"
+          />
+          <span className="flex items-center gap-1">
+            Enable Signals <StrategyTooltip name="useSignals" />
+          </span>
+        </label>
+        <label className="flex flex-col text-sm font-medium">
+          <span className="flex items-center gap-1">
+            Execution Shape <StrategyTooltip name="executionShape" />
+          </span>
+          <div className="relative">
+            <select
+              name="executionShape"
+              value={merged.executionShape ?? ""}
+              onChange={(e) =>
+                setConfig((p) => ({ ...p, executionShape: e.target.value }))
+              }
+              disabled={disabled}
+              className={`${inp} appearance-none pr-10`}
+            >
+              <option value="">Default</option>
+              <option value="TWAP">TWAP</option>
+              <option value="ATOMIC">Atomic Scalp</option>
+            </select>
+            <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+          </div>
+        </label>
+      </div>
 
       {/* ——— shared blocks ——— */}
       <TokenSourceSelector config={config} setConfig={setConfig} disabled={disabled}/>

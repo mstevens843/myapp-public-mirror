@@ -25,6 +25,9 @@ export const OPTIONAL_FIELDS = [
   "tokenFeed",
   "monitoredTokens",
   "overrideMonitored",
+  // expose new advanced toggles
+  "useSignals",
+  "executionShape",
 ];
 
 const TrendFollowerConfig = ({ config = {}, setConfig, disabled, children }) => {
@@ -42,6 +45,10 @@ const TrendFollowerConfig = ({ config = {}, setConfig, disabled, children }) => 
     // dipThreshold      : "",
     // delayBeforeBuyMs  : "",
     priorityFeeLamports: "",
+    // NEW: disable signals by default; toggled via UI
+    useSignals: false,
+    // NEW: default execution shape (empty = single swap)
+    executionShape: "",
   };
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
@@ -155,6 +162,42 @@ const volumeWins   = ["", "1m","5m","30m","1h","4h","8h","24h"];
       </select>
       <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none"/>
     </div>
+
+      {/* ——— Signals & Execution Shape —— */}
+      <div className="grid sm:grid-cols-2 gap-4 mt-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            name="useSignals"
+            checked={!!merged.useSignals}
+            onChange={() => setConfig((p) => ({ ...p, useSignals: !p.useSignals }))}
+            disabled={disabled}
+            className="accent-emerald-500 w-4 h-4"
+          />
+          <span className="flex items-center gap-1">
+            Enable Signals <StrategyTooltip name="useSignals" />
+          </span>
+        </label>
+        <label className="flex flex-col text-sm font-medium">
+          <span className="flex items-center gap-1">
+            Execution Shape <StrategyTooltip name="executionShape" />
+          </span>
+          <div className="relative">
+            <select
+              name="executionShape"
+              value={merged.executionShape ?? ""}
+              onChange={(e) => setConfig((p) => ({ ...p, executionShape: e.target.value }))}
+              disabled={disabled}
+              className={`${inp} appearance-none pr-10`}
+            >
+              <option value="">Default</option>
+              <option value="TWAP">TWAP</option>
+              <option value="ATOMIC">Atomic Scalp</option>
+            </select>
+            <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+          </div>
+        </label>
+      </div>
   </label>
 </div>
 

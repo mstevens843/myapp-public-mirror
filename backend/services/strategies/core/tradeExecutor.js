@@ -290,4 +290,34 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 const liveBuy     = (o) => execTrade({ ...o, simulated: false });
 const simulateBuy = (o) => execTrade({ ...o, simulated: true  });
 
-module.exports = { liveBuy, simulateBuy };
+/*
+ * ──────────────────────────────────────────────────────────────────────────
+ * Extended execution shapes
+ *
+ * Some strategies require more sophisticated execution than a single market
+ * swap.  For example, the Trend Follower might wish to accumulate over
+ * several blocks using a TWAP/VWAP ladder, while the Scalper may need
+ * atomic enter→cancel/replace→exit loops to control slippage and timing.
+ *
+ * The default implementations below simply delegate to liveBuy so that
+ * existing strategies (like Sniper) continue to behave exactly as before.
+ * When you implement TWAP or atomic scalping, replace the bodies of
+ * these functions with your custom logic.  Both functions accept the
+ * same options object as liveBuy/simulateBuy.
+ */
+
+async function executeTWAP(opts) {
+  // TODO: slice opts.amount into multiple smaller orders over time and
+  // optionally call risk hooks between slices.  This stub forwards
+  // directly to the liveBuy executor to preserve baseline behaviour.
+  return liveBuy(opts);
+}
+
+async function executeAtomicScalp(opts) {
+  // TODO: implement atomic scalper execution that enters the market,
+  // immediately adjusts or cancels the order, and exits based on
+  // microstructure signals.  The stub forwards to liveBuy.
+  return liveBuy(opts);
+}
+
+module.exports = { liveBuy, simulateBuy, executeTWAP, executeAtomicScalp };
