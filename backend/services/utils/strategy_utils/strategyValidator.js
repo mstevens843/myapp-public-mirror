@@ -1420,7 +1420,11 @@ function validateTurboSniper(cfg = {}) {
   // RPC endpoints / URLs (best-effort type checks)
   // ---------------------------
   if (!isUnset(cfg.rpcEndpoints)) {
-    if (!(Array.isArray(cfg.rpcEndpoints) || typeof cfg.rpcEndpoints === 'string')) {
+    if (Array.isArray(cfg.rpcEndpoints)) {
+      if (!cfg.rpcEndpoints.every((ep) => typeof ep === 'string' && ep.trim())) {
+        errors.push('TurboSniper: rpcEndpoints (array) must contain non-empty strings');
+      }
+    } else if (typeof cfg.rpcEndpoints !== 'string') {
       errors.push('TurboSniper: rpcEndpoints must be a comma-separated string or array of URLs');
     }
   }
@@ -1429,6 +1433,9 @@ function validateTurboSniper(cfg = {}) {
   }
   if (!isUnset(cfg.jitoRelayUrl) && typeof cfg.jitoRelayUrl !== 'string') {
     errors.push('TurboSniper: jitoRelayUrl must be a string (URL)');
+  }
+  if (!isUnset(cfg.rpcFailover) && typeof cfg.rpcFailover !== 'boolean') {
+    errors.push('TurboSniper: rpcFailover must be boolean');
   }
 
   // ---------------------------
@@ -1448,6 +1455,21 @@ function validateTurboSniper(cfg = {}) {
   }
 
   // ---------------------------
+  // ADDED: DEX watch flags + pool freshness window
+  // ---------------------------
+  ['watchRaydium','watchOrca','watchMeteora','watchStep','watchCrema'].forEach((flag) => {
+    if (!isUnset(cfg[flag]) && typeof cfg[flag] !== 'boolean') {
+      errors.push(`TurboSniper: ${flag} must be boolean`);
+    }
+  });
+  if (!isUnset(cfg.poolFreshnessWindowSlots)) {
+    const v = toNum(cfg.poolFreshnessWindowSlots);
+    if (!Number.isInteger(v) || v <= 0) {
+      errors.push('TurboSniper: poolFreshnessWindowSlots must be a positive integer');
+    }
+  }
+
+  // ---------------------------
   // DEX prefs already covered above
   // ---------------------------
   if (cfg.tpLadder !== undefined && cfg.tpLadder !== null && cfg.tpLadder !== "") {
@@ -1463,9 +1485,6 @@ function validateTurboSniper(cfg = {}) {
 
   return errors;
 }
-
-
-module.exports = validateTurboSniper;
 
 
 
@@ -1496,8 +1515,11 @@ function validateStrategyConfig(mode = "", cfg = {}) {
   return fn ? fn(cfg) : validateSharedConfig(cfg);
 }
 
+module.exports.default = validateTurboSniper
+
 module.exports = {
   validateStrategyConfig,
   validateSharedConfig,
   validateScheduleLauncher, 
+   validateTurboSniper,
 };

@@ -11,44 +11,87 @@
  * automatic snipes or other logic.
  *
  * This implementation is inspired by QuickNode's guide on tracking new
- * liquidity pools on Raydium using Solana WebSockets【778824402250984†L250-L303】.  It
+ * liquidity pools on Raydium using Solana WebSockets.  It
  * restricts logs to the Raydium legacy AMM v4 program by default,
- * identified by the program ID `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8`【987307265498407†L164-L174】.  Additional
+ * identified by the program ID `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8`.  Additional
  * program IDs may be provided via the constructor to monitor other DEXes.
+ *
+ * Additions for this project:
+ *  - Accept an array of { programId, enabled } and subscribe only to those with enabled=true.
+ *  - Include the slot on each emission as `detectedAtSlot`:
+ *      { signature, programId, tokenA, tokenB, detectedAtSlot }
  */
 
-const { Connection, PublicKey } = require("@solana/web3.js");
-const EventEmitter = require("events");
+'use strict';
+
+const { Connection, PublicKey } = require('@solana/web3.js');
+const EventEmitter = require('events');
 
 // Default program IDs to watch. Raydium's AMM v4 program is the most widely
-// used constant product pool on Solana【987307265498407†L164-L174】. Users may
-// supply additional program IDs (e.g., for Orca, Meteora, Step, Crema) when
-// instantiating the PoolWatcher.
+// used constant product pool on Solana.
 const DEFAULT_PROGRAM_IDS = [
-  "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM v4
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
 ];
+
+/**
+ * Normalize a user-provided program configuration into a consistent
+ * array of { pubkey: PublicKey, enabled: boolean } objects.
+ * Accepts either an array of strings (program IDs) or an array of
+ * { programId, enabled } objects.
+ */
+function normalizePrograms(input) {
+  if (!input) {
+    return DEFAULT_PROGRAM_IDS.map((id) => ({ pubkey: new PublicKey(id), enabled: true }));
+  }
+  // Array of strings -> enable all
+  if (Array.isArray(input) && input.every((v) => typeof v === 'string')) {
+    return input.map((id) => ({ pubkey: new PublicKey(id), enabled: true }));
+  }
+  // Array of objects -> map/validate
+  if (Array.isArray(input)) {
+    return input
+      .filter((p) => p && typeof p.programId === 'string')
+      .map((p) => ({
+        pubkey: new PublicKey(p.programId),
+        enabled: p.enabled !== false, // default true
+      }));
+  }
+  // Fallback to defaults
+  return DEFAULT_PROGRAM_IDS.map((id) => ({ pubkey: new PublicKey(id), enabled: true }));
+}
+
+/**
+ * Convert an http(s) RPC URL to the equivalent ws(s) URL.
+ */
+function toWs(rpcUrl) {
+  if (rpcUrl.startsWith('https://')) return rpcUrl.replace('https://', 'wss://');
+  if (rpcUrl.startsWith('http://')) return rpcUrl.replace('http://', 'ws://');
+  return rpcUrl; // assume already ws(s)
+}
 
 class PoolWatcher extends EventEmitter {
   /**
    * Create a new PoolWatcher.
    *
    * @param {string} rpcUrl RPC endpoint for the WebSocket connection.
-   * @param {string[]} programIds List of program IDs to filter logs by.
+   * @param {string[]|{programId: string, enabled?: boolean}[]} programs
+   *        Either a list of program IDs to filter logs by, or an
+   *        array of objects with {programId, enabled}.
    */
-  constructor(rpcUrl, programIds = DEFAULT_PROGRAM_IDS) {
+  constructor(rpcUrl, programs = DEFAULT_PROGRAM_IDS) {
     super();
     this.rpcUrl = rpcUrl;
-    this.programIds = programIds.map((id) => new PublicKey(id));
+    this.programs = normalizePrograms(programs);
     this.connection = new Connection(this.rpcUrl, {
-      commitment: "confirmed",
-      wsEndpoint: this.rpcUrl.replace(/^http/, "ws"),
+      commitment: 'confirmed',
+      wsEndpoint: toWs(this.rpcUrl),
     });
     this.subscriptions = [];
     this.running = false;
   }
 
   /**
-   * Start listening for logs on the configured program IDs.  When a log
+   * Start listening for logs on enabled program IDs.  When a log
    * contains `InitializePool` or `AddLiquidity`, the transaction is parsed
    * to extract token accounts at expected positions, and a `poolDetected`
    * event is emitted with the token mints.
@@ -56,44 +99,49 @@ class PoolWatcher extends EventEmitter {
   async start() {
     if (this.running) return;
     this.running = true;
-    for (const programId of this.programIds) {
+
+    for (const { pubkey, enabled } of this.programs) {
+      if (!enabled) continue;
       const subId = await this.connection.onLogs(
-        programId,
+        pubkey,
         async (logInfo) => {
           try {
-            const { signature, logs } = logInfo;
-            const text = logs.join(" ");
+            const { signature, logs, slot } = logInfo;
+            const text = Array.isArray(logs) ? logs.join(' ') : String(logs || '');
             // Heuristically detect pool creation or liquidity add instructions
             if (/InitializePool|initialize2|AddLiquidity/i.test(text)) {
               // Fetch and parse the transaction to extract token mints
               const tx = await this.connection.getParsedTransaction(signature, {
                 maxSupportedTransactionVersion: 0,
-                commitment: "confirmed",
+                commitment: 'confirmed',
               });
               const instructions = tx?.transaction?.message?.instructions || [];
               for (const ix of instructions) {
                 // Only process instructions belonging to the watched program
-                if (ix.programId.equals(programId)) {
+                if (ix.programId && new PublicKey(ix.programId).equals(pubkey)) {
                   const accounts = ix.accounts || [];
-                  // Based on QuickNode's example, token A/B accounts are at positions 8 and 9【778824402250984†L274-L301】
+                  // Based on QuickNode's example, token A/B accounts are at positions 8 and 9
                   const tokenA = accounts[8];
                   const tokenB = accounts[9];
                   if (tokenA && tokenB) {
-                    this.emit("poolDetected", {
+                    const tokenAStr = typeof tokenA === 'string' ? tokenA : tokenA.toBase58?.() || String(tokenA);
+                    const tokenBStr = typeof tokenB === 'string' ? tokenB : tokenB.toBase58?.() || String(tokenB);
+                    this.emit('poolDetected', {
                       signature,
-                      programId: programId.toBase58(),
-                      tokenA: tokenA.toBase58(),
-                      tokenB: tokenB.toBase58(),
+                      programId: pubkey.toBase58(),
+                      tokenA: tokenAStr,
+                      tokenB: tokenBStr,
+                      detectedAtSlot: slot,
                     });
                   }
                 }
               }
             }
           } catch (err) {
-            console.error("PoolWatcher parse error:", err.message);
+            console.error('PoolWatcher parse error:', err?.message || err);
           }
         },
-        "confirmed"
+        'confirmed'
       );
       this.subscriptions.push(subId);
     }
