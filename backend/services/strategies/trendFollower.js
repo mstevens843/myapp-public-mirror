@@ -311,8 +311,10 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
         prevDir = dir;
 
         // trailing stop bookkeeping on the tracked position (no sells wired here)
+        // trailing stop bookkeeping on the tracked position; enforce exits when stop breached
         if (openPosition && openPosition.mint === mint) {
           if (overview?.price) {
+            // update high/low water marks
             if (openPosition.direction === 1) {
               openPosition.highWater = Math.max(openPosition.highWater, overview.price);
             } else if (openPosition.direction === -1) {
@@ -321,6 +323,55 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
             const extreme = openPosition.direction === 1 ? openPosition.highWater : openPosition.lowWater;
             const stop = trendSignals.trailingStop(extreme, trailingPct, openPosition.direction === 1);
             log("info", `Trailing stop recalculated @ ${stop.toFixed ? stop.toFixed(6) : stop}`);
+            // Check if trailing stop is hit for long (direction=1) or short (direction=-1)
+            const priceNow = overview.price;
+            let stopHit = false;
+            if (openPosition.direction === 1 && priceNow <= stop) stopHit = true;
+            if (openPosition.direction === -1 && priceNow >= stop) stopHit = true;
+            if (stopHit) {
+              log("info", `Trailing stop hit on ${mint} (price ${priceNow.toFixed(6)} vs stop ${stop.toFixed ? stop.toFixed(6) : stop})`);
+              try {
+                // Determine swap direction: for long position we sell token to BASE; for short skip
+                if (openPosition.direction === 1 && openPosition.quantity) {
+                  const sellRes = await getSafeQuote({
+                    inputMint    : mint,
+                    outputMint   : BASE_MINT,
+                    amount       : openPosition.quantity,
+                    slippage     : SLIPPAGE,
+                    maxImpactPct : MAX_SLIPPAGE,
+                  });
+                  if (sellRes.ok) {
+                    const exec = (botCfg?.executionShape || "") === "TWAP"
+                      ? executeTWAP
+                      : (botCfg?.executionShape || "") === "ATOMIC"
+                      ? executeAtomicScalp
+                      : (DRY_RUN ? simulateBuy : liveBuy);
+                    await exec({ quote: sellRes.quote, mint, meta: {
+                      strategy : "TrendFollowerExit",
+                      walletId : botCfg.walletId,
+                      userId   : botCfg.userId,
+                      slippage : SLIPPAGE,
+                      category : "Trendfollower",
+                      executionShape: botCfg?.executionShape || "",
+                      riskPolicy: trendRisk,
+                      position: openPosition,
+                    }});
+                    summary.inc("sells");
+                    openPosition = null;
+                    // After exit we should not evaluate further on this token in this tick
+                    continue;
+                  } else {
+                    log("warn", `Unable to get exit quote for ${mint}: ${sellRes.reason}`);
+                  }
+                } else {
+                  // For short positions we simply clear the position without on-chain action
+                  log("info", `Closing short position on ${mint} (direction -1)`);
+                  openPosition = null;
+                }
+              } catch (e) {
+                log("error", `Failed to exit position on ${mint}: ${e.message}`);
+              }
+            }
           }
         }
 
@@ -330,21 +381,67 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
           continue;
         }
 
-        // If we have a position and SAR says flip, close (conceptually) and allow a new entry
+        // If we have a position and SAR says flip, exit the current position and allow a new entry
         if (openPosition && shouldFlip) {
           log("info", `SAR flip on ${openPosition.mint} (dir ${openPosition.direction} → ${dir}) — closing tracked position`);
-          openPosition = null; // NOTE: actual sell not wired here; preserving no-removal rule.
+          try {
+            // For long positions perform an on‑chain exit; for short just drop tracking
+            if (openPosition.direction === 1 && openPosition.quantity) {
+              const sellRes = await getSafeQuote({
+                inputMint    : openPosition.mint,
+                outputMint   : BASE_MINT,
+                amount       : openPosition.quantity,
+                slippage     : SLIPPAGE,
+                maxImpactPct : MAX_SLIPPAGE,
+              });
+              if (sellRes.ok) {
+                const exec = (botCfg?.executionShape || "") === "TWAP"
+                  ? executeTWAP
+                  : (botCfg?.executionShape || "") === "ATOMIC"
+                  ? executeAtomicScalp
+                  : (DRY_RUN ? simulateBuy : liveBuy);
+                await exec({ quote: sellRes.quote, mint: openPosition.mint, meta: {
+                  strategy : "TrendFollowerExit",
+                  walletId : botCfg.walletId,
+                  userId   : botCfg.userId,
+                  slippage : SLIPPAGE,
+                  category : "Trendfollower",
+                  executionShape: botCfg?.executionShape || "",
+                  riskPolicy: trendRisk,
+                  position: openPosition,
+                }});
+                summary.inc("sells");
+              } else {
+                log("warn", `SAR flip exit quote failed: ${sellRes.reason}`);
+              }
+            }
+          } catch (e) {
+            log("error", `SAR flip exit failed: ${e.message}`);
+          }
+          // Clear the position regardless of execution outcome
+          openPosition = null;
         }
 
         // Pyramiding: if enabled and same direction, schedule an add (soft)
         if (openPosition && pyramidEnabled && dir === openPosition.direction) {
           try {
-            const addSize = trendRisk.nextPyramidAdd(1, riskPerAdd, openPosition.currentRisk, maxRisk);
-            if (addSize > 0) {
+            // Determine how much additional equity (in SOL) can be risked.  We pass
+            // the nominal equity (SNIPE_LAMPORTS → SOL) into nextPyramidAdd, which
+            // returns a SOL amount to add.  If currentRisk already exceeds
+            // maxRisk, this returns 0.
+            const equitySol = SNIPE_LAMPORTS / 1e9;
+            const additionalRiskSol = trendRisk.nextPyramidAdd(
+              equitySol,
+              riskPerAdd,
+              openPosition.currentRisk,
+              maxRisk
+            );
+            if (additionalRiskSol > 0) {
+              const lamportsToSpend = Math.round(additionalRiskSol * 1e9);
               const addResult = await getSafeQuote({
                 inputMint    : BASE_MINT,
                 outputMint   : mint,
-                amount       : Math.round(addSize * 1e9), // risk-per-add expressed in SOL units -> lamports stub
+                amount       : lamportsToSpend,
                 slippage     : SLIPPAGE,
                 maxImpactPct : MAX_SLIPPAGE,
               });
@@ -362,6 +459,7 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
                   category: "Trendfollower",
                   openTradeExtras: { strategy: "trendFollower", pyramidAdd: true },
                 }});
+                // Increase our position risk proportionally; riskPerAdd is the fraction of equity used per add
                 openPosition.currentRisk += riskPerAdd;
                 log("info", `Pyramiding into ${mint}, added risk ${riskPerAdd}`);
               }
@@ -517,6 +615,8 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
             highWater: entryPrice,
             lowWater : entryPrice,
             currentRisk: riskPerAdd,
+            // capture the quantity of tokens purchased (for longs) so we can exit appropriately
+            quantity: quote && quote.outAmount != null ? BigInt(quote.outAmount) : 0n,
           };
           log("info", `Tracking position ${prevDir === 1 ? "LONG" : "SHORT"} on ${mint} @ ${entryPrice}`);
         }
@@ -573,15 +673,15 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
       summary.inc("errors");
       log("error", err?.message || String(err));
       await tradeExecuted({
-        userId     : cfg.userId,
-        mint       : cfg.tokenMint,
-        wl         : label || "default",
+        userId     : botCfg.userId,
+        mint       : mint,
+        wl         : botCfg.walletLabel || "default",
         category   : "TrendFollower",
         simulated  : DRY_RUN,
-        amountFmt  : `${(spendLamports / 1e9).toFixed(3)} SOL`,
-        impactPct  : null,                // add if available
-        usdValue   : null,                // add if available
-        entryPriceUSD : null,            // add if available
+        amountFmt  : `${(SNIPE_LAMPORTS / 1e9).toFixed(3)} SOL`,
+        impactPct  : null,
+        usdValue   : null,
+        entryPriceUSD : null,
         tpPercent  : null,
         slPercent  : null,
       });

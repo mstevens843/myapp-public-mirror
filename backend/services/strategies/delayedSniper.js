@@ -29,12 +29,20 @@ const { createSummary, tradeExecuted }        = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
 const { initTxWatcher }        = require("./core/txTracker");
 
+// web3 connection used for retrieving the current slot when ignoring
+// the first N blocks after launch. We lazily instantiate inside the
+// strategy function to avoid unnecessary connections when not used.
+const { Connection, clusterApiUrl } = require('@solana/web3.js');
+
 /* misc utils still needed directly */
 const { getWalletBalance,  isAboveMinBalance, } = require("../utils");
 
 /* ── NEW (add-only): warm-up ramp & launch-risk helpers ── */
-const rampSignals = require("./signals/delayedSniper");
-const rampRisk    = require("./risk/delayedSniperPolicy");
+// Import warm‑up ramp signals and launch risk helpers from the core folder.  The
+// original relative imports pointed to non‑existent files.  These modules
+// provide pure functions for ramp detection and ignored‑blocks/liquidity gates.
+const rampSignals = require("./core/signals/delayedSniper");
+const rampRisk    = require("./core/risk/delayedSniper");
 
 /* constants */
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -186,8 +194,16 @@ module.exports = async function delayedSniperStrategy(botCfg = {}) {
           const metaForBlocks = await getTokenCreationTime(null, mint);
           const launchBlock = metaForBlocks?.block ?? null; // only if provider returns it
           if (launchBlock != null && ignoreBlocks > 0) {
-            // we don’t hit RPC for the “current block”; just use a safe stub like original sample
-            const currentBlock = launchBlock + ignoreBlocks + 10;
+            let currentBlock = null;
+            try {
+              // lazily create a connection if not already; prefer env URL or mainnet
+              const rpcUrl = process.env.SOLANA_RPC_URL || clusterApiUrl('mainnet-beta');
+              const conn   = new Connection(rpcUrl, 'confirmed');
+              currentBlock = await conn.getSlot();
+            } catch (slotErr) {
+              // fallback to stub when RPC unavailable
+              currentBlock = launchBlock + ignoreBlocks + 10;
+            }
             if (rampRisk && typeof rampRisk.inIgnoredBlocks === "function") {
               if (rampRisk.inIgnoredBlocks(launchBlock, currentBlock, ignoreBlocks)) {
                 log("info", `⏳ Ignoring first ${ignoreBlocks} blocks after launch — skip`);
@@ -259,6 +275,19 @@ module.exports = async function delayedSniperStrategy(botCfg = {}) {
         log("info", "✅ Passed price/volume/mcap checks");
         log("info", `[🎯 TARGET FOUND] ${mint}`);
         summary.inc("filters");
+
+        /* ── Liquidity floor check ── */
+        try {
+          const liqUsd = Number(overview?.volumeUSD ?? overview?.volume24h ?? 0);
+          const floor  = botCfg.minLiquidityUSD != null ? +botCfg.minLiquidityUSD : 10000;
+          if (typeof rampRisk?.aboveLiquidityFloor === "function" && !rampRisk.aboveLiquidityFloor(liqUsd, floor)) {
+            log("info", `Liquidity $${liqUsd.toFixed(2)} < floor $${floor} — skip`);
+            summary.inc("liquidityFail");
+            continue;
+          }
+        } catch (liqqe) {
+          log("warn", `Liquidity floor check failed: ${liqqe.message}`);
+        }
 
         /* safety checks */
         if (!SAFETY_DISABLED) {

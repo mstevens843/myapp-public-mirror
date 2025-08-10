@@ -215,87 +215,104 @@ model ClosedTrade {
 }
 
 model SavedConfigs {
-  id           Int      @id @default(autoincrement())
-  strategyName String
-  /* --- preset metadata --- */
-  isSaved      Boolean  @default(false)
-  savedAt      DateTime?
-  name         String?
-  colorTag     String?
-  /* Core shared */
-  amountToSpend       Float?
-  snipeAmount         Float?
-  slippage            Float?
-  interval            Int?
-  maxTrades           Int?
-  tokenFeed           String?
-  inputMint           String?
-  sectors             Json?
-  trade               Trade[]  @relation("TradeConfig")
-  dryRun              Boolean  @default(true)
-  /* Thresholds & windows */
-  entryThreshold        Float?
-  volumeThreshold       Float?
-  priceWindow           Int?
-  volumeWindow          Int?
-  minTokenAgeMinutes    Int?
-  maxTokenAgeMinutes    Int?
-  dipThreshold          Float?
-  recoveryWindow        Int?
-  breakoutThreshold     Float?
-  trendWindow           Int?
-  delayMs               Int?
-  minVolumeRequired     Float?
-  slippageMaxPct        Float?
-  feeEscalationLamports Float?
-  panicDumpPct          Float?
-  priceChangeWindow     Int?
-  rotationInterval      Int?
-  minMomentum           Float?
-  positionSize          Float?
-  cooldown              Int?
-  maxDailyVolume        Float?
-  maxRotations          Int?
-  maxRebalances         Int?
-  rebalanceThreshold    Float?
-  rebalanceInterval     Int?
-  targetAllocations     String?
-  maxTradesPerCycle     Int?
-  maxDailyTrades        Int?
-  minSolBalance         Float?
+  /// Primary key
+  id          Int      @id @default(autoincrement())
+  /// Owning user (optional)
+  userId      Int?
+  /// Name of the saved configuration
+  name        String?
+  /// Strategy this config applies to
+  strategy    String?
+
+  // -----------------------------------------------------------------------
+  // Existing config fields (common to many strategies)
+  amountToSpend        Float?
+  snipeAmount          Float?
+  slippage             Float?
+  maxSlippage          Float?
+  interval             Int?
+  maxTrades            Int?
+  tokenFeed            String?
+  haltOnFailures       Boolean?
+  autoSell             Json?
+  priorityFeeLamports  Int?
+  mevMode              Boolean?
+  briberyAmount        Float?
+  takeProfit           Float?
+  stopLoss             Float?
+  takeProfitPct        Float?
+  stopLossPct          Float?
+  cooldown             Int?
+  maxDailyVolume       Float?
+  minTokenAgeMinutes   Int?
+  maxTokenAgeMinutes   Int?
+  minMarketCap         Float?
+  maxMarketCap         Float?
+  risk                 Float?
   volumeSpikeMultiplier Float?
-  minLiquidity          Float?
-  minMarketCap          Float?
-  maxMarketCap          Float?
-  skipSafety            Boolean?
-  /* TP / SL & auto-sell */
-  takeProfit         Float?
-  tpPercent          Float?
-  stopLoss           Float?
-  slPercent          Float?
-  autoSell           Json?
-  /* MEV / Fees snapshot */
-  mevMode            String?
-  priorityFee        Int?
-  priorityFeeLamports Int?
-  briberyAmount      Int?
-  maxSlippage        Float?
-  defaultMaxSlippage Float?
-  /* Scheduler extras */
-  // buyMode            String?
-  limitConfigs       Json?
-  /* Stealth / multi-target */
-  tokenMint          String?
-  /* ARRAY defaults are allowed on PostgreSQL – Prisma ≥ 6.0 */
-  monitoredTokens   String[] @default([])
-  tokens            String[] @default([])
-  outputMints       String[] @default([])
-  limitPrices       Float[]  @default([])
-  /* Catch-all for future flags */
-  extras             Json?
-  userId   String
-  user     User     @relation(fields: [userId], references: [id])
+
+  // -----------------------------------------------------------------------
+  // New general fields shared across multiple strategies
+  /// Maximum number of concurrent open trades
+  maxOpenTrades        Int?
+  /// Enable use of external signals
+  useSignals           Boolean?
+  /// Maximum hold time for a position in seconds
+  maxHoldSeconds       Int?
+  /// An array of EMA periods for trend following
+  emaPeriods           Json?
+  /// Percentage used for trailing stops on trend following
+  trailingPct          Float?
+  /// Enable the parabolic SAR indicator in trend following
+  sarEnabled           Boolean?
+  /// Enable pyramiding (adding to winners) in trend following
+  pyramidEnabled       Boolean?
+  /// Risk percentage for each additional pyramid position
+  riskPerAdd           Float?
+  /// Maximum cumulative risk allowed in trend following
+  maxRisk              Float?
+  /// Milliseconds to wait before executing a buy order
+  delayBeforeBuyMs     Int?
+  /// Percentage for breakout buy threshold (delayed sniper)
+  breakoutPct          Float?
+  /// Percentage for pullback buy threshold (delayed sniper)
+  pullbackPct          Float?
+  /// Number of blocks to ignore before executing a trade (delayed sniper)
+  ignoreBlocks         Int?
+
+  // -----------------------------------------------------------------------
+  // Turbo sniper specific fields
+  ghostMode            Boolean?
+  coverWalletId        String?
+  multiBuy             Boolean?
+  multiBuyCount        Int?
+  prewarmAccounts      Boolean?
+  multiRoute           Boolean?
+  autoRug              Boolean?
+  useJitoBundle        Boolean?
+  jitoTipLamports      Int?
+  jitoRelayUrl         String?
+  autoPriorityFee      Boolean?
+  rpcEndpoints         Json?
+  rpcMaxErrors         Int?
+  killSwitch           Boolean?
+  killThreshold        Int?
+  poolDetection        Boolean?
+  allowedDexes         Json?
+  excludedDexes        Json?
+  splitTrade           Boolean?
+  tpLadder             Json?
+  trailingStopPct      Float?
+  turboMode            Boolean?
+  autoRiskManage       Boolean?
+  privateRpcUrl        String?
+
+  /// Catch-all field for any additional strategy-specific settings not yet modelled
+  extras      Json?
+
+  createdAt   DateTime @default(now())
 }
+
 
 model StrategyRunStatus {
   id          String   @id @default(uuid())

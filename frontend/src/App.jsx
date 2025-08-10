@@ -27,7 +27,7 @@ import mockOpenTrades from "@/mock/mockOpenTrades";
 import TelegramTab from "@/components/Dashboard/TelegramTab";
 import WalletBalancePanel from "@/components/Dashboard/WalletBalancePanel"
 import TargetToken from "@/components/Controls/TargetToken";
-
+import { isFinite as _isFinite } from "lodash";
 import { toast, Toaster } from "sonner";
 import "./styles/dashboard.css";
 import { dateKeycap } from "./utils/dateEmoji";
@@ -107,6 +107,7 @@ const sanitizeConfig = (cfg = {}) =>
   return Number.isFinite(n) ? n : fallback;
 };
 
+const dummyPrefs = {};
 
 
 
@@ -121,6 +122,7 @@ const sanitizeConfig = (cfg = {}) =>
 function isNumeric(value) {
   return !isNaN(parseFloat(value)) && isFinite(value);
 }
+
 
 /* cascade helper: ui‑value → prefs → hard‑default */
 const pick = (val, pref, hard) =>
@@ -194,67 +196,103 @@ const CONFIG_BUILDERS = {
     minTokenAgeMinutes: cfg.minTokenAgeMinutes,
     maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
   }),
-    scalper: (cfg, wallets, target, resolved, activeWallet) => ({
-  ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-    entryThreshold    : safeNum(cfg.entryThreshold, 3),
-    priceWindow       : cfg.priceWindow,
-    volumeThreshold   : safeNum(cfg.volumeThreshold, 50000),
-    volumeWindow      : cfg.volumeWindow,
-  }),
-dipBuyer: (cfg, wallets, target, resolved, activeWallet) => {
-  return {
+  scalper: (cfg, wallets, target, resolved, activeWallet) => ({
     ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-    dipThreshold    : safeNum(cfg.dipThreshold),
-    recoveryWindow  : cfg.recoveryWindow,
-    volumeWindow    : cfg.volumeWindow,
-    volumeThreshold   : safeNum(cfg.volumeThreshold, 50000),
-  };
-},
+    entryThreshold: safeNum(cfg.entryThreshold, 3),
+    priceWindow: cfg.priceWindow,
+    volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
+    volumeWindow: cfg.volumeWindow,
+    // new scalper settings
+    maxDailyVolume: safeNum(cfg.maxDailyVolume),
+    maxOpenTrades: safeNum(cfg.maxOpenTrades),
+    maxTrades: safeNum(cfg.maxTrades),
+    haltOnFailures: safeNum(cfg.haltOnFailures),
+    minMarketCap: cfg.minMarketCap,
+    maxMarketCap: cfg.maxMarketCap,
+    cooldown: safeNum(cfg.cooldown),
+    takeProfitPct: safeNum(cfg.takeProfitPct),
+    stopLossPct: safeNum(cfg.stopLossPct),
+    volumeSpikeMultiplier: safeNum(cfg.volumeSpikeMultiplier),
+    useSignals: !!cfg.useSignals,
+    maxHoldSeconds: safeNum(cfg.maxHoldSeconds),
+    disableSafety: !!cfg.disableSafety,
+    safetyChecks: cfg.safetyChecks,
+  }),
+
+  dipBuyer: (cfg, wallets, target, resolved, activeWallet) => ({
+    ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
+    dipThreshold: safeNum(cfg.dipThreshold),
+    recoveryWindow: cfg.recoveryWindow,
+    volumeWindow: cfg.volumeWindow,
+    volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
+  }),
 
   breakout: (cfg, wallets, target, resolved, activeWallet) => ({
-  ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
+    ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
     breakoutThreshold: safeNum(cfg.breakoutThreshold, 1),
-    volumeThreshold  : safeNum(cfg.volumeThreshold, 50000),
-    volumeWindow     : cfg.volumeWindow,
-    priceWindow      : cfg.priceWindow,
+    volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
+    volumeWindow: cfg.volumeWindow,
+    priceWindow: cfg.priceWindow,
   }),
   trendFollower: (cfg, wallets, target, resolved, activeWallet) => ({
-  ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-    entryThreshold : safeNum(cfg.priceChangeThreshold, 3),
-    volumeThreshold: safeNum(cfg.volumeThreshold, 50000),
-    trendWindow    : cfg.trendWindow,
-    priceWindow       : cfg.priceWindow,
-    volumeWindow      : cfg.volumeWindow,
+    ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
+    entryThreshold: safeNum(cfg.priceChangeThreshold, 3),
+    volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
+    trendWindow: cfg.trendWindow,
+    priceWindow: cfg.priceWindow,
+    volumeWindow: cfg.volumeWindow,
+    // new trend follower settings
+    emaPeriods: cfg.emaPeriods,
+    trailingPct: safeNum(cfg.trailingPct),
+    sarEnabled: !!cfg.sarEnabled,
+    pyramidEnabled: !!cfg.pyramidEnabled,
+    riskPerAdd: safeNum(cfg.riskPerAdd),
+    maxRisk: safeNum(cfg.maxRisk),
+    delayBeforeBuyMs: safeNum(cfg.delayBeforeBuyMs),
+    maxOpenTrades: safeNum(cfg.maxOpenTrades),
+    maxDailyVolume: safeNum(cfg.maxDailyVolume),
+    minMarketCap: cfg.minMarketCap,
+    maxMarketCap: cfg.maxMarketCap,
+    useSignals: !!cfg.useSignals,
+    maxHoldSeconds: safeNum(cfg.maxHoldSeconds),
   }),
+
   delayedSniper: (cfg, wallets, target, resolved, activeWallet) => ({
-  ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-    delayMs      : safeNum(cfg.delayMs, 10000),
+    ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
+    delayBeforeBuyMs: safeNum(cfg.delayBeforeBuyMs),
     entryThreshold: safeNum(cfg.entryThreshold, 3),
-    volumeThreshold: safeNum(cfg.volumeThreshold, 50000),
-    priceWindow       : cfg.priceWindow,
-    volumeWindow      : cfg.volumeWindow,
+    volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
+    priceWindow: cfg.priceWindow,
+    volumeWindow: cfg.volumeWindow,
     minTokenAgeMinutes: cfg.minTokenAgeMinutes,
     maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
+    // new delayed sniper settings
+    breakoutPct: safeNum(cfg.breakoutPct),
+    pullbackPct: safeNum(cfg.pullbackPct),
+    ignoreBlocks: safeNum(cfg.ignoreBlocks),
+    maxOpenTrades: safeNum(cfg.maxOpenTrades),
+    maxDailyVolume: safeNum(cfg.maxDailyVolume),
+    minMarketCap: cfg.minMarketCap,
+    maxMarketCap: cfg.maxMarketCap,
   }),
-chadMode: (cfg, wallets, target, resolved, activeWallet) => {
-  const p = cfg._prefs || {};
-  return {
+  chadMode: (cfg, wallets, target, resolved, activeWallet) => ({
     ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-
-    /* multi‑target toggle */
+    // multi‑target toggle preserved in real code
     ...(cfg.useMultiTargets
-      ? { outputMints: cfg.targetTokens.split(/\s+/).filter(Boolean) }
+      ? { outputMints: cfg.targetTokens?.split(/\s+/).filter(Boolean) }
       : { outputMint: cfg.outputMint }),
-
-    minVolumeRequired     : safeNum(cfg.minVolumeRequired),
-   priorityFeeLamports   : pick(cfg.priorityFeeLamports, p.defaultPriorityFee, 10_000),
-
-    slippageMaxPct        : safeNum(cfg.slippageMaxPct, 10),
-    feeEscalationLamports : safeNum(cfg.feeEscalationLamports, 5_000),
-    panicDumpPct          : safeNum(cfg.panicDumpPct, 15),
-  };
-},
-
+    minVolumeRequired: safeNum(cfg.minVolumeRequired),
+    priorityFeeLamports: pick(cfg.priorityFeeLamports, (cfg._prefs || {}).defaultPriorityFee, 10_000),
+    slippageMaxPct: safeNum(cfg.slippageMaxPct, 10),
+    feeEscalationLamports: safeNum(cfg.feeEscalationLamports, 5_000),
+    panicDumpPct: safeNum(cfg.panicDumpPct, 15),
+    // new chadMode settings
+    maxOpenTrades: safeNum(cfg.maxOpenTrades),
+    maxTrades: safeNum(cfg.maxTrades),
+    haltOnFailures: safeNum(cfg.haltOnFailures),
+    autoSell: cfg.autoSell,
+    useSignals: !!cfg.useSignals,
+  }),
 rebalancer: function (cfg, _target, resolvedWallets, activeWallet) {
   const p = cfg._prefs || {};
   let raw = toNum(cfg.rebalanceThreshold);
@@ -396,40 +434,43 @@ scheduleLauncher: (cfg, wallets, target, resolved, activeWallet) => {
     const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
     return {
       ...base,
-      entryThreshold    : safeNum(cfg.entryThreshold, 3),
-      volumeThreshold   : safeNum(cfg.volumeThreshold, 50_000),
-      priceWindow       : cfg.priceWindow,
-      volumeWindow      : cfg.volumeWindow,
-      // If a custom list of monitored tokens is provided, omit tokenFeed
-      tokenFeed         : cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
+      entryThreshold: safeNum(cfg.entryThreshold, 3),
+      volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
+      priceWindow: cfg.priceWindow,
+      volumeWindow: cfg.volumeWindow,
+      tokenFeed: cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
       minTokenAgeMinutes: cfg.minTokenAgeMinutes,
       maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
-      minMarketCap      : cfg.minMarketCap,
-      maxMarketCap      : cfg.maxMarketCap,
-      ghostMode         : !!cfg.ghostMode,
-      coverWalletId     : cfg.coverWalletId,
-      multiBuy          : !!cfg.multiBuy,
-      multiBuyCount     : safeNum(cfg.multiBuyCount, 2),
-      prewarmAccounts   : !!cfg.prewarmAccounts,
-      multiRoute        : !!cfg.multiRoute,
-      autoRug           : !!cfg.autoRug,
-      useJitoBundle     : !!cfg.useJitoBundle,
-      jitoTipLamports   : safeNum(cfg.jitoTipLamports),
-      jitoRelayUrl      : cfg.jitoRelayUrl,
-      autoPriorityFee   : !!cfg.autoPriorityFee,
-      rpcEndpoints      : cfg.rpcEndpoints,
-      rpcMaxErrors      : safeNum(cfg.rpcMaxErrors),
-      killSwitch        : !!cfg.killSwitch,
-      killThreshold     : safeNum(cfg.killThreshold),
-      poolDetection     : !!cfg.poolDetection,
-      allowedDexes      : cfg.allowedDexes,
-      excludedDexes     : cfg.excludedDexes,
-      splitTrade        : !!cfg.splitTrade,
-      tpLadder          : cfg.tpLadder,
-      trailingStopPct   : safeNum(cfg.trailingStopPct),
-      turboMode         : !!cfg.turboMode,
-      autoRiskManage    : !!cfg.autoRiskManage,
-      privateRpcUrl     : cfg.privateRpcUrl,
+      minMarketCap: cfg.minMarketCap,
+      maxMarketCap: cfg.maxMarketCap,
+      ghostMode: !!cfg.ghostMode,
+      coverWalletId: cfg.coverWalletId,
+      multiBuy: !!cfg.multiBuy,
+      multiBuyCount: safeNum(cfg.multiBuyCount, 2),
+      prewarmAccounts: !!cfg.prewarmAccounts,
+      multiRoute: !!cfg.multiRoute,
+      autoRug: !!cfg.autoRug,
+      useJitoBundle: !!cfg.useJitoBundle,
+      jitoTipLamports: safeNum(cfg.jitoTipLamports),
+      jitoRelayUrl: cfg.jitoRelayUrl,
+      autoPriorityFee: !!cfg.autoPriorityFee,
+      rpcEndpoints: cfg.rpcEndpoints,
+      rpcMaxErrors: safeNum(cfg.rpcMaxErrors),
+      killSwitch: !!cfg.killSwitch,
+      killThreshold: safeNum(cfg.killThreshold),
+      poolDetection: !!cfg.poolDetection,
+      allowedDexes: cfg.allowedDexes,
+      excludedDexes: cfg.excludedDexes,
+      splitTrade: !!cfg.splitTrade,
+      tpLadder: cfg.tpLadder,
+      trailingStopPct: safeNum(cfg.trailingStopPct),
+      turboMode: !!cfg.turboMode,
+      autoRiskManage: !!cfg.autoRiskManage,
+      privateRpcUrl: cfg.privateRpcUrl,
+      // new turbo sniper settings
+      maxOpenTrades: safeNum(cfg.maxOpenTrades),
+      delayBeforeBuyMs: safeNum(cfg.delayBeforeBuyMs),
+      priorityFeeLamports: pick(cfg.priorityFeeLamports, (cfg._prefs || {}).defaultPriorityFee, 0),
     };
   },
 };

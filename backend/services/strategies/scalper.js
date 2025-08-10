@@ -223,21 +223,33 @@ module.exports = async function scalperStrategy(botCfg = {}) {
         // ── NEW (add-only): optional microstructure signal gate ──
         if (useSignals) {
           try {
-            // In production you’d pass true microstructure snapshots; keep stub light.
+            // In production you'd pass true microstructure snapshots; keep stub light.
             const samples = [{ price: ov?.price || 1, volume: 1 }];
             const fills   = [{ side: "buy", size: 1 }];
-            const sig = scalperSignals.generateScalperSignal(
+            // Attempt the primary signal using order book + VWAP.  When order book
+            // data isn't available (generateScalperSignal returns null) fall back to a
+            // pure VWAP/Keltner micro mean‑reversion gate (dev relative to VWAP).
+            let sig = scalperSignals.generateScalperSignal(
               samples,
               samples[samples.length - 1].price,
               fills,
               ENTRY_THRESHOLD
             );
             if (!sig) {
+              // compute deviation from VWAP; positive -> price above mean, negative -> below
+              const dev = scalperSignals.meanReversionScore(samples, samples[samples.length - 1].price);
+              // Use a loose threshold: if deviation within ±2*ENTRY_THRESHOLD treat as potential edge
+              if (Math.abs(dev) <= ENTRY_THRESHOLD * 2) {
+                if (dev < -ENTRY_THRESHOLD) sig = "long";
+                else if (dev > ENTRY_THRESHOLD) sig = "short";
+              }
+            }
+            if (!sig) {
               log("info", "Signal gate: no edge — skip");
               summary.inc("signalReject");
               continue;
             }
-            log("info", `Signal gate: ${sig.type || "mean-revert"} OK`);
+            log("info", `Signal gate: ${sig || "mean-revert"} OK`);
           } catch (e) {
             log("warn", `signal gen failed: ${e.message}`);
           }
@@ -344,13 +356,15 @@ module.exports = async function scalperStrategy(botCfg = {}) {
         }
         console.log("🎯 execBuy returned:", txHash);
 
-        // NEW: track open position for max-hold enforcement
+        // NEW: track open position for max-hold/TP/SL enforcement
+        // Store the token quantity (outAmount) so we know how much to sell later. Convert to BigInt for safety.
         openPositions.set(mint, {
           entryPrice,
           entryTime: Date.now(),
           takeProfit,
           stopLoss,
           isLong: true,
+          quantity: quote && quote.outAmount != null ? BigInt(quote.outAmount) : 0n,
         });
 
         const buyMsg  = DRY_RUN
@@ -383,12 +397,64 @@ module.exports = async function scalperStrategy(botCfg = {}) {
         if (trades >= MAX_TRADES) break;
       }
 
-      // ── NEW (add-only): evaluate open positions for max-hold exit ──
+      // ── NEW (add-only): evaluate open positions for exits (hold time / TP/SL) ──
       for (const [mint, pos] of openPositions) {
-        if (scalperRisk.shouldForceClose(pos.entryTime, maxHoldSeconds)) {
-          log("info", `Force closing ${mint} after max hold time ${maxHoldSeconds}s (tracking cleanup only)`);
-          openPositions.delete(mint);
-          // NOTE: If you want to actually sell, wire an executor here.
+        const nowForce = scalperRisk.shouldForceClose(pos.entryTime, maxHoldSeconds);
+        try {
+          // Always fetch a fresh quote for the entire position amount to evaluate TP/SL and execute exit trades
+          const sellResult = await getSafeQuote({
+            inputMint    : mint,
+            outputMint   : BASE_MINT,
+            amount       : pos.quantity,
+            slippage     : SLIPPAGE,
+            maxImpactPct : MAX_SLIPPAGE,
+          });
+          if (!sellResult.ok) {
+            // Could not get a valid sell quote; only remove if forced by time
+            if (nowForce) {
+              log("warn", `Force-closing ${mint} due to hold-time breach but sell quote unavailable: ${sellResult.reason}`);
+              openPositions.delete(mint);
+            }
+            continue;
+          }
+          const sellQuote = sellResult.quote;
+          // Quote.price reflects base per token; evaluate profit and stop levels
+          const currentPrice = sellQuote.price;
+          const hitTp = pos.takeProfit && currentPrice >= pos.takeProfit;
+          const hitSl = pos.stopLoss  && currentPrice <= pos.stopLoss;
+          if (nowForce || hitTp || hitSl) {
+            const reason = nowForce
+              ? `maxHold ${maxHoldSeconds}s`
+              : hitTp ? "take profit" : "stop loss";
+            log("info", `Exiting ${mint} (${reason}) @ ${currentPrice.toFixed(6)}`);
+            // Choose executor based on configured executionShape; default to atomic scalp
+            const exec = (botCfg?.executionShape || "") === "TWAP"
+              ? executeTWAP
+              : (botCfg?.executionShape || "") === "ATOMIC"
+              ? executeAtomicScalp
+              : (DRY_RUN ? simulateBuy : liveBuy);
+            try {
+              await exec({ quote: sellQuote, mint, meta: {
+                strategy : "ScalperExit",
+                walletId : botCfg.walletId,
+                userId   : botCfg.userId,
+                slippage : SLIPPAGE,
+                category : "Scalper",
+                executionShape: botCfg?.executionShape || "",
+                riskPolicy: scalperRisk,
+                position: pos,
+              }});
+              summary.inc("sells");
+              openPositions.delete(mint);
+            } catch (exitErr) {
+              log("error", `❌ Exit trade failed for ${mint}: ${exitErr.message}`);
+              // Do not delete the position so it can retry on next tick
+            }
+          }
+        } catch (e) {
+          // On unexpected errors, only enforce force-close by removing position
+          log("error", `Exit evaluation failed for ${mint}: ${e.message}`);
+          if (nowForce) openPositions.delete(mint);
         }
       }
 
