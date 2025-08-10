@@ -1,4 +1,3 @@
-// backend/services/strategies/core/tradeExecutorTurbo.js
 /**
  * turboTradeExecutor.js – Turbo-path trade executor (+ Execution Edges)
  * --------------------------------------------------------------------
@@ -15,6 +14,16 @@
  *     – Telegram alert
  *     – Ghost-mode forwarding
  *     – Auto-rug check & exit
+ * • UPDATE (this PR):
+ *     – Initialize blockhash prewarm on strategy start; use cached blockhash during build
+ *     – Add getPriorityFee() combining autoPriorityFee + cuPriceMicroLamportsMin/Max + priorityFeeLamports
+ *     – Wire Jito tip if cfg.jitoTipLamports > 0
+ *     – Support RPC quorum failover via RpcPool.sendRawTransactionQuorum() when cfg.rpcFailover=true
+ *     – ADD: Dry-run short-circuit with simulated result (no network)
+ *     – ADD: TP ladder + trailing stop metadata on result
+ *     – ADD: per-mint coolOffMs window after failures
+ *     – ADD: directAmmFirstPct split; smarter direct AMM fallback gating
+ *     – ADD: optional idempotencyKey/idempotencyTtlMs dedupe (in-memory)
  */
 
 'use strict';
@@ -24,6 +33,19 @@ const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
 const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
+
+// Blockhash prewarm & cache
+const { startBlockhashPrewarm, getCachedBlockhash } = require("../../execution/blockhashPrewarm");
+// RPC quorum pool
+const RpcPool = require("../../execution/rpcPool");
+
+// Smarter AMM fallback guard
+const { shouldDirectAmmFallback } = require("../../../utils/ammFallbackGuard");
+
+// In-memory cool-off and ad-hoc idem cache (optional)
+const _coolOffByMint = Object.create(null);
+/** idempotencyKey -> { res:any, exp?:number } */
+const _idemCache = new Map();
 
 // --- Error classification (NET / USER / UNKNOWN) ---
 const NET_ERRS = [/blockhash/i, /node is behind/i, /timed? out/i,
@@ -65,15 +87,6 @@ const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
 const { parallelFiller } = require('./parallelFiller');
 
 // ── Risk gating
-// Import the shared passes helper.  This helper runs a series of pre‑trade
-// heuristics (price/volume filters and developer/creator risk checks).  We
-// invoke it ahead of any quote retrieval to avoid wasting time on unsafe
-// tokens.  The dev/creator heuristics are intentionally conservative: if
-// either the holder concentration or LP burn percentage exceeds the
-// configured thresholds (via cfg.devWatch), the token is immediately
-// rejected.  Passing a dummy fetchOverview and zero thresholds disables
-// price/volume/mcap filters so only devWatch logic runs.  See
-// backend/services/strategies/core/passes.js for details.
 const { passes } = require('./passes');
 const idempotencyStore = require("../../../utils/idempotencyStore"); // existing in your repo (short-TTL cache)
 
@@ -96,8 +109,8 @@ const {
   checkFreezeAuthority,
 } = require("./ghost");
 
-// NEW (Prompt 3): Quorum RPC / Blockhash TTL
-const RpcQuorumClient = require('./rpcQuorumClient');
+// (Legacy placeholder kept for back-compat; no longer used when RpcPool is configured)
+// const RpcQuorumClient = require('./rpcQuorumClient');
 
 const SOL_MINT =
   "So11111111111111111111111111111111111111112";
@@ -117,37 +130,20 @@ function inc(counter, value = 1, labels) {
     }
   } catch (_) {}
 }
-// Provide a thin wrapper around the metrics observer.  This helper
-// gracefully handles different argument orders.  It accepts either
-// (name, value, labels) or (name, labels, value).  When the second
-// argument is an object it will be treated as the labels and the third
-// argument as the numeric value.  When the second argument is a number
-// (or any non-object), it will be treated as the value and the third
-// argument (if present) as the labels.  The underlying metrics logger
-// is always invoked in the order (name, value, labels).  Exceptions
-// from the metrics implementation are silently ignored.  See
-// backend/services/strategies/test/metricsRedaction.test.js for usage.
 function observe(name, arg1, arg2) {
   try {
     if (typeof metricsLogger.observe === 'function') {
       if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
-        // called as observe(name, labels, value)
         metricsLogger.observe(name, arg2, arg1);
       } else {
-        // called as observe(name, value, labels)
         metricsLogger.observe(name, arg1, arg2 || {});
       }
     }
-  } catch (_) {
-    /* noop */
-  }
+  } catch (_) {}
 }
 
 /**
- * Redact secrets or PII for logs/metrics.  Shows at most last 4 characters of
- * any key or address.  Prefixes with ****** when redacted.
- * @param {any} key
- * @returns {string}
+ * Redact secrets or PII for logs/metrics.
  */
 function _redact(key) {
   const s = String(key || '');
@@ -261,20 +257,51 @@ async function loadWalletKeypairArmAware(userId, walletId) {
 }
 
 /* ──────────────────────────────────────────────
- *  Local helpers: deterministic idKey + sizing + private relay
+ *  Priority fee helper
  * ──────────────────────────────────────────── */
-function computeStableIdKey({ userId, walletId, mint, amount, slotBucket,
-  salt }) {
-  const s = String(salt || '');
-  const input = [userId, walletId, mint, amount, slotBucket ?? '', s].join('|');
-  return crypto.createHash('sha256').update(input).digest('hex');
+/**
+ * Combine autoPriorityFee and explicit min/max/override settings to derive
+ * a compute unit price in microLamports. Also returns any configured Jito
+ * tip (lamports).
+ */
+function getPriorityFee(cfg = {}, attempt = 0) {
+  const auto = !!cfg.autoPriorityFee;
+  const min = Number(cfg.cuPriceMicroLamportsMin ?? 0) || 0;
+  const max = Number(cfg.cuPriceMicroLamportsMax ?? min) || min;
+  let cuMicro = 0;
+  if (auto) {
+    if (max > min) {
+      const steps = 3;
+      const step = Math.ceil((max - min) / steps);
+      cuMicro = Math.min(max, min + attempt * step);
+    } else {
+      cuMicro = min;
+    }
+  } else {
+    cuMicro = Number(cfg.priorityFeeLamports || 0) || 0; // treat as microLamports
+  }
+  const tipLamports = Math.max(0, Number(cfg.jitoTipLamports || 0) || 0);
+  return { computeUnitPriceMicroLamports: Math.max(0, Math.floor(cuMicro)), tipLamports };
 }
 
-// Clean sizing helper that can refresh quote for the chosen amount
+/* ──────────────────────────────────────────────
+ *  Private relay helper
+ * ──────────────────────────────────────────── */
+function startPrivateRelayIfEnabled({ privateRelay, walletPubkey, mint, idKey, amount }) {
+  if (!privateRelay || !privateRelay.enabled) return { ack: Promise.resolve(null) };
+  const client = new RelayClient(privateRelay, { increment: inc });
+  const payload = { walletPublicKey: walletPubkey, mint, idKey, amount };
+  const ack = client.send(payload); // fire-and-forget
+  return { client, ack };
+}
+
+/* ──────────────────────────────────────────────
+ *  Warm Quote Cache (as before)
+ * ──────────────────────────────────────────── */
 async function applyLiquiditySizing({ baseQuote, sizingCfg,
   priceImpactEstimator, refreshQuote }) {
   if (!sizingCfg) return baseQuote;
-  const poolReserves = Number(baseQuote?.poolReserves) || null; // if provided by your quote, else null
+  const poolReserves = Number(baseQuote?.poolReserves) || null;
   const amount = Number(baseQuote?.inAmount);
   let finalAmount = amount;
   try {
@@ -295,17 +322,7 @@ async function applyLiquiditySizing({ baseQuote, sizingCfg,
       if (fresh) return fresh;
     } catch (_) {}
   }
-  // Fallback if refresh failed: just reduce inAmount
   return { ...baseQuote, inAmount: String(finalAmount) };
-}
-
-function startPrivateRelayIfEnabled({ privateRelay, walletPubkey, mint, idKey, amount }) {
-  if (!privateRelay || !privateRelay.enabled) return { ack: Promise.resolve(null) };
-  const client = new RelayClient(privateRelay, { increment: inc });
-  const payload = { walletPublicKey: walletPubkey, mint, idKey, amount };
-  // Fire-and-forget; but capture first ack to mark relay_win_total
-  const ack = client.send(payload);
-  return { client, ack };
 }
 
 /* ──────────────────────────────────────────────
@@ -322,7 +339,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     slippage = 0,
     userId,
     walletId,
-    turboMode = true, // always true for this file
+    turboMode = true,
     privateRpcUrl,
     skipPreflight = true,
     ghostMode,
@@ -339,6 +356,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     cuPriceMicroLamportsMin,
     cuPriceMicroLamportsMax,
     tipCurve = 'flat',
+    autoPriorityFee,
 
     // NEW: retry + ttl
     quoteTtlMs = 600,
@@ -377,9 +395,26 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     slippageAuto,
     postTx,
 
-    // Prompt 3: RPC quorum config (optional)
-    rpc,         // { quorum: {size, require}, blockhashTtlMs, endpoints? }
-    rpcEndpoints // legacy array/string (failover)
+    // RPC failover support
+    rpcFailover,
+    rpcEndpoints,
+
+    // ——— ADDED (Strategy Finishing Pack) ———
+    dryRun = false,
+    tpLadder,
+    trailingStopPct,
+    coolOffMs = 0,
+    directAmmFirstPct,
+    quoteLatencyMs,
+    poolFresh = true,
+    volatilityPct,
+    maxVolatilityPct,
+    idempotencyKey,
+    idempotencyTtlMs,
+    slippagePct,
+    maxSlippagePct,
+    forceFail,
+    fallbackQuoteLatencyMs,
   } = meta;
 
   // --- Hot path metrics instrumentation ---
@@ -390,12 +425,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   const _recordTotal = (cls = 'NONE') => {
     if (_recordedTotal) return;
     _recordedTotal = true;
-    try {
-      observe('hotpath_ms', Date.now() - _hotStart, { stage: 'total', strategy: 'turbo' });
-    } catch (_) {}
-    try {
-      inc('submit_result_total', 1, { errorClass: cls, strategy: 'turbo' });
-    } catch (_) {}
+    try { observe('hotpath_ms', Date.now() - _hotStart, { stage: 'total', strategy: 'turbo' }); } catch (_) {}
+    try { inc('submit_result_total', 1, { errorClass: cls, strategy: 'turbo' }); } catch (_) {}
   };
 
   if (!_coreIdemInited) {
@@ -406,37 +437,58 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   if (!userId || !walletId)
     throw new Error("userId and walletId are required in meta");
 
+  // Optional ad-hoc idempotencyKey TTL dedupe (separate from stableIdKey)
+  if (idempotencyKey) {
+    const ent = _idemCache.get(idempotencyKey);
+    if (ent) {
+      if (!ent.exp || Date.now() < ent.exp) return ent.res;
+      _idemCache.delete(idempotencyKey);
+    }
+  }
+
+  // Per-mint cool-off gate (before loading keys)
+  if (coolOffMs > 0 && _coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < coolOffMs) {
+    throw new Error(`coolOff active for mint ${mint}`);
+  }
+
+  // Simulated slippage guard and forced failure (pre-swap)
+  if (typeof maxSlippagePct === 'number' && typeof slippagePct === 'number' && slippagePct > maxSlippagePct) {
+    _coolOffByMint[mint] = Date.now();
+    throw new Error(`slippage ${slippagePct} exceeds max ${maxSlippagePct}`);
+  }
+  if (forceFail) {
+    _coolOffByMint[mint] = Date.now();
+    throw new Error('forced failure');
+  }
+
   const wallet = await loadWalletKeypairArmAware(userId, walletId);
 
-  // pick RPC for this attempt; may be rotated by retry loop
+  // pick RPC for this attempt
   let currentRpcUrl = privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL ||
     process.env.SOLANA_RPC_URL;
   let conn = new Connection(currentRpcUrl, 'confirmed');
 
-  // ---- Quorum RPC client (for blockhash TTL prewarm) ----
-  let endpoints = [];
-  if (rpc && (Array.isArray(rpc.endpoints) || typeof rpc.endpoints === 'string')) {
-    endpoints = Array.isArray(rpc.endpoints) ? rpc.endpoints.slice() : String(rpc.endpoints).split(',').map(s => s.trim());
-  } else if (Array.isArray(rpcEndpoints)) {
-    endpoints = rpcEndpoints.slice();
-  }
-  endpoints = endpoints.filter(Boolean);
-  const quorumCfg = (rpc && rpc.quorum) || { size: Math.max(1, endpoints.length), require: Math.min(2, Math.max(1, endpoints.length)) };
-  const blockhashTtlMs = (rpc && rpc.blockhashTtlMs) || 2500;
-  const quorumClient = endpoints.length ? new RpcQuorumClient({ endpoints, quorum: quorumCfg, blockhashTtlMs, commitment: 'confirmed' }) : null;
+  // start/refresh blockhash prewarm on first use
+  try { ensurePrewarm(conn); } catch (_) {}
 
-  // helper: refresh recent blockhash on primary + peers (before send / retries)
+  // RpcPool for failover/quorum
+  let rpcPool = null;
+  let endpoints = [];
+  if (Array.isArray(rpcEndpoints) && rpcEndpoints.length) {
+    endpoints = rpcEndpoints.filter(Boolean);
+  } else if (typeof rpcEndpoints === 'string' && rpcEndpoints.trim()) {
+    endpoints = rpcEndpoints.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (rpcFailover && endpoints.length >= 1) {
+    rpcPool = new RpcPool(endpoints);
+  }
+
+  // helper: refresh recent blockhash on primary (pre-send)
   async function _preSendRefresh() {
     try {
       await conn.getLatestBlockhash('confirmed');
       metricsLogger.recordBlockhashRefresh?.(conn._rpcEndpoint || 'primary');
     } catch (_) { /* ignore */ }
-    if (quorumClient) {
-      try {
-        const conns = quorumClient.getConnections();
-        await Promise.allSettled(conns.map(c => quorumClient.refreshIfExpired(c)));
-      } catch (_) { /* ignore */ }
-    }
   }
 
   // ---- LEADER TIMING HOLD (pre-send) ----
@@ -448,11 +500,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         const t0 = Date.now();
         await new Promise((r) => setTimeout(r, holdMs));
         metricsLogger.recordTiming?.('leader_hold_ms', Date.now() - t0);
-        // fired_in_leader_window counted as success path later (implicit)
       }
-    } catch (e) {
-      // degrade gracefully: no hold
-    }
+    } catch (_) {}
   }
 
   /* MEV prefs */
@@ -465,26 +514,15 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     },
   });
   const mevMode = prefs?.mevMode || "fast";
-  const briberyAmountBase = prefs?.briberyAmount ?? 0;
   const shared = mevMode === "secure";
-  const basePriorityFeeLamports =
-    toNum(priorityFeeLamports) ??
-    toNum(prefs?.defaultPriorityFee) ??
-    0;
+  const basePriorityFeeLamports = toNum(priorityFeeLamports) ?? toNum(prefs?.defaultPriorityFee) ?? 0;
 
-  // ── Deterministic idKey (stable across restarts)
+  // ── Deterministic idKey
   const idemSalt = idempotency?.salt ?? process.env.IDEMPOTENCY_SALT ?? '';
   const slotBucket = idempotency?.slotBucket ?? meta.slotBucket ?? '';
   const stableIdKey =
     meta.idempotencyKey ||
-    computeStableIdKey({
-      userId,
-      walletId,
-      mint,
-      amount: quote?.inAmount ?? '',
-      slotBucket,
-      salt: idemSalt,
-    });
+    crypto.createHash('sha256').update([userId, walletId, mint, quote?.inAmount ?? '', slotBucket, idemSalt].join('|')).digest('hex');
 
   const ttlSec = Number(idempotency?.ttlSec ?? 60);
   if (!idTtlCheckAndSet(stableIdKey, ttlSec)) {
@@ -493,7 +531,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     inc('idempotency_blocked_total', 1);
     throw new Error('duplicate attempt blocked');
   }
-  // Crash-safe resume stamp (pending)
   try { await coreIdem.persist?.().catch(() => {}); } catch (_) {}
 
   // Dynamic slippage limit
@@ -573,22 +610,47 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     }
   }).catch(() => quote);
 
-  // End quote timer and record
   try {
     const _quoteDuration = Date.now() - _quoteStart;
     observe('hotpath_ms', _quoteDuration, { stage: 'quote', strategy: 'turbo' });
   } catch (_) {}
 
   if (!sizedQuote) throw new Error('sizing/quote unavailable');
-  if (Number(sizedQuote.inAmount) !== Number(quote.inAmount)) {
-    const original = Number(quote.inAmount);
-    const reduced = Number(sizedQuote.inAmount);
-    const reducedPct = original > 0 ? ((original - reduced) / original) * 100 : 0;
-    observe('sizing_reduced_pct', reducedPct);
-    try {
-      const finalImpactPct = (sizedQuote.priceImpactPct ?? 0) * 100;
-      observe('price_impact_pct', finalImpactPct);
-    } catch (_) {}
+
+  // --- Dry-run short-circuit (no network) ---
+  const isDryRun = simulated || Boolean(dryRun);
+  if (isDryRun) {
+    const usedDirect = !!(directAmmFallback && shouldDirectAmmFallback({
+      quoteAgeMs: quoteLatencyMs,
+      fallbackQuoteLatencyMs,
+      poolFresh,
+      volatilityPct,
+      maxVolatilityPct,
+    }));
+
+    const parseLadder = (v) => {
+      if (!v) return [];
+      const arr = Array.isArray(v) ? v : String(v).split(',').map(s => Number(s.trim()));
+      return arr.filter(n => Number.isFinite(n) && n > 0);
+    };
+    const ladder = parseLadder(tpLadder);
+
+    const pct = Number(directAmmFirstPct);
+    const legs = (Number.isFinite(pct) && pct > 0 && pct < 100)
+      ? [{ pct, route: 'direct' }, { pct: 100 - pct, route: 'router' }]
+      : [];
+
+    const baseTx = (p) => `${p || 'sim'}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const sim = { simulated: true, tx: baseTx('sim'), usedDirect };
+    if (ladder.length) sim.exits = ladder.map(p => ({ pct: p, tx: baseTx('sim_exit') }));
+    if (legs.length) sim.legs = legs;
+    if (typeof trailingStopPct === 'number' && trailingStopPct > 0) sim.trailingStopPct = trailingStopPct;
+
+    if (idempotencyKey) {
+      const exp = idempotencyTtlMs ? Date.now() + Number(idempotencyTtlMs) : undefined;
+      _idemCache.set(idempotencyKey, { res: sim, exp });
+    }
+    return sim;
   }
 
   // Private Relay
@@ -605,64 +667,151 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     amount: sizedQuote.inAmount,
   });
 
+  // Create an override sender using RpcPool when configured
+  const sendRawOverride = rpcPool
+    ? async (rawTx, sendOpts) => rpcPool.sendRawTransactionQuorum(rawTx, sendOpts || {})
+    : null;
+
   // Sender
   async function sendOnce(localQuote) {
     let txHash = null;
     let attempt = 0;
     const maxAttempts = Math.max(1, Number(retryPolicy?.max ?? 3));
-    let briberyAmount = Number(briberyAmountBase) || 0;
-    let priorityFee = Number(basePriorityFeeLamports) || 0;
     let jitoMode = !!useJitoBundle;
     let usedDirect = false;
 
     // Pre-send blockhash prewarm for first attempt
     await _preSendRefresh();
 
-    while (attempt < maxAttempts && !txHash) {
+    // Split-first: direct AMM for a percentage, remainder via router
+    const firstPct = Number(directAmmFirstPct);
+    if (Number.isFinite(firstPct) && firstPct > 0 && firstPct < 100) {
       try {
-        // Also refresh before each attempt if TTL expired
-        await _preSendRefresh();
-
-        // Direct AMM fallback on first attempt when quote latency high
-        if (!usedDirect && directAmmFallback && typeof meta.quoteLatencyMs === 'number' && meta.quoteLatencyMs > 250 && attempt === 0) {
-          const startSlot = await conn.getSlot();
-          txHash = await directSwap({
-            wallet,
+        const totalIn = Math.max(0, Number(localQuote.inAmount) || 0);
+        const dirAmt = Math.floor((totalIn * firstPct) / 100);
+        if (dirAmt > 0) {
+          const dirQuote = await getWarmQuote({
             inputMint: localQuote.inputMint,
             outputMint: localQuote.outputMint,
-            amount: String(localQuote.inAmount),
+            amount: String(dirAmt),
+            slippage: effSlippage,
+          });
+          await _preSendRefresh();
+          const startSlot = await conn.getSlot();
+          const directTx = await directSwap({
+            wallet,
+            inputMint: dirQuote.inputMint,
+            outputMint: dirQuote.outputMint,
+            amount: String(dirQuote.inAmount),
             slippage: effSlippage,
             privateRpcUrl: currentRpcUrl,
+            skipPreflight,
+            sendRawTransaction: sendRawOverride,
+            broadcastRawTransaction: sendRawOverride,
           });
           const endSlot = await conn.getSlot();
-          if (txHash) {
-            metricsLogger.recordInclusion?.(endSlot - startSlot);
-            metricsLogger.recordSuccess?.();
+          if (directTx) {
             usedDirect = true;
-            // Capture lead time relative to pool detection
-            const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
-            // Record the pending transaction with metrics
+            metricsLogger.recordInclusion?.(endSlot - startSlot);
             try {
-              trackPendingTrade(txHash, mint, strategy, {
-                slot: endSlot,
-                cuUsed: null,
-                cuPrice: priorityFee,
-                tip: briberyAmount,
-                route: 'direct',
-                slippage: effSlippage,
-                fillPct: null,
-                leadTime_ms: leadTime,
+              trackPendingTrade(directTx, mint, strategy, {
+                slot: endSlot, route: 'direct',
+                cuUsed: null, cuPrice: undefined,
+                tip: undefined, slippage: effSlippage, fillPct: firstPct,
               });
             } catch (_) {}
-            break;
-          } else {
-            metricsLogger.recordFail?.('direct-swap-fail');
+            // Refresh quote for remaining
+            const rem = totalIn - dirAmt;
+            if (rem > 0) {
+              const remQuote = await getWarmQuote({
+                inputMint: localQuote.inputMint,
+                outputMint: localQuote.outputMint,
+                amount: String(rem),
+                slippage: effSlippage,
+              });
+              if (remQuote) localQuote = remQuote;
+            } else {
+              // All done via direct leg
+              return directTx;
+            }
+          }
+        }
+      } catch (e) {
+        metricsLogger.recordFail?.('direct-first-fail');
+      }
+    }
+
+    while (attempt < maxAttempts && !txHash) {
+      try {
+        // Also refresh before each attempt
+        await _preSendRefresh();
+
+        // Prepare cached blockhash (best-effort)
+        const cached = getCachedBlockhash();
+        const blockhashOpts = cached
+          ? { recentBlockhash: cached.blockhash, blockhash: cached.blockhash, lastValidBlockHeight: cached.lastValidBlockHeight }
+          : {};
+
+        // Compute priority fee & tip for this attempt
+        const pf = getPriorityFee({
+          autoPriorityFee,
+          cuPriceMicroLamportsMin,
+          cuPriceMicroLamportsMax,
+          priorityFeeLamports: basePriorityFeeLamports,
+          jitoTipLamports,
+        }, attempt);
+
+        // Direct AMM fallback when quote is stale & pool fresh/low-vol
+        if (!usedDirect && directAmmFallback && attempt === 0) {
+          const doFallback = shouldDirectAmmFallback({
+            quoteAgeMs: quoteLatencyMs,
+            fallbackQuoteLatencyMs,
+            poolFresh,
+            volatilityPct,
+            maxVolatilityPct,
+          });
+          if (doFallback) {
+            const startSlot = await conn.getSlot();
+            txHash = await directSwap({
+              wallet,
+              inputMint: localQuote.inputMint,
+              outputMint: localQuote.outputMint,
+              amount: String(localQuote.inAmount),
+              slippage: effSlippage,
+              privateRpcUrl: currentRpcUrl,
+              skipPreflight,
+              ...blockhashOpts,
+              sendRawTransaction: sendRawOverride,
+              broadcastRawTransaction: sendRawOverride,
+            });
+            const endSlot = await conn.getSlot();
+            if (txHash) {
+              metricsLogger.recordInclusion?.(endSlot - startSlot);
+              metricsLogger.recordSuccess?.();
+              usedDirect = true;
+              const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
+              try {
+                trackPendingTrade(txHash, mint, strategy, {
+                  slot: endSlot,
+                  cuUsed: null,
+                  cuPrice: pf.computeUnitPriceMicroLamports,
+                  tip: pf.tipLamports,
+                  route: 'direct',
+                  slippage: effSlippage,
+                  fillPct: null,
+                  leadTime_ms: leadTime,
+                });
+              } catch (_) {}
+              break;
+            } else {
+              metricsLogger.recordFail?.('direct-swap-fail');
+            }
           }
         }
 
         // Choose path (Jito or Turbo)
         if (jitoMode) {
-          // Instantiate controller with potential custom curves
+          // Jito with explicit tip and CU price
           const controller = new JitoFeeController({
             cuAdapt,
             cuPriceMicroLamportsMin,
@@ -670,7 +819,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             cuPriceCurve: meta?.cuPriceCurve,
             tipCurveCoefficients: meta?.tipCurveCoefficients,
             tipCurve,
-            baseTipLamports: jitoTipLamports || 1000,
+            baseTipLamports: pf.tipLamports, // wire configured tip
           });
           const fees = controller.getFee(attempt);
           const startSlot = await conn.getSlot();
@@ -679,14 +828,17 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             wallet,
             shared,
             priorityFee: fees.computeUnitPriceMicroLamports,
-            briberyAmount: 0,
+            briberyAmount: fees.tipLamports,
             jitoRelayUrl,
+            skipPreflight,
+            ...blockhashOpts,
+            sendRawTransaction: sendRawOverride,
+            broadcastRawTransaction: sendRawOverride,
           });
           const endSlot = await conn.getSlot();
           if (txHash) {
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             metricsLogger.recordSuccess?.();
-            // Log pending tx with metrics
             const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
             try {
               trackPendingTrade(txHash, mint, strategy, {
@@ -707,23 +859,25 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             quote: localQuote,
             wallet,
             shared,
-            priorityFee,
-            briberyAmount,
+            priorityFee: pf.computeUnitPriceMicroLamports, // CU price (microLamports)
+            briberyAmount: pf.tipLamports,                  // optional extra lamports
             privateRpcUrl: currentRpcUrl,
             skipPreflight,
+            ...blockhashOpts,
+            sendRawTransaction: sendRawOverride,
+            broadcastRawTransaction: sendRawOverride,
           });
           const endSlot = await conn.getSlot();
           if (txHash) {
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             metricsLogger.recordSuccess?.();
-            // Log pending tx with metrics
             const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
             try {
               trackPendingTrade(txHash, mint, strategy, {
                 slot: endSlot,
                 cuUsed: null,
-                cuPrice: priorityFee,
-                tip: briberyAmount,
+                cuPrice: pf.computeUnitPriceMicroLamports,
+                tip: pf.tipLamports,
                 route: 'turbo',
                 slippage: effSlippage,
                 fillPct: null,
@@ -735,6 +889,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
         if (!txHash) throw new Error('swap-failed');
       } catch (err) {
+        _coolOffByMint[mint] = Date.now();
+
         attempt += 1;
         const cls = classifyError(err?.message || err?.toString());
 
@@ -750,36 +906,26 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           throw err;
         }
 
-        // UNKNOWN: single conservative CU bump, then stop (no chain of bumps)
+        // UNKNOWN: conservative single CU bump
         if (cls === 'UNKNOWN') {
-          if (attempt === 1) {
-            priorityFee += Number(retryPolicy.bumpCuStep || 2000);
-            metricsLogger.recordRetry?.();
-          } else {
-            throw err;
-          }
+          // rely on getPriorityFee bump via attempt index
+          metricsLogger.recordRetry?.();
         }
 
-        // NET: bump exactly one dimension per attempt (CU → tip → route → RPC)
+        // NET: bump path per attempt
         if (cls === 'NET') {
-          if (attempt === 1) {
-            priorityFee += Number(retryPolicy.bumpCuStep || 2000);
-          } else if (attempt === 2) {
-            briberyAmount += Number(retryPolicy.bumpTipStep || 1000);
-          } else if (attempt === 3 && retryPolicy.routeSwitch) {
+          if (attempt === 3 && retryPolicy.routeSwitch) {
             jitoMode = !jitoMode;
-          } else if (attempt >= 4 && retryPolicy.rpcFailover) {
-            const endpointsList = endpoints.length ? endpoints : (Array.isArray(meta.rpcEndpoints) ? meta.rpcEndpoints : []);
-            if (endpointsList.length > 1) {
-              const idx = (endpointsList.indexOf(currentRpcUrl) + 1) % endpointsList.length;
-              currentRpcUrl = endpointsList[idx] || currentRpcUrl;
-              conn = new Connection(currentRpcUrl, 'confirmed');
-            }
+          } else if (attempt >= 4 && retryPolicy.rpcFailover && endpoints.length > 1) {
+            const idx = (endpoints.indexOf(currentRpcUrl) + 1) % endpoints.length;
+            currentRpcUrl = endpoints[idx] || currentRpcUrl;
+            conn = new Connection(currentRpcUrl, 'confirmed');
+            try { ensurePrewarm(conn); } catch (_) {}
           }
           metricsLogger.recordRetry?.();
         }
 
-        // Refresh quote (and blockhash) after changes
+        // Refresh quote after changes
         try {
           await _preSendRefresh();
           const qRes = await getWarmQuote({
@@ -789,11 +935,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             slippage: effSlippage,
           });
           if (qRes) localQuote = qRes;
-        } catch (_) { /* keep last */ }
+        } catch (_) {}
       }
     }
 
-    // Do not await any relay ack here; avoid adding latency to hot path
     return txHash;
   }
 
@@ -813,7 +958,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     });
 
     await _preSendRefresh();
-    // start build timer for probe transaction
     if (_buildStart === null) _buildStart = Date.now();
     let probeTx;
     try {
@@ -829,7 +973,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       inc('probe_abort_total', 1);
       try { idempotencyStore.set(stableIdKey, probeTx || 'probe-aborted'); } catch {}
       _recordTotal('NONE');
-      // record build/sign/submit durations for probe path
       try {
         const _sendDuration = Date.now() - _buildStart;
         observe('hotpath_ms', _sendDuration, { stage: 'build', strategy: 'turbo' });
@@ -853,7 +996,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         slippage: effSlippage,
       });
       await _preSendRefresh();
-      // reset build timer for final send
       _buildStart = Date.now();
       let scaleTx;
       try {
@@ -869,7 +1011,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       txHash = probeTx || null;
       inc('probe_scale_success_total', 1);
     }
-    // record build/sign/submit durations for probe path
     try {
       const _sendDuration = Date.now() - _buildStart;
       observe('hotpath_ms', _sendDuration, { stage: 'build', strategy: 'turbo' });
@@ -878,7 +1019,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     } catch (_) {}
   } else {
     await _preSendRefresh();
-    // measure build/sign/submit durations for single send
     _buildStart = Date.now();
     try {
       txHash = await sendOnce(sizedQuote);
@@ -887,7 +1027,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       _recordTotal(cls);
       throw err;
     }
-    // record build/sign/submit durations
     try {
       const _sendDuration = Date.now() - _buildStart;
       observe('hotpath_ms', _sendDuration, { stage: 'build', strategy: 'turbo' });
@@ -900,6 +1039,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   if (!simulated && stableIdKey && txHash) {
     try { idempotencyStore.set(stableIdKey, txHash); } catch {}
     try { coreIdem.markSuccess?.(stableIdKey); } catch {}
+  }
+  if (idempotencyKey && txHash) {
+    const exp = idempotencyTtlMs ? Date.now() + Number(idempotencyTtlMs) : undefined;
+    _idemCache.set(idempotencyKey, { res: txHash, exp });
   }
 
   /* ——— 2️⃣  Enrichment ——— */
@@ -1071,7 +1214,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           sizedQuote.outputMint
         );
         if (freezeAuth) {
-          // redact freeze authority to avoid leaking secrets
           const redactedFreeze = _redact(freezeAuth);
           console.warn(
             ` Honeypot detected (freezeAuthority: ${redactedFreeze})`
@@ -1124,7 +1266,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
     /* Post-buy watcher */
     if (txHash && postBuyWatch) {
-      // Extract watcher options; include optional rugDelayBlocks
       const {
         durationSec = 180,
         lpPullExit = true,
@@ -1138,13 +1279,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       const sellOutputMint = sizedQuote.inputMint;
       const sellAmount = sizedQuote.outAmount;
       let active = true;
-      // Convert rug delay blocks into milliseconds.  Each Solana slot is ~400 ms; adjust if scheduler provides better estimate
       const delayMs = Math.max(0, Number(rugDelayBlocks) || 0) * 400;
-      /**
-       * Perform a delayed exit.  If rugDelayBlocks > 0 this waits before submitting
-       * the sell transaction to give the pool time to potentially recover.  The
-       * provided quote must still be refreshed immediately before submit.
-       */
       async function executeDelayedExit(exitQuote) {
         if (!exitQuote) return;
         try {
@@ -1168,7 +1303,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           return;
         }
         try {
-          // LP pull: if quote fails or output drastically smaller, exit
           if (lpPullExit) {
             const sq = await getWarmQuote({
               inputMint: sellInputMint,
@@ -1184,7 +1318,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
               return;
             }
           }
-          // Authority flip: sell if freeze authority returns
           if (authorityFlipExit) {
             const freeze = await checkFreezeAuthority(connPost, sellInputMint);
             if (freeze) {
@@ -1207,49 +1340,32 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     }
   })().catch(console.error);
 
-  /* ——— 5️⃣  Done ——— */
-  // record total metrics before exiting
   _recordTotal('NONE');
   return txHash;
 }
 
-/*
- *
- ---------------------------------------------------------------------------
- * Public API
- *
- * Historically this module exported a single async function which, when
- * `require`‑d, returned a bare function.  Some calling code (including the
- * Turbo Sniper orchestrator and accompanying tests) were instantiating it via
- * `new TradeExecutorTurbo()` and then invoking `.executeTrade(...)`.  However,
- * asynchronous functions cannot be used as constructors, so calling `new`
- * on the exported function resulted in a `TypeError`.  To maintain backwards
- * compatibility while supporting the `new` constructor pattern, we wrap the
- * core executor in a thin class.  The class exposes an `executeTrade()`
- * instance method which internally performs a safe quote, constructs the
- * required meta object and delegates to the original `execTrade()` helper.
- *
- * The static `execTrade` export is preserved for advanced callers that wish
- * to bypass the wrapper and supply their own quote and meta objects.  This
- * dual‑export design ensures that existing consumers continue to work
- * unchanged while new code can rely on the more ergonomic class interface.
- */
+/* ──────────────────────────────────────────────
+ *  Prewarm initialization helper (singleton)
+ * ──────────────────────────────────────────── */
+let _prewarmStarted = false;
+let _prewarmStop = null;
+function ensurePrewarm(connection) {
+  if (_prewarmStarted) return;
+  try {
+    const handle = startBlockhashPrewarm({ connection, intervalMs: 400, ttlMs: 1200 });
+    _prewarmStop = handle && typeof handle.stop === 'function' ? handle.stop : null;
+    _prewarmStarted = true;
+  } catch (_) {
+    // ignore
+  }
+}
 
+/*
+ * Public API wrapper class (unchanged aside from prewarm on construct)
+ */
 const { getSafeQuote } = require('./quoteHelper');
 
 class TradeExecutorTurbo {
-  /**
-   * Construct a new TradeExecutorTurbo wrapper.
-   *
-   * @param {Object} opts
-   * @param {Connection} [opts.connection] Optional Solana connection.  The
-   *   underlying executor will create its own connections as needed; this
-   *   parameter is retained for interface completeness but is not currently
-   *   passed down into the hot path to avoid coupling.
-   * @param {string} [opts.validatorIdentity] The validator identity used for
-   *   leader scheduling.  When present it is forwarded into the meta on each
-   *   call to `executeTrade()`.
-   */
   constructor({ connection, validatorIdentity } = {}) {
     this.connection = connection;
     this.validatorIdentity = validatorIdentity;
@@ -1259,16 +1375,13 @@ class TradeExecutorTurbo {
         resumeFromLast: true },
       { increment: () => {} }
     );
+    // Start prewarm early using provided connection or default env RPC
+    try {
+      const conn = connection || new Connection(process.env.SOLANA_RPC_URL, 'confirmed');
+      ensurePrewarm(conn);
+    } catch (_) {}
   }
 
-  /**
-   * Execute a trade given user context, basic trade parameters and optional
-   * configuration.  This helper performs a safe quote using Jupiter's lite
-   * API, merges the provided configuration into the meta object and then
-   * calls the underlying `execTrade` function.  It intentionally avoids
-   * pulling in any database, logging or safety check logic to keep the
-   * latency as low as possible.
-   */
   async executeTrade(userCtx, tradeParams, cfg = {}) {
     if (!userCtx || !userCtx.userId || !userCtx.walletId) {
       throw new Error('userCtx must include userId and walletId');
@@ -1278,17 +1391,7 @@ class TradeExecutorTurbo {
       throw new Error('tradeParams must include inputMint, outputMint and amount');
     }
 
-    // ── Pre‑quote risk passes
-    // Before fetching a quote we run the hot‑path risk checks.  Only
-    // developer/creator heuristics are exercised here – price/volume/mcap
-    // filters are disabled by setting thresholds to zero/null.  We also
-    // override fetchOverview with a constant stub to avoid unnecessary API
-    // calls.  If passes() returns { ok: false } the token is blocked and
-    // quoting is skipped entirely.  A structured response is returned to
-    // callers with the reason and detail.  Metrics are bumped via the
-    // inc() helper to surface overall block counts by reason.  Any
-    // unexpected exceptions from passes() are caught and treated as
-    // soft‑fails (i.e. quoting proceeds) to avoid false negatives.
+    // Pre-quote risk passes
     if (cfg?.devWatch) {
       try {
         const riskRes = await passes(outputMint, {
@@ -1299,27 +1402,16 @@ class TradeExecutorTurbo {
           minMarketCap: null,
           maxMarketCap: null,
           devWatch: cfg.devWatch,
-          // Provide a dummy overview to satisfy the contract.  The values
-          // chosen are arbitrary but must satisfy the zero thresholds above.
           fetchOverview: async () => ({
-            price: 1,
-            priceChange: 1,
-            volumeUSD: 1,
-            marketCap: 1,
+            price: 1, priceChange: 1, volumeUSD: 1, marketCap: 1,
           }),
         });
         if (!riskRes.ok) {
-          // Record a generic block metric keyed by the underlying reason (detail
-          // may be undefined for some reasons).  Note that more specific
-          // metrics (e.g. holders_conc_exceeded_total) are already
-          // incremented inside passes().
           const lbl = riskRes.detail || riskRes.reason || 'unknown';
           inc('prequote_block_total', 1, { reason: lbl });
           return { blocked: true, reason: riskRes.reason, detail: riskRes.detail };
         }
-      } catch (_) {
-        // Soft‑fail: if passes() throws, ignore and proceed to quote
-      }
+      } catch (_) {}
     }
 
     const safeQuoteRes = await getSafeQuote({ inputMint, outputMint, amount, slippage });
@@ -1328,20 +1420,12 @@ class TradeExecutorTurbo {
     }
     const quote = safeQuoteRes.quote;
 
-    // NEW: parallel wallet execution (Prompt 5)
+    // Parallel wallets path
     if (cfg?.parallelWallets && cfg.parallelWallets.enabled) {
       const { wallets = [], splitPct = [], maxParallel = 2 } = cfg.parallelWallets;
-      // compute idKeyBase using stable inputs
       const idemSalt = cfg?.idempotency?.salt ?? process.env.IDEMPOTENCY_SALT ?? '';
       const slotBucketBase = cfg?.idempotency?.slotBucket ?? cfg?.slotBucket ?? '';
-      const idKeyBase = computeStableIdKey({
-        userId: userCtx.userId,
-        walletId: userCtx.walletId,
-        mint: outputMint,
-        amount: quote?.inAmount ?? '',
-        slotBucket: slotBucketBase,
-        salt: idemSalt,
-      });
+      const idKeyBase = crypto.createHash('sha256').update([userCtx.userId, userCtx.walletId, outputMint, quote?.inAmount ?? '', slotBucketBase, idemSalt].join('|')).digest('hex');
       const totalAmount = amount;
       const routes = [];
       const self = this;

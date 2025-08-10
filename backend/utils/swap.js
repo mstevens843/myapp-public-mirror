@@ -1,18 +1,22 @@
 /** Swap.js - Core Swap Execution + quote retrieval utility
- * 
- * Features: 
+ *
+ * Features:
  * - Fetch swap quote from Jupiter Aggregator
  * - Execute swap via Jupiter's smart routing API
  * - Supports legacy and versioned Solana transactions
  * - Used by all trading strategies to perform real token swaps
- * - Loads wallet from env or strategy context 
+ * - Loads wallet from env or strategy context
  */
+
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const axios = require("axios");
 const { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } = require("@solana/web3.js");
 const bs58 = require("bs58");
 const { sendJitoBundle } = require("./jitoBundle"); // ✅ Jito relay (no impact on turbo path)
 
+// Basic runtime check to ensure an RPC URL is provided.  More comprehensive
+// validation occurs in envSchema.js but this guard remains for backward
+// compatibility.
 if (!process.env.SOLANA_RPC_URL || !process.env.SOLANA_RPC_URL.startsWith("http")) {
   throw new Error("❌ Invalid or missing SOLANA_RPC_URL in .env file");
 }
@@ -79,7 +83,7 @@ async function getSwapQuote({
     return data || null;
   } catch (err) {
     console.error("❌ Jupiter quote error:", err.response?.data || err.message);
-    console.error("🔍 Params sent:", {
+    console.error(" Params sent:", {
       inputMint, outputMint, amount,
       slippageBps: bps,
       dexes: allowedDexes, excludeDexes: excludedDexes, splitTrade
@@ -120,7 +124,6 @@ async function executeSwap({
       wrapAndUnwrapSol: true,
       useSharedAccounts: shared,                  // ✅ MEV shielding
       asLegacyTransaction: false,                 // ✅ required for shared accounts
-      // prioritizationFeeLamports: cuPrice,      // (alt name in some versions)
       computeUnitPriceMicroLamports: cuPrice,
       tipLamports: tip,
       useTokenLedger: false,
@@ -273,4 +276,7 @@ module.exports = {
   executeSwap,
   executeSwapTurbo,        // fast path with new knobs
   executeSwapJitoBundle,   // optional Jito path (opt-in, no turbo slowdown)
+  // Re-export the fallback helper from its own module.  This avoids
+  // pulling in web3.js when only the guard logic is needed in tests.
+  ...require('./ammFallbackGuard'),
 };
