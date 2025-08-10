@@ -57,6 +57,18 @@ const QuoteWarmCache  = require("./quoteWarmCache");
 const JitoFeeController = require("./jitoFeeController");
 const { directSwap } = require("../../../utils/raydiumDirect");
 const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
+
+// ── Risk gating ────────────────────────────────────────────────────────────
+// Import the shared passes helper.  This helper runs a series of pre‑trade
+// heuristics (price/volume filters and developer/creator risk checks).  We
+// invoke it ahead of any quote retrieval to avoid wasting time on unsafe
+// tokens.  The dev/creator heuristics are intentionally conservative: if
+// either the holder concentration or LP burn percentage exceeds the
+// configured thresholds (via cfg.devWatch), the token is immediately
+// rejected.  Passing a dummy fetchOverview and zero thresholds disables
+// price/volume/mcap filters so only devWatch logic runs.  See
+// backend/services/strategies/core/passes.js for details.
+const { passes } = require('./passes');
 const idempotencyStore = require("../../../utils/idempotencyStore"); // existing in your repo (short-TTL cache)
 
 // 🔧 NEW core modules added by Prompt 1 (shadow mempool + deterministic idempotency + sizing + probe)
@@ -1157,6 +1169,50 @@ class TradeExecutorTurbo {
     const { inputMint, outputMint, amount, slippage } = tradeParams || {};
     if (!inputMint || !outputMint || !amount) {
       throw new Error('tradeParams must include inputMint, outputMint and amount');
+    }
+
+    // ── Pre‑quote risk passes ──────────────────────────────────────────────
+    // Before fetching a quote we run the hot‑path risk checks.  Only
+    // developer/creator heuristics are exercised here – price/volume/mcap
+    // filters are disabled by setting thresholds to zero/null.  We also
+    // override fetchOverview with a constant stub to avoid unnecessary API
+    // calls.  If passes() returns { ok: false } the token is blocked and
+    // quoting is skipped entirely.  A structured response is returned to
+    // callers with the reason and detail.  Metrics are bumped via the
+    // inc() helper to surface overall block counts by reason.  Any
+    // unexpected exceptions from passes() are caught and treated as
+    // soft‑fails (i.e. quoting proceeds) to avoid false negatives.
+    if (cfg?.devWatch) {
+      try {
+        const riskRes = await passes(outputMint, {
+          entryThreshold: 0,
+          volumeThresholdUSD: 0,
+          dipThreshold: 0,
+          limitUsd: null,
+          minMarketCap: null,
+          maxMarketCap: null,
+          devWatch: cfg.devWatch,
+          // Provide a dummy overview to satisfy the contract.  The values
+          // chosen are arbitrary but must satisfy the zero thresholds above.
+          fetchOverview: async () => ({
+            price: 1,
+            priceChange: 1,
+            volumeUSD: 1,
+            marketCap: 1,
+          }),
+        });
+        if (!riskRes.ok) {
+          // Record a generic block metric keyed by the underlying reason (detail
+          // may be undefined for some reasons).  Note that more specific
+          // metrics (e.g. holders_conc_exceeded_total) are already
+          // incremented inside passes().
+          const lbl = riskRes.detail || riskRes.reason || 'unknown';
+          inc('prequote_block_total', 1, { reason: lbl });
+          return { blocked: true, reason: riskRes.reason, detail: riskRes.detail };
+        }
+      } catch (_) {
+        // Soft‑fail: if passes() throws, ignore and proceed to quote
+      }
     }
 
     const safeQuoteRes = await getSafeQuote({ inputMint, outputMint, amount, slippage });

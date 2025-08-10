@@ -953,6 +953,8 @@ function validateScheduleLauncher(cfg = {}) {
 // - isNumeric(v)
 // - toNum(v)
 
+// backend/services/strategies/validators/turboSniperValidator.js
+
 function validateTurboSniper(cfg = {}) {
   const errors = validateSniper(cfg);
 
@@ -1279,8 +1281,68 @@ function validateTurboSniper(cfg = {}) {
   }
 
   // ---------------------------
-  // Dev/Creator heuristics + Feeds (advanced)
+  // Dev/Creator heuristics (nested devWatch, plus legacy top-level)
   // ---------------------------
+  // New preferred shape: cfg.devWatch.{whitelist, blacklist, maxHolderPercent|minLpBurnPercent, enableInsiderHeuristics}
+  if (!isUnset(cfg.devWatch)) {
+    const dw = cfg.devWatch;
+    if (dw === null || typeof dw !== 'object' || Array.isArray(dw)) {
+      errors.push('TurboSniper: devWatch must be an object');
+    } else {
+      if (!isUnset(dw.whitelist)) {
+        if (!Array.isArray(dw.whitelist)) {
+          errors.push('TurboSniper: devWatch.whitelist must be an array');
+        } else {
+          dw.whitelist.forEach((m, i) => {
+            if (typeof m !== 'string' || !m.trim()) {
+              errors.push(`TurboSniper: devWatch.whitelist[${i}] must be a non-empty string`);
+            }
+          });
+        }
+      }
+      if (!isUnset(dw.blacklist)) {
+        if (!Array.isArray(dw.blacklist)) {
+          errors.push('TurboSniper: devWatch.blacklist must be an array');
+        } else {
+          dw.blacklist.forEach((m, i) => {
+            if (typeof m !== 'string' || !m.trim()) {
+              errors.push(`TurboSniper: devWatch.blacklist[${i}] must be a non-empty string`);
+            }
+          });
+        }
+      }
+      // Support legacy + new names; both must be 0..100 if present
+      if (!isUnset(dw.holderTop5MaxPct)) {
+        const v = toNum(dw.holderTop5MaxPct);
+        if (!isNumeric(v) || v < 0 || v > 100) {
+          errors.push('TurboSniper: devWatch.holderTop5MaxPct must be between 0 and 100');
+        }
+      }
+      if (!isUnset(dw.maxHolderPercent)) {
+        const v = toNum(dw.maxHolderPercent);
+        if (!isNumeric(v) || v < 0 || v > 100) {
+          errors.push('TurboSniper: devWatch.maxHolderPercent must be between 0 and 100');
+        }
+      }
+      if (!isUnset(dw.lpBurnMinPct)) {
+        const v = toNum(dw.lpBurnMinPct);
+        if (!isNumeric(v) || v < 0 || v > 100) {
+          errors.push('TurboSniper: devWatch.lpBurnMinPct must be between 0 and 100');
+        }
+      }
+      if (!isUnset(dw.minLpBurnPercent)) {
+        const v = toNum(dw.minLpBurnPercent);
+        if (!isNumeric(v) || v < 0 || v > 100) {
+          errors.push('TurboSniper: devWatch.minLpBurnPercent must be between 0 and 100');
+        }
+      }
+      if (!isUnset(dw.enableInsiderHeuristics) && typeof dw.enableInsiderHeuristics !== 'boolean') {
+        errors.push('TurboSniper: devWatch.enableInsiderHeuristics must be boolean');
+      }
+    }
+  }
+
+  // Back-compat top-level toggles/thresholds (still accepted)
   if (!isUnset(cfg.enableInsiderHeuristics) && typeof cfg.enableInsiderHeuristics !== 'boolean') {
     errors.push('TurboSniper: enableInsiderHeuristics must be boolean');
   }
@@ -1291,6 +1353,10 @@ function validateTurboSniper(cfg = {}) {
   if (!isUnset(cfg.requireFreezeRevoked) && typeof cfg.requireFreezeRevoked !== 'boolean') {
     errors.push('TurboSniper: requireFreezeRevoked must be boolean');
   }
+
+  // ---------------------------
+  // Feeds (advanced)
+  // ---------------------------
   if (!isUnset(cfg.enableLaserStream) && typeof cfg.enableLaserStream !== 'boolean') {
     errors.push('TurboSniper: enableLaserStream must be boolean');
   }
@@ -1362,6 +1428,8 @@ function validateTurboSniper(cfg = {}) {
 
   return errors;
 }
+
+
 
 module.exports = validateTurboSniper;
 
