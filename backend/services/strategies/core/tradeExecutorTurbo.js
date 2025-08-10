@@ -49,7 +49,7 @@ const { trackPendingTrade } = require("./txTracker");
 const { SlippageGovernor } = require('./slippageGovernor');
 const postTradeQueue = require('./postTradeQueue');
 
-// 🔧 Existing infra
+//  Existing infra
 const LeaderScheduler = require("./leaderScheduler");
 const QuoteWarmCache  = require("./quoteWarmCache");
 
@@ -58,7 +58,10 @@ const JitoFeeController = require("./jitoFeeController");
 const { directSwap } = require("../../../utils/raydiumDirect");
 const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
 
-// ── Risk gating ────────────────────────────────────────────────────────────
+// Import new parallel filler (Prompt 5)
+const { parallelFiller } = require('./parallelFiller');
+
+// ── Risk gating ───────────────────────────────────────────────────────────
 // Import the shared passes helper.  This helper runs a series of pre‑trade
 // heuristics (price/volume filters and developer/creator risk checks).  We
 // invoke it ahead of any quote retrieval to avoid wasting time on unsafe
@@ -71,20 +74,20 @@ const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
 const { passes } = require('./passes');
 const idempotencyStore = require("../../../utils/idempotencyStore"); // existing in your repo (short-TTL cache)
 
-// 🔧 NEW core modules added by Prompt 1 (shadow mempool + deterministic idempotency + sizing + probe)
+//  NEW core modules added by Prompt 1 (shadow mempool + deterministic idempotency + sizing + probe)
 const RelayClient = require('./relays/relayClient');                 // new abstraction (feature-flag)
 const CoreIdemStore = require('./idempotencyStore');                 // crash-safe resume window (disk-backed)
 const { sizeTrade } = require('./liquiditySizer');                   // liquidity-aware sizing
 const { performProbe } = require('./probeBuyer');                    // micro-buy then scale
 
-// 🔐  Arm / envelope-crypto helpers
+//   Arm / envelope-crypto helpers
 const { getDEK } = require("../../../armEncryption/sessionKeyCache");
 const {
   decryptPrivateKeyWithDEK,
 } = require("../../../armEncryption/envelopeCrypto");
 const { decrypt } = require("../../../middleware/auth/encryption");
 
-// 👻  Ghost utilities
+//   Ghost utilities
 const {
   forwardTokens,
   checkFreezeAuthority,
@@ -919,9 +922,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       const impactFmt =
         ((sizedQuote.priceImpactPct ?? 0) * 100).toFixed(2) + "%";
       const header = simulated
-        ? `🧪 *Dry-Run ${category} Triggered!*`
+        ? ` *Dry-Run ${category} Triggered!*`
         : txHash
-        ? `🤖 *${category} Buy Executed!*`
+        ? ` *${category} Buy Executed!*`
         : `⚠️ *${category} Attempt Failed*`;
       const msg =
         `${header}\n` +
@@ -970,7 +973,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         );
         if (freezeAuth) {
           console.warn(
-            `🚨 Honeypot detected (freezeAuthority: ${freezeAuth})`
+            ` Honeypot detected (freezeAuthority: ${freezeAuth})`
           );
           const sellQuote = await getWarmQuote({
             inputMint: sizedQuote.outputMint,
@@ -1108,7 +1111,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 }
 
 /*
- * ---------------------------------------------------------------------------
+ *
+---------------------------------------------------------------------------
  * Public API
  *
  * Historically this module exported a single async function which, when
@@ -1220,6 +1224,64 @@ class TradeExecutorTurbo {
       throw new Error(`quote-failed: ${safeQuoteRes.reason || 'unknown'}`);
     }
     const quote = safeQuoteRes.quote;
+
+    // NEW: parallel wallet execution (Prompt 5)
+    if (cfg?.parallelWallets && cfg.parallelWallets.enabled) {
+      const { wallets = [], splitPct = [], maxParallel = 2 } = cfg.parallelWallets;
+      // compute idKeyBase using stable inputs
+      const idemSalt = cfg?.idempotency?.salt ?? process.env.IDEMPOTENCY_SALT ?? '';
+      const slotBucketBase = cfg?.idempotency?.slotBucket ?? cfg?.slotBucket ?? '';
+      const idKeyBase = computeStableIdKey({
+        userId: userCtx.userId,
+        walletId: userCtx.walletId,
+        mint: outputMint,
+        amount: quote?.inAmount ?? '',
+        slotBucket: slotBucketBase,
+        salt: idemSalt,
+      });
+      const totalAmount = amount;
+      const routes = [];
+      const self = this;
+      const results = await parallelFiller({
+        totalAmount,
+        routes,
+        wallets,
+        splitPct,
+        maxParallel,
+        idKeyBase,
+        onExecute: async ({ wallet, amount: subAmt, idKey }) => {
+          const start = Date.now();
+          try {
+            const subQuoteRes = await getSafeQuote({ inputMint, outputMint, amount: subAmt, slippage });
+            if (!subQuoteRes.ok) {
+              inc('parallel_wallet_fail_total', 1, { walletId: String(wallet) });
+              observe('parallel_wallet_ms', Date.now() - start, { ok: false });
+              return { ok: false, errorClass: 'QUOTE', error: new Error(`quote-failed: ${subQuoteRes.reason || 'unknown'}`) };
+            }
+            const subQuote = subQuoteRes.quote;
+            const newMeta = Object.assign({}, cfg, {
+              userId: userCtx.userId,
+              walletId: wallet,
+              slippage: slippage,
+              validatorIdentity: self.validatorIdentity || cfg.validatorIdentity,
+              idempotencyKey: idKey,
+            });
+            const sim = Boolean(cfg.dryRun);
+            const txHash = await execTrade({ quote: subQuote, mint: outputMint, meta: newMeta, simulated: sim });
+            inc('parallel_wallet_ok_total', 1, { walletId: String(wallet) });
+            observe('parallel_wallet_ms', Date.now() - start, { ok: true });
+            return { ok: !!txHash, txid: txHash };
+          } catch (err) {
+            inc('parallel_wallet_fail_total', 1, { walletId: String(wallet) });
+            observe('parallel_wallet_ms', Date.now() - start, { ok: false });
+            const cls = classifyError(err?.message || err?.toString());
+            return { ok: false, errorClass: cls, error: err };
+          }
+        },
+      });
+      return results;
+    }
+
     const meta = Object.assign({}, cfg, {
       userId: userCtx.userId,
       walletId: userCtx.walletId,

@@ -1,20 +1,22 @@
 // backend/services/strategies/core/parallelFiller.js
 //
-// ParallelFiller — multi‑wallet parallel fill utilities for Turbo Sniper
+// ParallelFiller — multi-wallet parallel fill utilities for Turbo Sniper
 // ---------------------------------------------------------------------
 // Goals
-//  • Increase first‑fill probability by racing multiple wallets in parallel
-//  • Keep the hot path non‑blocking (no DB/FS/Telegram in-line here)
+//  • Increase first-fill probability by racing multiple wallets in parallel
+//  • Keep the hot path non-blocking (no DB/FS/Telegram in-line here)
 //  • Honor splitPct and maxParallel, share a stable idKey across attempts
 //  • Provide BOTH interfaces used in the codebase:
 //      1) Class instance with .execute({ walletIds, splitPct, ... })
-//      2) Stand‑alone executeParallel({ walletIds, splitPct, ... }) → {sigs, failures}
+//      2) Stand-alone executeParallel({ walletIds, splitPct, ... }) → {sigs, failures}
+//  • NEW (spec P0 M): functional parallelFiller({ totalAmount, routes, wallets, splitPct, maxParallel, onExecute, idKeyBase })
+//    returning { perWallet, summary } with limiter and per-wallet idKey suffix.
 //
 // Notes
 //  • We support splitPct either as fractions (sum≈1) OR percentages (sum≈100).
-//  • We swallow errors per‑attempt and report via counters / return shape.
-//  • We do not actually "cancel" in‑flight RPCs on first win (Node lacks
-//    hard cancellation). We short‑circuit subsequent work where possible.
+//  • We swallow errors per-attempt and report via counters / return shape.
+//  • We do not actually "cancel" in-flight RPCs on first win (Node lacks
+//    hard cancellation). We short-circuit subsequent work where possible.
 //
 // This file intentionally imports only lightweight metrics helpers.
 // Heavy loaders (wallet keypairs) are accessed via a pluggable loader.
@@ -37,7 +39,7 @@ try {
 }
 
 /* ──────────────────────────────────────────────
- * Utilities
+ * Utilities (shared)
  * ──────────────────────────────────────────── */
 
 /**
@@ -71,8 +73,167 @@ function computeSubAmount(total, weight) {
   return total;
 }
 
+/**
+ * Tiny in-file concurrency limiter (no deps).
+ * Preserves submission order of tasks while capping active concurrency.
+ */
+function createLimiter(n) {
+  const max = Math.max(1, Number(n) || 1);
+  const queue = [];
+  let active = 0;
+
+  return function limit(fn) {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        if (active < max) {
+          active++;
+          Promise.resolve()
+            .then(fn)
+            .then(resolve, reject)
+            .finally(() => {
+              active--;
+              if (queue.length) queue.shift()();
+            });
+        } else {
+          queue.push(run);
+        }
+      };
+      run();
+    });
+  };
+}
+
 /* ──────────────────────────────────────────────
- * Class API — first‑win parallel execution
+ * NEW functional API (spec): parallelFiller
+ * ──────────────────────────────────────────── */
+/**
+ * Parallel filler entrypoint.  Schedules calls to the provided onExecute
+ * handler with a concurrency cap.  Amounts are computed by flooring
+ * totalAmount * splitPct[i] for each wallet.  A unique idKey for each
+ * wallet attempt is created by appending `-w{i}` to the provided
+ * idKeyBase.  Returns an object with perWallet results and a summary.
+ *
+ * @param {Object} opts
+ * @param {number|string|bigint} opts.totalAmount
+ * @param {Array} opts.routes (reserved for future)
+ * @param {Array<string|number|Object>} opts.wallets
+ * @param {Array<number>} opts.splitPct (fractions ~1 or percents ~100)
+ * @param {number} [opts.maxParallel=2]
+ * @param {Function} opts.onExecute ({ wallet, amount, idKey }) => Promise<{ ok|success|txid?, txid?, txHash?, errorClass?, error? }>
+ * @param {string} opts.idKeyBase
+ * @returns {Promise<{ perWallet: Array<{index:number,walletPubkey:any,amount:any,ok:boolean,txid?:string,errorClass?:string,error?:any}>, summary: {requestedTotal:any,allocatedTotal:number,okCount:number,failCount:number} }>}
+ */
+async function parallelFiller({
+  totalAmount,
+  routes, // reserved
+  wallets,
+  splitPct,
+  maxParallel = 2,
+  onExecute,
+  idKeyBase,
+}) {
+  // Validate inputs
+  if (!Array.isArray(wallets) || !Array.isArray(splitPct)) {
+    throw new Error('wallets and splitPct must be arrays');
+  }
+  if (wallets.length !== splitPct.length) {
+    throw new Error('wallets and splitPct length mismatch');
+  }
+  if (typeof onExecute !== 'function') {
+    throw new Error('onExecute must be a function');
+  }
+  if (!idKeyBase || typeof idKeyBase !== 'string') {
+    throw new Error('idKeyBase must be a non-empty string');
+  }
+
+  // Normalize fractions/percentages
+  const weights = normalizeSplits(splitPct);
+  const sumW = weights.reduce((a, b) => a + b, 0);
+  if (!Number.isFinite(sumW) || Math.abs(sumW - 1) > 0.01) {
+    throw new Error('splitPct must sum to approximately 1 (±0.01) or 100 (±1)');
+  }
+
+  const limit = createLimiter(Math.max(1, Number(maxParallel) || 1));
+  try { incCounter?.('parallel_filler_started_total', 1, { n: wallets.length, maxParallel }); } catch (_) {}
+
+  const perWallet = new Array(wallets.length);
+  let allocatedTotal = 0;
+
+  const execPromises = wallets.map((wallet, i) =>
+    limit(async () => {
+      const weight = weights[i] || 0;
+      const amt = computeSubAmount(totalAmount, weight);
+      if (typeof amt === 'number') allocatedTotal += amt;
+
+      const idKey = `${idKeyBase}-w${i}`;
+      const t0 = Date.now();
+
+      try {
+        const res = await onExecute({ wallet, amount: amt, idKey });
+        const ok = !!(res && (res.ok === true || res.success === true || res.txid || res.txHash || res.hash));
+        const txid = res && (res.txid || res.txHash || res.hash || null);
+
+        perWallet[i] = {
+          index: i,
+          walletPubkey: wallet,
+          amount: amt,
+          ok,
+          txid: txid || undefined,
+        };
+
+        try {
+          const ms = Date.now() - t0;
+          if (ok) incCounter?.('parallel_wallet_ok_total', 1);
+          else    incCounter?.('parallel_wallet_fail_total', 1);
+          observeHistogram?.('parallel_wallet_ms', ms);
+        } catch (_) {}
+
+        if (!ok) {
+          perWallet[i].errorClass = res && res.errorClass ? res.errorClass : 'UNKNOWN';
+          perWallet[i].error = res && (res.error || res.err || res.reason);
+        }
+        return perWallet[i];
+      } catch (err) {
+        perWallet[i] = {
+          index: i,
+          walletPubkey: wallet,
+          amount: amt,
+          ok: false,
+          errorClass: classifyError(err),
+          error: err,
+        };
+        try {
+          const ms = Date.now() - t0;
+          incCounter?.('parallel_wallet_fail_total', 1);
+          observeHistogram?.('parallel_wallet_ms', ms);
+        } catch (_) {}
+        return perWallet[i];
+      }
+    })
+  );
+
+  // Wait for all executions to finish (never throws aggregate)
+  await Promise.allSettled(execPromises);
+
+  const okCount = perWallet.filter((r) => r && r.ok).length;
+  const failCount = perWallet.length - okCount;
+
+  try { incCounter?.('parallel_filler_done_total', 1, { ok: okCount, fail: failCount }); } catch (_) {}
+
+  return {
+    perWallet,
+    summary: {
+      requestedTotal: totalAmount,
+      allocatedTotal,
+      okCount,
+      failCount,
+    },
+  };
+}
+
+/* ──────────────────────────────────────────────
+ * Class API — first-win parallel execution
+ * (Preserved exactly; used elsewhere in repo)
  * ──────────────────────────────────────────── */
 class ParallelFiller {
   /**
@@ -107,7 +268,7 @@ class ParallelFiller {
     }
 
     const concurrency = Math.max(1, Math.min(maxParallel, walletIds.length));
-    incCounter('parallel_send_count', { concurrency, nWallets: walletIds.length });
+    incCounter?.('parallel_send_count', { concurrency, nWallets: walletIds.length });
 
     const start = Date.now();
     let resolved = false;
@@ -147,7 +308,7 @@ class ParallelFiller {
           if (!resolved && res && res.success) {
             resolved = true;
             finalResult = res;
-            observeHistogram('parallel_first_win_ms', Date.now() - start);
+            observeHistogram?.('parallel_first_win_ms', Date.now() - start);
           } else if (!res || !res.success) {
             failures[i] = true;
           }
@@ -166,7 +327,7 @@ class ParallelFiller {
       await w;
       return true;
     })).catch(() => {});
-    // Ensure all settle (to finish logs/side‑effects)
+    // Ensure all settle (to finish logs/side-effects)
     await Promise.allSettled(workers);
 
     // Aggregate
@@ -175,7 +336,7 @@ class ParallelFiller {
       finalResult = last || { success: false, error: new Error('all attempts failed') };
     } else {
       const aborted = failures.filter(Boolean).length;
-      if (aborted > 0) incCounter('parallel_abort_total', { aborted });
+      if (aborted > 0) incCounter?.('parallel_abort_total', { aborted });
     }
     return finalResult;
   }
@@ -186,6 +347,7 @@ class ParallelFiller {
  * Shape required by routing layer:
  * executeParallel({ walletIds, splitPct, maxParallel, idKey, tradeParams, executor })
  *  -> { sigs: string[], failures: number }
+ * (Preserved exactly; used elsewhere)
  * ──────────────────────────────────────────── */
 async function executeParallel({
   walletIds = [],
@@ -245,9 +407,10 @@ async function executeParallel({
 }
 
 /* ──────────────────────────────────────────────
- * Exports
+ * Exports (back-compat + new)
  * ──────────────────────────────────────────── */
 const instance = new ParallelFiller();
-module.exports = instance;               // Back‑compat: default export is instance with .execute()
-module.exports.executeParallel = executeParallel;   // New functional API
-module.exports.ParallelFiller = ParallelFiller;     // Named export of the class
+module.exports = instance;                               // default export: instance with .execute()
+module.exports.executeParallel = executeParallel;        // legacy functional API
+module.exports.ParallelFiller = ParallelFiller;          // named export of the class
+module.exports.parallelFiller = parallelFiller;          // NEW spec function
