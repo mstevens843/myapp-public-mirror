@@ -36,7 +36,7 @@ const { getSwapQuote, executeSwapTurbo } = require('./swap');
  * @param {number} opts.slippage                       Slippage % (e.g. 1.0)
  * @param {string} [opts.privateRpcUrl]                Optional private RPC URL
  * @param {Object} [opts.quote]                        Optional precomputed Jupiter quote
- * @param {...any} [opts.exec passthrough]             Any additional fields are forwarded to executeSwapTurbo
+ * @param {any} [opts.exec passthrough]             Any additional fields are forwarded to executeSwapTurbo
  *                                                    (e.g. { skipPreflight, sendRawTransaction, broadcastRawTransaction,
  *                                                           recentBlockhash, lastValidBlockHeight,
  *                                                           computeUnitPriceMicroLamports, tipLamports })
