@@ -89,19 +89,40 @@ async function getSwapQuote({
 }
 
 /**
- * Execute a swap (standard path) — unchanged.
+ * Execute a swap (standard path).
+ * NEW: Accepts computeUnitPriceMicroLamports/tipLamports and forwards them; these
+ * override legacy priorityFee/briberyAmount if provided.
  */
-async function executeSwap({ quote, wallet, shared = false, priorityFee = 0, briberyAmount = 0 }) {
+async function executeSwap({
+  quote,
+  wallet,
+  shared = false,
+  priorityFee = 0,
+  briberyAmount = 0,
+  // NEW knobs (optional)
+  computeUnitPriceMicroLamports,
+  tipLamports,
+}) {
   try {
+    // Respect new knobs when present; fallback to legacy names.
+    const cuPrice =
+      computeUnitPriceMicroLamports !== undefined
+        ? computeUnitPriceMicroLamports
+        : priorityFee;
+    const tip =
+      tipLamports !== undefined
+        ? tipLamports
+        : briberyAmount;
+
     const payload = {
       quoteResponse: quote,
       userPublicKey: wallet.publicKey.toBase58(),
       wrapAndUnwrapSol: true,
       useSharedAccounts: shared,                  // ✅ MEV shielding
       asLegacyTransaction: false,                 // ✅ required for shared accounts
-      // prioritizationFeeLamports: priorityFee,  // alt naming in some versions
-      computeUnitPriceMicroLamports: priorityFee,
-      tipLamports: briberyAmount,
+      // prioritizationFeeLamports: cuPrice,      // (alt name in some versions)
+      computeUnitPriceMicroLamports: cuPrice,
+      tipLamports: tip,
       useTokenLedger: false,
       dynamicComputeUnitLimit: true,
       skipUserAccountsRpcCalls: true,
@@ -132,8 +153,8 @@ async function executeSwap({ quote, wallet, shared = false, priorityFee = 0, bri
 }
 
 /**
- * Turbo path — **unchanged** to avoid any slowdown.
- * Uses skipPreflight + optional private RPC for ultra-low latency.
+ * Turbo path — still the ultra-fast path. Accepts the same new knobs.
+ * Uses skipPreflight + optional private RPC for low latency.
  */
 async function executeSwapTurbo({
   quote,
@@ -143,16 +164,28 @@ async function executeSwapTurbo({
   briberyAmount = 0,
   privateRpcUrl,
   skipPreflight = true,
+  // NEW knobs (optional)
+  computeUnitPriceMicroLamports,
+  tipLamports,
 }) {
   try {
+    const cuPrice =
+      computeUnitPriceMicroLamports !== undefined
+        ? computeUnitPriceMicroLamports
+        : priorityFee;
+    const tip =
+      tipLamports !== undefined
+        ? tipLamports
+        : briberyAmount;
+
     const payload = {
       quoteResponse: quote,
       userPublicKey: wallet.publicKey.toBase58(),
       wrapAndUnwrapSol: true,
       useSharedAccounts: shared,
       asLegacyTransaction: false,
-      computeUnitPriceMicroLamports: priorityFee,
-      tipLamports: briberyAmount,
+      computeUnitPriceMicroLamports: cuPrice,
+      tipLamports: tip,
       useTokenLedger: false,
       dynamicComputeUnitLimit: true,
       skipUserAccountsRpcCalls: true,
@@ -172,7 +205,7 @@ async function executeSwapTurbo({
     }
 
     transaction.sign([wallet]);
-    const serialized     = transaction.serialize();
+    const serialized      = transaction.serialize();
     const turboConnection = privateRpcUrl ? new Connection(privateRpcUrl, "confirmed") : connection;
 
     const signature = await turboConnection.sendRawTransaction(serialized, { skipPreflight });
@@ -186,9 +219,7 @@ async function executeSwapTurbo({
 
 /**
  * Jito bundle path (for Turbo when explicitly requested).
- * NOTE: This **does not** alter the turbo fast path; call this instead of executeSwapTurbo
- * only when you want Jito bundling. It reuses the same prebuilt Jupiter tx,
- * signs once, then submits via Jito’s relay with a tip — minimal overhead.
+ * (No change needed for new knobs, since this path’s fee is handled via tip to Jito.)
  */
 async function executeSwapJitoBundle({
   quote,
@@ -240,133 +271,6 @@ module.exports = {
   loadKeypair,
   getSwapQuote,
   executeSwap,
-  executeSwapTurbo,        // unchanged fast path
+  executeSwapTurbo,        // fast path with new knobs
   executeSwapJitoBundle,   // optional Jito path (opt-in, no turbo slowdown)
 };
-
-
-
-
-
-
-
-
-
-/** Swap.js - Core Swap Execution + quote retrieval utility
- *
- * This module is copied from the original repository and extended to add a
- * turbo execution path for sniper bots. Turbo mode uses an optional
- * private RPC node and skips preflight checks to minimise latency when
- * submitting transactions【161345157167807†L148-L187】. This is critical for
- * catching newly listed tokens before the price spikes.
- */
-// require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
-// const axios = require("axios");
-// const { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } = require("@solana/web3.js");
-// const bs58 = require("bs58");
-
-// if (!process.env.SOLANA_RPC_URL || !process.env.SOLANA_RPC_URL.startsWith("http")) {
-//   throw new Error("❌ Invalid or missing SOLANA_RPC_URL in .env file");
-// }
-
-// const RPC_URL = process.env.SOLANA_RPC_URL;
-// const connection = new Connection(RPC_URL, "confirmed");
-
-// const JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
-// const JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap";
-
-// /**
-//  * Load keypair from PRIVATE_KEY in .env
-//  * This is the primary trading wallet used for all transactions.
-//  */
-// function loadKeypair() {
-//   if (!process.env.PRIVATE_KEY) throw new Error("Missing PRIVATE_KEY in .env");
-//   const secret = bs58.decode(process.env.PRIVATE_KEY.trim());
-//   return Keypair.fromSecretKey(secret);
-// }
-
-// async function getSwapQuote({ inputMint, outputMint, amount, slippage, slippageBps }) {
-//   let bps = slippageBps != null ? Number(slippageBps) : Math.round(parseFloat(slippage || "1.0") * 100);
-//   if (!bps || bps <= 0) bps = 100;
-//   try {
-//     const params = {
-//       inputMint,
-//       outputMint,
-//       amount,
-//       slippageBps: bps,
-//       swapMode: "ExactIn",
-//     };
-//     const { data } = await axios.get(JUPITER_QUOTE_URL, { params });
-//     return data || null;
-//   } catch (err) {
-//     console.error("❌ Jupiter quote error:", err.response?.data || err.message);
-//     console.error(" Params sent:", { inputMint, outputMint, amount, slippageBps: bps });
-//     return null;
-//   }
-// }
-
-// /**
-//  * Execute a swap based on the provided Jupiter quote.
-//  * Signs and sends the transaction via the default RPC connection.
-//  */
-// async function executeSwap({ quote, wallet, shared = false, priorityFee = 0, briberyAmount = 0 }) {
-//   try {
-//     const payload = {
-//       quoteResponse: quote,
-//       userPublicKey: wallet.publicKey.toBase58(),
-//       wrapAndUnwrapSol: true,
-//       useSharedAccounts: shared,
-//       asLegacyTransaction: false,
-//       computeUnitPriceMicroLamports: priorityFee,
-//       tipLamports: briberyAmount,
-//       useTokenLedger: false,
-//       dynamicComputeUnitLimit: true,
-//       skipUserAccountsRpcCalls: true,
-//       dynamicSlippage: true,
-//       trackingAccount: wallet.publicKey.toBase58(),
-//     };
-//     console.log(" Executing swap with Jupiter:");
-//     console.log("→ MEV Mode:", shared ? "secure (shared)" : "fast (direct)");
-//     console.log("→ Priority Fee:", priorityFee || 0, "µLAM");
-//     console.log("→ Validator Bribe:", briberyAmount || 0, "lamports");
-//     console.log("→ Quote route summary:", {
-//       input: quote.inputMint,
-//       output: quote.outputMint,
-//       inAmount: quote.inAmount,
-//       outAmount: quote.outAmount,
-//       priceImpact: quote.priceImpactPct,
-//     });
-//     const res = await axios.post(JUPITER_SWAP_URL, payload);
-//     const { swapTransaction, lastValidBlockHeight, blockhash } = res.data;
-//     const transactionBuffer = Buffer.from(swapTransaction, "base64");
-//     let transaction;
-//     try {
-//       transaction = VersionedTransaction.deserialize(transactionBuffer);
-//     } catch (e) {
-//       console.warn("⚠️ Failed to deserialize as VersionedTransaction, using legacy.");
-//       transaction = Transaction.from(transactionBuffer);
-//     }
-//     transaction.sign([wallet]);
-//     const serialized = transaction.serialize();
-//     const signature = await connection.sendRawTransaction(serialized);
-//     console.log(" Sent transaction:", signature);
-//     await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
-//     console.log("✅ Swap confirmed:", `https://explorer.solana.com/tx/${signature}?cluster=mainnet-beta`);
-//     return signature;
-//   } catch (err) {
-//     const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-//     throw new Error(detail);
-//   }
-// }
-
-/**
- * Execute a swap using turbo mode. Turbo mode optimises for ultra‑fast
- * execution by sending the signed transaction through an optional private RPC
- * and skipping preflight checks. It also supports overriding the connection
- * entirely by supplying a `privateRpcUrl`. If not supplied the global
- * connection is used.
- *
- * See RPC Fast's article on sniper bots for details on why private RPCs,
- * pre‑signed transactions and priority fees help gain an edge in speed【161345157167807†L148-L187】.
- */
-
