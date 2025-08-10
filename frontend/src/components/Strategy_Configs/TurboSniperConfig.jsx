@@ -1,10 +1,11 @@
 // frontend/src/components/Strategy_Configs/TurboSniperConfig.jsx
-// TurboSniperConfig.jsx — Turbo + Full Sniper Additions + Strategy Summary
+// TurboSniperConfig.jsx — Turbo + Full Sniper Additions + Strategy Summary (+ Safe Turbo preset)
 import React, { useMemo } from "react";
 import StrategyTooltip     from "./StrategyTooltip";
 import TokenSourceSelector from "./TokenSourceSelector";
 import AdvancedFields      from "../ui/AdvancedFields";
 import { ChevronDown }     from "lucide-react";
+import validateTurboSniperConfig from "./validators/turboSniperValidator";
 
 /* feed selector options ------------------------------------------------ */
 const feedOptions = [
@@ -355,6 +356,17 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
 
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
+  /* helper to update nested sections (privateRelay/idempotency/sizing/probe/etc.) */
+  const onChangeSection = (parent, child, value) => {
+    setConfig((prev) => ({
+      ...prev,
+      [parent]: {
+        ...(prev[parent] ?? defaults[parent] ?? {}),
+        [child]: value,
+      },
+    }));
+  };
+
   /* generic change handler */
   const change = (e) => {
     const { name, value, type, checked } = e.target;
@@ -404,6 +416,32 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
     }));
   };
 
+  // Apply a conservative Safe Turbo preset (non-destructive merge)
+  const applySafePreset = () => {
+    const safe = {
+      slippage: 1.0,
+      quoteTtlMs: 600,
+      idempotencyTtlSec: 60,
+      idempotency: {
+        ...(merged.idempotency ?? {}),
+        ttlSec: 60,
+        salt: merged.idempotency?.salt || "auto",
+        resumeFromLast: true,
+      },
+      retryPolicy: {
+        ...(merged.retryPolicy ?? {}),
+        max: 3,
+        bumpCuStep: 2000,
+        bumpTipStep: 1000,
+        routeSwitch: true,
+        rpcFailover: true,
+      },
+      autoPriorityFee: false,
+      parallelWallets: { ...(merged.parallelWallets ?? {}), enabled: false },
+    };
+    setConfig((prev) => ({ ...prev, ...safe }));
+  };
+
   /* select options */
   const priceWins  = ["", "1m","5m","15m","30m","1h","2h","4h","6h"];
   const volumeWins = ["", "1m","5m","30m","1h","4h","8h","24h"];
@@ -413,14 +451,32 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
     "bg-zinc-900 text-white placeholder:text-zinc-400 focus:outline-none " +
     "focus:ring-2 focus:ring-emerald-400 hover:border-emerald-500 transition";
 
+  // Run validations and surface errors inline
+  const errors = validateTurboSniperConfig(merged);
+
   /* ==================================================================== */
   return (
     <>
-      {/* ——— description ——— */}
-      <div className="bg-zinc-800/70 text-zinc-300 text-xs rounded-md p-2 mb-3">
+      {/* ——— description + Safe preset ——— */}
+      <div className="bg-zinc-800/70 text-zinc-300 text-xs rounded-md p-2 mb-2">
         This strategy hunts early-stage listings, letting you tune price &amp; volume
         windows, token age, and more to precision-snipe brand-new or trending tokens.
       </div>
+      <div className="flex justify-end mb-2">
+        <button
+          type="button"
+          onClick={applySafePreset}
+          disabled={disabled}
+          className="px-3 py-1 text-xs rounded bg-emerald-600 hover:bg-emerald-700 text-white"
+        >
+          Safe Turbo
+        </button>
+      </div>
+      {errors.length > 0 && (
+        <div className="bg-red-900/50 text-red-300 text-xs p-2 rounded-md mb-3 space-y-1">
+          {errors.map((err, i) => (<div key={i}>{err}</div>))}
+        </div>
+      )}
 
       {/* ——— thresholds ——— */}
       <div className="grid sm:grid-cols-2 gap-4">

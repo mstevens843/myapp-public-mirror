@@ -8,7 +8,8 @@
  * • NEW: Deterministic idempotency key + crash-safe resume window
  * • NEW: Liquidity-aware sizing (price impact / pool % / min USD)
  * • NEW: Probe buy then scale (fast two-step) with shared idKey
- * • NEW: Private relay/shadow mempool (feature-flag) fire-and-forget (fastest ack wins)
+ * • NEW: Private relay/shadow mempool (feature-flag) fire-and-forget
+ *   (fastest ack wins)
  * • Post-trade side-effects (non-blocking):
  *     – TP/SL rule insert
  *     – Telegram alert
@@ -25,8 +26,10 @@ const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
 
 // --- Error classification (NET / USER / UNKNOWN) ---
-const NET_ERRS = [/blockhash/i, /node is behind/i, /timed? out/i, /connection/i, /getblockheight timed out/i];
-const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i, /account in use/i, /slippage exceeded/i];
+const NET_ERRS = [/blockhash/i, /node is behind/i, /timed? out/i,
+/connection/i, /getblockheight timed out/i];
+const USER_ERRS = [/slippage/i, /insufficient funds/i, /mint.*not found/i,
+/account in use/i, /slippage exceeded/i];
 function classifyError(msg = '') {
   const lower = String(msg).toLowerCase();
   if (USER_ERRS.some(r => r.test(lower))) return 'USER';
@@ -61,7 +64,7 @@ const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
 // Import new parallel filler (Prompt 5)
 const { parallelFiller } = require('./parallelFiller');
 
-// ── Risk gating ───────────────────────────────────────────────────────────
+// ── Risk gating
 // Import the shared passes helper.  This helper runs a series of pre‑trade
 // heuristics (price/volume filters and developer/creator risk checks).  We
 // invoke it ahead of any quote retrieval to avoid wasting time on unsafe
@@ -114,20 +117,43 @@ function inc(counter, value = 1, labels) {
     }
   } catch (_) {}
 }
-// Provide a thin wrapper around the metrics observer.  Accept an optional
-// labels object to avoid referencing an undefined identifier.  This helper
-// never throws and will silently ignore metrics when the underlying
-// implementation is missing.  Without an explicit labels parameter the
-// call sites will fall back to an empty object, preserving existing
-// behaviour but eliminating the reference error.
-function observe(name, value, labels = {}) {
+// Provide a thin wrapper around the metrics observer.  This helper
+// gracefully handles different argument orders.  It accepts either
+// (name, value, labels) or (name, labels, value).  When the second
+// argument is an object it will be treated as the labels and the third
+// argument as the numeric value.  When the second argument is a number
+// (or any non-object), it will be treated as the value and the third
+// argument (if present) as the labels.  The underlying metrics logger
+// is always invoked in the order (name, value, labels).  Exceptions
+// from the metrics implementation are silently ignored.  See
+// backend/services/strategies/test/metricsRedaction.test.js for usage.
+function observe(name, arg1, arg2) {
   try {
     if (typeof metricsLogger.observe === 'function') {
-      metricsLogger.observe(name, value, labels);
+      if (arg1 && typeof arg1 === 'object' && !Array.isArray(arg1)) {
+        // called as observe(name, labels, value)
+        metricsLogger.observe(name, arg2, arg1);
+      } else {
+        // called as observe(name, value, labels)
+        metricsLogger.observe(name, arg1, arg2 || {});
+      }
     }
   } catch (_) {
     /* noop */
   }
+}
+
+/**
+ * Redact secrets or PII for logs/metrics.  Shows at most last 4 characters of
+ * any key or address.  Prefixes with ****** when redacted.
+ * @param {any} key
+ * @returns {string}
+ */
+function _redact(key) {
+  const s = String(key || '');
+  if (!s) return s;
+  if (s.length <= 4) return s;
+  return `******${s.slice(-4)}`;
 }
 
 /* ──────────────────────────────────────────────
@@ -237,14 +263,16 @@ async function loadWalletKeypairArmAware(userId, walletId) {
 /* ──────────────────────────────────────────────
  *  Local helpers: deterministic idKey + sizing + private relay
  * ──────────────────────────────────────────── */
-function computeStableIdKey({ userId, walletId, mint, amount, slotBucket, salt }) {
+function computeStableIdKey({ userId, walletId, mint, amount, slotBucket,
+  salt }) {
   const s = String(salt || '');
   const input = [userId, walletId, mint, amount, slotBucket ?? '', s].join('|');
   return crypto.createHash('sha256').update(input).digest('hex');
 }
 
 // Clean sizing helper that can refresh quote for the chosen amount
-async function applyLiquiditySizing({ baseQuote, sizingCfg, priceImpactEstimator, refreshQuote }) {
+async function applyLiquiditySizing({ baseQuote, sizingCfg,
+  priceImpactEstimator, refreshQuote }) {
   if (!sizingCfg) return baseQuote;
   const poolReserves = Number(baseQuote?.poolReserves) || null; // if provided by your quote, else null
   const amount = Number(baseQuote?.inAmount);
@@ -354,6 +382,22 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     rpcEndpoints // legacy array/string (failover)
   } = meta;
 
+  // --- Hot path metrics instrumentation ---
+  const _hotStart = Date.now();
+  let _quoteStart = Date.now();
+  let _buildStart = null;
+  let _recordedTotal = false;
+  const _recordTotal = (cls = 'NONE') => {
+    if (_recordedTotal) return;
+    _recordedTotal = true;
+    try {
+      observe('hotpath_ms', Date.now() - _hotStart, { stage: 'total', strategy: 'turbo' });
+    } catch (_) {}
+    try {
+      inc('submit_result_total', 1, { errorClass: cls, strategy: 'turbo' });
+    } catch (_) {}
+  };
+
   if (!_coreIdemInited) {
     await coreIdem.init().catch(() => {});
     _coreIdemInited = true;
@@ -365,7 +409,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   const wallet = await loadWalletKeypairArmAware(userId, walletId);
 
   // pick RPC for this attempt; may be rotated by retry loop
-  let currentRpcUrl = privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL;
+  let currentRpcUrl = privateRpcUrl || process.env.PRIVATE_SOLANA_RPC_URL ||
+    process.env.SOLANA_RPC_URL;
   let conn = new Connection(currentRpcUrl, 'confirmed');
 
   // ---- Quorum RPC client (for blockhash TTL prewarm) ----
@@ -427,7 +472,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     toNum(prefs?.defaultPriorityFee) ??
     0;
 
-  // ── Deterministic idKey (stable across restarts) ───────────────────────────
+  // ── Deterministic idKey (stable across restarts)
   const idemSalt = idempotency?.salt ?? process.env.IDEMPOTENCY_SALT ?? '';
   const slotBucket = idempotency?.slotBucket ?? meta.slotBucket ?? '';
   const stableIdKey =
@@ -527,6 +572,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       });
     }
   }).catch(() => quote);
+
+  // End quote timer and record
+  try {
+    const _quoteDuration = Date.now() - _quoteStart;
+    observe('hotpath_ms', _quoteDuration, { stage: 'quote', strategy: 'turbo' });
+  } catch (_) {}
 
   if (!sizedQuote) throw new Error('sizing/quote unavailable');
   if (Number(sizedQuote.inAmount) !== Number(quote.inAmount)) {
@@ -762,12 +813,29 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     });
 
     await _preSendRefresh();
-    const probeTx = await sendOnce(probeQuote);
+    // start build timer for probe transaction
+    if (_buildStart === null) _buildStart = Date.now();
+    let probeTx;
+    try {
+      probeTx = await sendOnce(probeQuote);
+    } catch (err) {
+      const cls = classifyError(err?.message || err?.toString());
+      _recordTotal(cls);
+      throw err;
+    }
 
     const liveImpactPct = (probeQuote?.priceImpactPct ?? 0) * 100;
     if (probe.abortOnImpactPct != null && liveImpactPct > Number(probe.abortOnImpactPct)) {
       inc('probe_abort_total', 1);
       try { idempotencyStore.set(stableIdKey, probeTx || 'probe-aborted'); } catch {}
+      _recordTotal('NONE');
+      // record build/sign/submit durations for probe path
+      try {
+        const _sendDuration = Date.now() - _buildStart;
+        observe('hotpath_ms', _sendDuration, { stage: 'build', strategy: 'turbo' });
+        observe('hotpath_ms', 0, { stage: 'sign', strategy: 'turbo' });
+        observe('hotpath_ms', _sendDuration, { stage: 'submit', strategy: 'turbo' });
+      } catch (_) {}
       return probeTx || null;
     }
 
@@ -785,16 +853,47 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         slippage: effSlippage,
       });
       await _preSendRefresh();
-      const scaleTx = await sendOnce(scaleQuote);
+      // reset build timer for final send
+      _buildStart = Date.now();
+      let scaleTx;
+      try {
+        scaleTx = await sendOnce(scaleQuote);
+      } catch (err) {
+        const cls = classifyError(err?.message || err?.toString());
+        _recordTotal(cls);
+        throw err;
+      }
       txHash = scaleTx || probeTx || null;
       if (scaleTx) inc('probe_scale_success_total', 1);
     } else {
       txHash = probeTx || null;
       inc('probe_scale_success_total', 1);
     }
+    // record build/sign/submit durations for probe path
+    try {
+      const _sendDuration = Date.now() - _buildStart;
+      observe('hotpath_ms', _sendDuration, { stage: 'build', strategy: 'turbo' });
+      observe('hotpath_ms', 0, { stage: 'sign', strategy: 'turbo' });
+      observe('hotpath_ms', _sendDuration, { stage: 'submit', strategy: 'turbo' });
+    } catch (_) {}
   } else {
     await _preSendRefresh();
-    txHash = await sendOnce(sizedQuote);
+    // measure build/sign/submit durations for single send
+    _buildStart = Date.now();
+    try {
+      txHash = await sendOnce(sizedQuote);
+    } catch (err) {
+      const cls = classifyError(err?.message || err?.toString());
+      _recordTotal(cls);
+      throw err;
+    }
+    // record build/sign/submit durations
+    try {
+      const _sendDuration = Date.now() - _buildStart;
+      observe('hotpath_ms', _sendDuration, { stage: 'build', strategy: 'turbo' });
+      observe('hotpath_ms', 0, { stage: 'sign', strategy: 'turbo' });
+      observe('hotpath_ms', _sendDuration, { stage: 'submit', strategy: 'turbo' });
+    } catch (_) {}
   }
 
   // Cache idempotency key on success
@@ -972,8 +1071,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           sizedQuote.outputMint
         );
         if (freezeAuth) {
+          // redact freeze authority to avoid leaking secrets
+          const redactedFreeze = _redact(freezeAuth);
           console.warn(
-            ` Honeypot detected (freezeAuthority: ${freezeAuth})`
+            ` Honeypot detected (freezeAuthority: ${redactedFreeze})`
           );
           const sellQuote = await getWarmQuote({
             inputMint: sizedQuote.outputMint,
@@ -1107,20 +1208,22 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   })().catch(console.error);
 
   /* ——— 5️⃣  Done ——— */
+  // record total metrics before exiting
+  _recordTotal('NONE');
   return txHash;
 }
 
 /*
  *
----------------------------------------------------------------------------
+ ---------------------------------------------------------------------------
  * Public API
  *
  * Historically this module exported a single async function which, when
  * `require`‑d, returned a bare function.  Some calling code (including the
  * Turbo Sniper orchestrator and accompanying tests) were instantiating it via
  * `new TradeExecutorTurbo()` and then invoking `.executeTrade(...)`.  However,
- * asynchronous functions cannot be used as constructors, so calling `new` on
- * the exported function resulted in a `TypeError`.  To maintain backwards
+ * asynchronous functions cannot be used as constructors, so calling `new`
+ * on the exported function resulted in a `TypeError`.  To maintain backwards
  * compatibility while supporting the `new` constructor pattern, we wrap the
  * core executor in a thin class.  The class exposes an `executeTrade()`
  * instance method which internally performs a safe quote, constructs the
@@ -1175,7 +1278,7 @@ class TradeExecutorTurbo {
       throw new Error('tradeParams must include inputMint, outputMint and amount');
     }
 
-    // ── Pre‑quote risk passes ──────────────────────────────────────────────
+    // ── Pre‑quote risk passes
     // Before fetching a quote we run the hot‑path risk checks.  Only
     // developer/creator heuristics are exercised here – price/volume/mcap
     // filters are disabled by setting thresholds to zero/null.  We also
@@ -1282,14 +1385,14 @@ class TradeExecutorTurbo {
       return results;
     }
 
-    const meta = Object.assign({}, cfg, {
+    const metaObj = Object.assign({}, cfg, {
       userId: userCtx.userId,
       walletId: userCtx.walletId,
       slippage: slippage,
       validatorIdentity: this.validatorIdentity || cfg.validatorIdentity,
     });
-    const simulated = Boolean(cfg.dryRun);
-    return execTrade({ quote, mint: outputMint, meta, simulated });
+    const simulatedRun = Boolean(cfg.dryRun);
+    return execTrade({ quote, mint: outputMint, meta: metaObj, simulated: simulatedRun });
   }
 
   async buildAndSubmit() {

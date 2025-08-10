@@ -959,7 +959,7 @@ function validateTurboSniper(cfg = {}) {
   const errors = validateSniper(cfg);
 
   // ---------------------------
-  // Simple boolean toggles
+  // Simple boolean toggles (existing)
   // ---------------------------
   [
     "ghostMode",
@@ -982,6 +982,17 @@ function validateTurboSniper(cfg = {}) {
       errors.push(`TurboSniper: ${k} must be boolean`);
     }
   });
+
+  // ---------------------------
+  // ADDED: Support nested flags booleans (from frontend)
+  // ---------------------------
+  if (cfg.flags) {
+    ['directAmm', 'bundles', 'leaderTiming', 'relay', 'probe'].forEach((k) => {
+      if (cfg.flags[k] !== undefined && typeof cfg.flags[k] !== 'boolean') {
+        errors.push(`TurboSniper: flags.${k} must be boolean`);
+      }
+    });
+  }
 
   // ghost-mode cover wallet requirement
   if (cfg.ghostMode === true) {
@@ -1053,6 +1064,16 @@ function validateTurboSniper(cfg = {}) {
     if (!Number.isInteger(toNum(cfg.quoteTtlMs)) || toNum(cfg.quoteTtlMs) <= 0) {
       errors.push('TurboSniper: quoteTtlMs must be a positive integer (ms)');
     }
+  }
+
+  // ---------------------------
+  // ADDED: Entry/Volume thresholds (from frontend)
+  // ---------------------------
+  if (!isUnset(cfg.entryThreshold) && !(toNum(cfg.entryThreshold) >= 0)) {
+    errors.push('TurboSniper: entryThreshold must be ≥ 0');
+  }
+  if (!isUnset(cfg.volumeThreshold) && !(toNum(cfg.volumeThreshold) >= 0)) {
+    errors.push('TurboSniper: volumeThreshold must be ≥ 0');
   }
 
   // ---------------------------
@@ -1283,7 +1304,6 @@ function validateTurboSniper(cfg = {}) {
   // ---------------------------
   // Dev/Creator heuristics (nested devWatch, plus legacy top-level)
   // ---------------------------
-  // New preferred shape: cfg.devWatch.{whitelist, blacklist, maxHolderPercent|minLpBurnPercent, enableInsiderHeuristics}
   if (!isUnset(cfg.devWatch)) {
     const dw = cfg.devWatch;
     if (dw === null || typeof dw !== 'object' || Array.isArray(dw)) {
@@ -1311,7 +1331,6 @@ function validateTurboSniper(cfg = {}) {
           });
         }
       }
-      // Support legacy + new names; both must be 0..100 if present
       if (!isUnset(dw.holderTop5MaxPct)) {
         const v = toNum(dw.holderTop5MaxPct);
         if (!isNumeric(v) || v < 0 || v > 100) {
@@ -1413,6 +1432,22 @@ function validateTurboSniper(cfg = {}) {
   }
 
   // ---------------------------
+  // ADDED: RPC quorum + blockhash TTL (from frontend)
+  // ---------------------------
+  if (cfg.rpc) {
+    const q = cfg.rpc.quorum || {};
+    if (!(toNum(q.size) >= 1)) {
+      errors.push('TurboSniper: rpc.quorum.size must be ≥ 1');
+    }
+    if (!(toNum(q.require) >= 1 && toNum(q.require) <= toNum(q.size))) {
+      errors.push('TurboSniper: rpc.quorum.require must be between 1 and quorum.size');
+    }
+    if (!(toNum(cfg.rpc.blockhashTtlMs) > 0)) {
+      errors.push('TurboSniper: rpc.blockhashTtlMs must be > 0');
+    }
+  }
+
+  // ---------------------------
   // DEX prefs already covered above
   // ---------------------------
   if (cfg.tpLadder !== undefined && cfg.tpLadder !== null && cfg.tpLadder !== "") {
@@ -1428,7 +1463,6 @@ function validateTurboSniper(cfg = {}) {
 
   return errors;
 }
-
 
 
 module.exports = validateTurboSniper;
