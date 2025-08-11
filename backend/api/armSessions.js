@@ -58,7 +58,8 @@ function preview(data, len = 120) {
 
 router.post("/arm", requireAuth, check2FA, async (req, res) => {
   /* ───── 1. Input validation ───── */
-  console.log("🟢 /arm hit → body:", req.body);
+  // Log invocation without echoing sensitive body contents
+  console.log("🟢 /arm hit", { walletId: req.body && req.body.walletId });
   const {
     walletId,
     passphrase,
@@ -142,24 +143,16 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   const isBase58PK = !!pkStringForDetect && !pkStringForDetect.includes(":");
   const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK;
 
-  // Emit verbose debug logs about migration decisions for troubleshooting
-  console.log("🔍 arm debug:", {
+  // Emit debug information without leaking key material.  Only high level
+  // flags are logged here; pkPreview has been removed to avoid exposing
+  // portions of private keys.
+  console.log("🔍 arm debug", {
     walletId,
     isLegacyString,
     isLegacyPK,
     isBase58PK,
     isProtected: wallet.isProtected,
     pkType: Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal,
-    pkPreview: (() => {
-      if (!pkVal) return pkVal;
-      if (Buffer.isBuffer(pkVal)) {
-        const str = pkVal.toString();
-        return str.slice(0, 10) + '…(' + str.length + ')';
-      }
-      if (typeof pkVal === 'string') return pkVal.slice(0, 10) + '…(' + pkVal.length + ')';
-      if (typeof pkVal === 'object' && pkVal.ct) return '[legacy object]';
-      return '[unknown]';
-    })(),
   });
 
   // ───── 3. Migration path ─────
@@ -178,18 +171,15 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         console.log("🔑 Decrypting legacy blob…");
         pkBuf = legacy.decrypt(blob, { aad });
       } else if (!wallet.isProtected || isBase58PK) {
-        // Decode a base58-encoded private key.  Accept both Buffers and strings.
+        // Decode a base58‑encoded private key.  Accept both Buffers and strings.
         const raw = (() => {
           if (!pkVal) return null;
           if (Buffer.isBuffer(pkVal)) return pkVal.toString();
           if (typeof pkVal === 'string') return pkVal;
           return null;
         })();
-        console.log(
-          "🔑 Decoding base58 privateKey…",
-          Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal,
-          raw ? raw.slice(0, 8) + "…" : raw
-        );
+        // Log without printing any portion of the raw key
+        console.log("🔑 Decoding base58 privateKey…", Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal);
         if (!raw || typeof raw !== 'string') {
           throw new Error("Unsupported unprotected wallet format");
         }
@@ -404,7 +394,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
  *   { ok: true, walletId, label, migrated }
  */
 router.post("/setup-protection", requireAuth, async (req, res) => {
-  console.log("🔐 /setup-protection called → req.body:", req.body);
+  // Do not log full request bodies; only log the walletId to avoid leaking passphrases
+  console.log("🔐 /setup-protection called", { walletId: req.body && req.body.walletId });
   const {
     walletId,
     passphrase,
@@ -480,8 +471,8 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
   // existing per‑wallet passphrases when applying to all.
   const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK || forceOverwrite;
 
-  // Emit verbose debug logs so we can understand migration decisions.
-  console.log("🔍 setup-protection debug:", {
+  // Emit debug logs without exposing key material.  pkPreview has been removed.
+  console.log("🔍 setup-protection debug", {
     walletId,
     isLegacyString,
     isLegacyPK,
@@ -489,16 +480,6 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     isProtected: wallet.isProtected,
     forceOverwrite,
     pkType: Buffer.isBuffer(pkVal) ? 'Buffer' : typeof pkVal,
-    pkPreview: (() => {
-      if (!pkVal) return pkVal;
-      if (Buffer.isBuffer(pkVal)) {
-        const s = pkVal.toString();
-        return s.slice(0, 10) + '…(' + s.length + ')';
-      }
-      if (typeof pkVal === 'string') return pkVal.slice(0, 10) + '…(' + pkVal.length + ')';
-      if (typeof pkVal === 'object' && pkVal.ct) return '[legacy object]';
-      return '[unknown]';
-    })(),
   });
 
   if (!needsMigration) {
@@ -699,8 +680,8 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
 
 
 router.post("/extend", requireAuth, check2FA, async (req, res) => {
-  // Log incoming request for troubleshooting
-  console.log("🔁 /extend called → body:", req.body);
+  // Log incoming request without echoing sensitive body contents
+  console.log("🔁 /extend called", { walletId: (req.body && req.body.walletId) });
   const { walletId, ttlMinutes } = req.body || {};
   if (!walletId) {
     console.warn("⛔ /extend missing walletId");
@@ -723,8 +704,8 @@ router.post("/extend", requireAuth, check2FA, async (req, res) => {
 
 
 router.post("/disarm", requireAuth, check2FA, async (req, res) => {
-  // Log disarm request to help trace issues
-  console.log("🔻 /disarm called → body:", req.body);
+  // Log disarm request without dumping the full body
+  console.log("🔻 /disarm called", { walletId: (req.body && req.body.walletId) });
   const { walletId } = req.body || {};
   if (!walletId) {
     console.warn("⛔ /disarm missing walletId");
@@ -755,7 +736,8 @@ router.post("/disarm", requireAuth, check2FA, async (req, res) => {
  * behaves as an unprotected legacy wallet.
  */
 router.post("/remove-protection", requireAuth, async (req, res) => {
-  console.log("🔓 /remove-protection called → req.body:", req.body);
+  // Log invocation without echoing the passphrase or full body
+  console.log("🔓 /remove-protection called", { walletId: (req.body && req.body.walletId) });
   const { walletId, passphrase } = req.body || {};
   if (!walletId || passphrase === undefined) {
     console.warn("⛔ Missing walletId or passphrase on remove-protection");
@@ -897,8 +879,8 @@ router.post(
     body("armDefaultMinutes").optional().isInt({ min: 30, max: 720 }),
   ],
   async (req, res) => {
-    // Log incoming toggle request for troubleshooting
-    console.log("⚙️ /require-arm called → body:", req.body);
+    // Log incoming toggle request without dumping the full body
+    console.log("⚙️ /require-arm called", { requireArmToTrade: req.body && req.body.requireArmToTrade, armDefaultMinutes: req.body && req.body.armDefaultMinutes });
     const errors = validationResult(req);
     if (!errors.isEmpty())
       return res.status(400).json({ error: "Invalid params", details: errors.array() });
@@ -1008,7 +990,6 @@ router.post('/setup', async (req, res) => {
 });
 
 module.exports = router;
-
 
 
 

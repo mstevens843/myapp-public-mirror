@@ -26,6 +26,11 @@ const schedulerRoutes = require('./schedulerRoutes');
 const internalRouter = require('./internalJobs'); // 👈 add require here
 const healthRouter = require('./health');
 const requireAuth = require('../middleware/requireAuth');
+
+// Pull the AsyncLocalStorage instance from the Prisma client.  When the
+// RLS pilot flag is enabled this will be a non‑null object.  See
+// backend/prisma/prisma.js for details.
+const { asyncLocalStorage } = require('../prisma/prisma');
 const armEncryptionRouter = require('./armSessions');
 console.log('✅ API router loaded.');
 
@@ -56,6 +61,34 @@ router.use((req, res, next) => {
   }
   console.log('🔒 Protected route, applying requireAuth:', req.path);
   requireAuth(req, res, next);
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// RLS pilot context middleware
+//
+// When the FEATURE_RLS_PILOT flag is enabled we populate an
+// AsyncLocalStorage context with the authenticated user ID on each
+// request.  The Prisma client middleware defined in
+// backend/prisma/prisma.js reads this context and sets
+// `app.user_id` for the duration of every database query.  If the
+// feature flag is disabled or no user is available the request
+// proceeds unchanged.
+router.use((req, res, next) => {
+  try {
+    // Skip when AsyncLocalStorage is not initialised (flag off)
+    if (!asyncLocalStorage) return next();
+    const flag = process.env.FEATURE_RLS_PILOT;
+    if (!flag || !/^(1|true|yes)$/i.test(flag.trim())) return next();
+    // Only run when a user has been authenticated and an ID is present
+    const userId = req.user && req.user.id;
+    if (!userId) return next();
+    // Use run() to establish a context for downstream async tasks
+    asyncLocalStorage.run(userId, () => next());
+  } catch (err) {
+    // If anything goes wrong fail open to avoid blocking the request
+    console.error('RLS pilot middleware error:', err.message);
+    return next();
+  }
 });
 
 // 🧾 Idempotency middleware: after authentication we inspect POST requests

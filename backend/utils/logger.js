@@ -12,46 +12,24 @@
 
 const { getReqId } = require('./requestContext');
 
-// Keys that should be redacted from log metadata to avoid leaking
-// credentials or other sensitive information.  Extend this list as new
-// types of secrets are introduced.
-// NOTE: Merged with excerpt's additional keys (refresh_token, private_key, email, mnemonic, seed)
-const SENSITIVE_KEYS = [
-  'password',
-  'token',
-  'access_token',
-  'refresh_token',
-  'refreshToken',
-  'secret',
-  'privateKey',
-  'private_key',
-  'apiKey',
-  'jwt',
-  'cookies',
-  'email',
-  'mnemonic',
-  'seed',
-];
+// Import the centralised redaction helper.  This allows the list of
+// sensitive keys to be maintained in one place and supports
+// case‑insensitive matching.  Any new secrets added to
+// utils/redact.js will automatically be picked up here without
+// modifying this file.
+const { redactByKeys } = require('../utils/redact');
 
 /**
- * Recursively redact sensitive fields from an object.  Arrays and nested
- * objects are traversed.  Primitives are returned as-is.  When a
- * sensitive key is encountered its value is replaced with
- * "[REDACTED]".
+ * Wrapper that delegates to the shared redaction helper.  It exists to
+ * preserve the original function signature (one argument) while
+ * providing redaction that respects the unified list of sensitive
+ * fields defined in utils/redact.js.  See that module for details.
  *
- * @param {any} value
- * @returns {any}
+ * @param {any} value Metadata object to sanitise
+ * @returns {any} Sanitised copy of the value
  */
 function redact(value) {
-  if (Array.isArray(value)) return value.map(redact);
-  if (value && typeof value === 'object') {
-    const output = {};
-    for (const [k, v] of Object.entries(value)) {
-      output[k] = SENSITIVE_KEYS.includes(k) ? '[REDACTED]' : redact(v);
-    }
-    return output;
-  }
-  return value;
+  return redactByKeys(value);
 }
 
 /**
