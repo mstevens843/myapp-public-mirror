@@ -1,3 +1,4 @@
+
 /**
  * index.js - Dual-mode bot controller: CLI launcher or Express + WebSocket server.
  *
@@ -45,6 +46,7 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const { monitorEventLoopDelay } = require('perf_hooks'); // ← added: for event-loop delay shedder
 const { spawn } = require('child_process');
 const strategies = require('./services/strategies');
 const loadKeypair = require('./utils/wallet');
@@ -63,6 +65,7 @@ const { startWatchdog } = require('./services/utils/strategy_utils/strategyWatch
 const { injectBroadcast } = require('./services/strategies/logging/strategyLogger');
 require('./loadEnv');
 const { startBackgroundJobs } = require('./services/backgroundJobs');
+const { csrfProtection } = require('./middleware/csrf'); // ← added: CSRF middleware (double-submit)
 
 // ----------------------------------------------------------------------------
 // Global process‑level error handling
@@ -168,6 +171,10 @@ if (modeFromCLI) {
   // Server hardening: remove X-Powered-By header and apply security middleware.
   app.disable('x-powered-by');
 
+  // IMPORTANT when behind a reverse proxy / CDN: trust proxy so rate‑limiters
+  // and IP checks see the real client IP instead of the proxy’s address.
+  app.set('trust proxy', 1); // ← added
+
   // Assign a unique ID to each request for log correlation.
   app.use(requestId);
 
@@ -191,12 +198,48 @@ if (modeFromCLI) {
   });
   app.use(globalLimiter);
 
+  // EXTRA auth limiter: slows brute force & enumeration on login/refresh/etc.
+  app.use('/api/auth', authLimiter); // ← added
+
   const PORT = process.env.PORT || 5001;
 
   let currentModeProcess = null; // Track current running strategy (if spawned via API)
 
   // Required to read cookies like access_token from incoming requests
   app.use(cookieParser());
+
+  // -------------------------------------------------------------------------
+  // DDoS GUARD RAILS (added):
+  //
+  // (1) Inflight shedder — when concurrent requests exceed MAX_INFLIGHT we
+  //     return 503 to shed load and preserve latency for healthy clients.
+  //     Tune with DDOS_MAX_INFLIGHT (default 1500).
+  let inflight = 0;
+  const MAX_INFLIGHT = Number(process.env.DDOS_MAX_INFLIGHT || 1500);
+  app.use((req, res, next) => {
+    inflight++;
+    res.on('finish', () => { inflight--; });
+    if (inflight > MAX_INFLIGHT) {
+      return res.status(503).json({ error: 'SERVER_BUSY' });
+    }
+    next();
+  });
+  //
+  // (2) Event‑loop delay shedder — if p95 event‑loop delay rises above a
+  //     threshold (CPU/IO pressure) we temporarily shed new requests.
+  //     Tune with DDOS_ELD_P95_MS (default 200ms).
+  let eld;
+  try { eld = monitorEventLoopDelay({ resolution: 20 }); eld.enable(); } catch {}
+  const ELD_P95_MS = Number(process.env.DDOS_ELD_P95_MS || 200);
+  app.use((req, res, next) => {
+    if (eld) {
+      const p95ms = eld.percentile(95) / 1e6;
+      if (p95ms > ELD_P95_MS) {
+        return res.status(503).json({ error: 'SERVER_BUSY' });
+      }
+    }
+    next();
+  });
 
   // -------------------------------------------------------------------------
   // Metrics middleware – record timing and errors for every request.  Only
@@ -215,6 +258,9 @@ if (modeFromCLI) {
       express.json()(req, res, next);
     }
   });
+
+  // CSRF protection (double‑submit cookie) for unsafe methods
+  app.use(csrfProtection); // ← added
 
   // -------------------------------------------------------------------------
   // Liveness & readiness probes.  These endpoints allow external monitors
@@ -271,6 +317,10 @@ if (modeFromCLI) {
   let wsPingInterval;
   const wsHealth = { connections: 0, disconnections: 0 };
 
+  // Minimal GS origin allow‑list for WS (aligned with HTTP CORS origins)
+  const ALLOW_ORIGINS = (process.env.CORS_ORIGINS || process.env.DEV_CORS_ORIGIN || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
   // Wrap the graceful shutdown logic to clear heartbeat interval
   function gracefulExit() {
     console.log('👋  Graceful shutdown…');
@@ -312,7 +362,14 @@ if (modeFromCLI) {
     }
   });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
+    // Reject WS from disallowed origins (same allow‑list as HTTP CORS)
+    const origin = (req.headers.origin || '').trim();
+    if (ALLOW_ORIGINS.length && origin && !ALLOW_ORIGINS.includes(origin)) {
+      try { ws.close(1008, 'origin not allowed'); } catch {}
+      return;
+    }
+
     ws.isAlive = true;
     wsHealth.connections++;
     clients.add(ws);

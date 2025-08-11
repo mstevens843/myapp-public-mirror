@@ -1,3 +1,4 @@
+
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
@@ -23,7 +24,7 @@ const { Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
 
 // Validation, CSRF and auth cookie helpers
 const validate = require("../middleware/validate");
-const { generateCsrfToken } = require("../middleware/csrf");
+const { generateCsrfToken, setCsrfCookie } = require("../middleware/csrf"); // ← added setCsrfCookie
 const { loginSchema, refreshSchema } = require("./schemas/auth.schema");
 const {
   setAccessCookie,
@@ -222,13 +223,13 @@ router.post("/generate-vault", async (req, res) => {
       },
     });
 
-    // Set cookie
-    res.cookie("access_token", accessToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 1000 * 60 * 60 * 24 * 365, // 1 year
-      sameSite: "Lax",
-    });
+    // Set cookies (helpers with __Host- prefix & flags) + CSRF
+    setAccessCookie(res, accessToken); // ← changed
+    setRefreshCookie(res, refreshToken); // ← changed
+    {
+      const csrfToken = generateCsrfToken();
+      setCsrfCookie(res, csrfToken); // ← added
+    }
 
     res.status(201).json({
       accessToken,
@@ -401,13 +402,13 @@ router.post("/check-user", async (req, res) => {
       data: { token: refreshToken, userId: user.id }
     });
 
-    // 4. set cookie
-    res.cookie("access_token", accessToken, {
-      httpOnly : true,
-      secure   : process.env.NODE_ENV === "production",
-      maxAge   : 1000 * 60 * 60 * 24 * 365,
-      sameSite : "Lax",
-    });
+    // 4. set cookie (helpers + CSRF)  ← changed
+    setAccessCookie(res, accessToken);
+    setRefreshCookie(res, refreshToken);
+    {
+      const csrfToken = generateCsrfToken();
+      setCsrfCookie(res, csrfToken);
+    }
 
     // 5. success payload
     res.json({
@@ -794,11 +795,11 @@ if (error) {
      /* 4️⃣  🔥 seed portfolio tables (initial net-worth = 0) */
      const now = Date.now();
      const today = new Date(now).toISOString().slice(0, 10);      // YYYY-MM-DD
-    
+
      await prisma.portfolioTracker.create({
        data: { userId: user.id, startTs: now, lastMonthlyTs: now }
      });
-    
+
      await prisma.netWorthHistory.create({
        data: { userId: user.id, ts: now, date: today, value: 0, minute: new Date(now).toISOString().slice(0, 16) }
      });
@@ -817,12 +818,13 @@ const refreshToken = jwt.sign({ id: transaction.user.id }, JWT_SECRET, { expires
 await prisma.refreshToken.create({
   data: { token: refreshToken, userId: transaction.user.id }
 });
-res.cookie("access_token", accessToken, {
-  httpOnly : true,
-  secure   : process.env.NODE_ENV === "production",
-  maxAge   : 1000 * 60 * 60 * 24 * 7,
-  sameSite : "Lax",
-});
+// Set cookies via helpers + CSRF (← changed)
+setAccessCookie(res, accessToken);
+setRefreshCookie(res, refreshToken);
+{
+  const csrfToken = generateCsrfToken();
+  setCsrfCookie(res, csrfToken);
+}
 res.json({
   accessToken,
   refreshToken,
@@ -954,18 +956,15 @@ if (!data.user.email_confirmed_at) {
       where: { userId: user.id },
     });
 
-    // Set cookies for access and refresh tokens
+    // Set cookies for access and refresh tokens (helpers)
     setAccessCookie(res, accessToken);
     setRefreshCookie(res, refreshToken);
 
-    // Generate and set a CSRF token cookie using double submit pattern
-    const csrfToken = generateCsrfToken();
-    res.cookie('csrf_token', csrfToken, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Lax',
-      maxAge: REFRESH_TOKEN_TTL_MS,
-    });
+    // Generate and set a CSRF token cookie using double submit pattern (helper)
+    {
+      const csrfToken = generateCsrfToken();
+      setCsrfCookie(res, csrfToken);
+    }
 
     // Return tokens and basic user info in response (for non‑browser clients)
     res.json({
@@ -991,17 +990,9 @@ router.post("/logout", authenticate, async (req, res) => {
       where: { userId },
     });
 
-  res.clearCookie("access_token", {
-  httpOnly: true,
-  secure  : process.env.NODE_ENV === "production",
-  sameSite: "Lax",
-});
-res.clearCookie("refresh_token", {
-  httpOnly: true,
-  secure  : process.env.NODE_ENV === "production",
-  sameSite: "Lax",
-});
-res.json({ message: "Successfully logged out" });
+  // Clear cookies via helper (access/refresh + csrf)
+  clearAuthCookies(res);
+  res.json({ message: "Successfully logged out" });
   } catch (err) {
     console.error("Logout error:", err);
     res.status(500).json({ error: "Failed to log out" });
@@ -1094,7 +1085,6 @@ router.post("/reset-password", async (req, res) => {
 
 
 
-
 router.post("/verify-2fa-login", async (req, res) => {
   const { userId, token } = req.body;
 
@@ -1158,12 +1148,13 @@ router.post("/verify-2fa-login", async (req, res) => {
     data: { token: refreshToken, userId }
   });
 
-  res.cookie("access_token", accessToken, {
-    httpOnly : true,
-    secure   : process.env.NODE_ENV === "production",
-    maxAge   : 1000 * 60 * 60 * 24 * 7,
-    sameSite : "Lax"
-  });
+  // Set cookies via helpers + CSRF
+  setAccessCookie(res, accessToken);
+  setRefreshCookie(res, refreshToken);
+  {
+    const csrfToken = generateCsrfToken();
+    setCsrfCookie(res, csrfToken);
+  }
 
   // ✅ ⬇⬇ Return new toggles to frontend
   res.json({
@@ -1178,11 +1169,10 @@ router.post("/verify-2fa-login", async (req, res) => {
 
 
 
-
 router.post("/refresh", validate({ body: refreshSchema }), async (req, res) => {
   // Accept refresh tokens either from the body or from the cookie for convenience
   const tokenFromBody = req.body.refreshToken;
-  const tokenFromCookie = req.cookies && req.cookies["refresh_token"];
+  const tokenFromCookie = (req.cookies && (req.cookies["__Host-refresh_token"] || req.cookies["refresh_token"])) || null; // ← added __Host fallback
   const oldToken = tokenFromBody || tokenFromCookie;
 
   if (!oldToken) {
@@ -1216,13 +1206,10 @@ router.post("/refresh", validate({ body: refreshSchema }), async (req, res) => {
     setRefreshCookie(res, newRefreshToken);
 
     // Rotate CSRF token as well
-    const csrfToken = generateCsrfToken();
-    res.cookie('csrf_token', csrfToken, {
-      httpOnly: false,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Lax',
-      maxAge: REFRESH_TOKEN_TTL_MS,
-    });
+    {
+      const csrfToken = generateCsrfToken();
+      setCsrfCookie(res, csrfToken);
+    }
 
     return res.json({ accessToken: newAccessToken, refreshToken: newRefreshToken });
   } catch (err) {
@@ -1284,7 +1271,6 @@ router.post("/wallet/generate", requireAuth, async (req, res) => {
     return res.status(500).json({ error: "Failed to generate wallet." });
   }
 });
-
 
 
 
@@ -1567,8 +1553,8 @@ router.get("/wallet/active", authenticate, async (req, res) => {
 //  POST /auth/convert-supabase
 // ─────────────────────────────────────────────
 router.post("/convert-supabase", async (req, res) => {
-  const crypto = require("node:crypto").webcrypto;
-if (!globalThis.crypto) globalThis.crypto = crypto;
+  const cryptoWeb = require("node:crypto").webcrypto;
+  if (!globalThis.crypto) globalThis.crypto = cryptoWeb;
   const { supabaseToken } = req.body;
   if (!supabaseToken) {
     console.error("🟥 No supabaseToken provided in request body");
@@ -1634,15 +1620,15 @@ if (!globalThis.crypto) globalThis.crypto = crypto;
 
   console.log("✅ Local user found:", localUser.id, "| type:", localUser.type);
 
-  const jwt = require("jsonwebtoken");
+  const jwtLib = require("jsonwebtoken");
 
-  const accessToken = jwt.sign(
+  const accessToken = jwtLib.sign(
     { id: localUser.id, type: localUser.type || "web" },
     process.env.JWT_SECRET,
     { expiresIn: "7d" }
   );
 
-  const refreshToken = jwt.sign(
+  const refreshToken = jwtLib.sign(
     { id: localUser.id },
     process.env.JWT_SECRET,
     { expiresIn: "30d" }
@@ -1656,14 +1642,13 @@ if (!globalThis.crypto) globalThis.crypto = crypto;
 
   console.log("📦 Saved refresh token to DB");
 
-  res.cookie("access_token", accessToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 1000 * 60 * 60 * 24 * 7,
-    sameSite: "Lax",
-  });
-
-  console.log("🍪 Set access token cookie");
+  // Set cookies via helpers + CSRF
+  setAccessCookie(res, accessToken);
+  setRefreshCookie(res, refreshToken);
+  {
+    const csrfToken = generateCsrfToken();
+    setCsrfCookie(res, csrfToken);
+  }
 
   res.json({
     accessToken,

@@ -1,27 +1,25 @@
-// Use relative requests when no explicit API base is configured.  If
-// VITE_API_BASE_URL is undefined (such as during local development with
-// Vite proxy), default to an empty string so fetch will resolve
-// relative to the current origin.  This avoids CORS issues where
-// requests would otherwise be made to http://localhost:5001 directly.
-const BASE = import.meta.env.VITE_API_BASE_URL || "";
-export async function authFetch(url, options = {}) {
-  const token = localStorage.getItem("accessToken") || sessionStorage.getItem("accessToken");
+/**
+ * Fetch helper that relies on HttpOnly cookies for auth.
+ * Adds X-CSRF-Token header from csrf_token cookie on unsafe methods.
+ */
+const BASE = import.meta?.env?.VITE_API_BASE_URL || "";
 
-  // ⛔ No token? Skip making the request
-  if (!token) {
-    console.log("🚫 No access token found, skipping fetch to:", url);
-    return null;
-  }
-
-  options.headers = {
-    ...(options.headers || {}),
-    Authorization: `Bearer ${token}`,
-    ...((options.method && options.method !== "GET") && { "Content-Type": "application/json" }),
-  };
-
-  return fetch(url, options);
+function getCookie(name) {
+  return document.cookie.split("; ").find(r => r.startsWith(name + "="))?.split("=")[1];
 }
 
+export async function authFetch(url, options = {}) {
+  const opts = { credentials: "include", ...options };
+  const method = (opts.method || "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
+    const csrf = getCookie("csrf_token");
+    if (csrf) {
+      opts.headers = { ...(opts.headers || {}), "X-CSRF-Token": csrf, "Content-Type": "application/json" };
+    }
+  }
+  const res = await fetch(`${BASE}${url}`, opts);
+  return res;
+}
 
 /**
  * 🔐 Fetch logged-in user's profile & session info

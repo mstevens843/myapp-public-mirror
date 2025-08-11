@@ -57,90 +57,113 @@ async function getWallet(userId, walletLabel) {
 
 
 
+/**********************************************************************
+ * /positions
+ *
+ * Default behavior (no scope): ACTIVE WALLET ONLY (preserved).
+ * New: pass ?scope=all to aggregate across ALL user wallets.
+ *
+ * Also fixes: trades are now filtered to the wallet(s) considered
+ * to avoid mixing PnL from other wallets.
+ *********************************************************************/
 router.get("/positions", async (req, res) => {
   try {
     const userId = req.query.userId;
     if (!userId) return res.status(400).json({ error: "Missing userId" });
 
-    const active = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { activeWalletId: true }
-    });
+    const scopeAll = String(req.query.scope || "").toLowerCase() === "all";
 
-    let walletFilter = {};
-    if (req.query.walletLabel) {
-      walletFilter.label = req.query.walletLabel;
-    } else if (active?.activeWalletId) {
-      walletFilter.id = active.activeWalletId;
+    const solPrice = await getCachedPrice(SOL_MINT, { readOnly: true });
+
+    // Collect wallet set
+    let wallets = [];
+    if (scopeAll) {
+      wallets = await prisma.wallet.findMany({
+        where: { userId },
+        select: { id: true, label: true, publicKey: true }
+      });
+      if (!wallets.length) return res.status(404).json({ error: "No wallet found for user." });
+    } else {
+      const active = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { activeWalletId: true }
+      });
+
+      let where = { userId };
+      if (req.query.walletLabel) where["label"] = req.query.walletLabel;
+      else if (active?.activeWalletId) where["id"] = active.activeWalletId;
+
+      const one = await prisma.wallet.findFirst({
+        where,
+        select: { id: true, label: true, publicKey: true }
+      });
+      if (!one) return res.status(404).json({ error: "No wallet found for user." });
+      wallets = [one];
     }
 
-    const wallet = await prisma.wallet.findFirst({
-      where: { userId, ...walletFilter },
-    });
-    if (!wallet)
-      return res.status(404).json({ error: "No wallet found for user." });
+    const walletIds = wallets.map(w => w.id);
 
-    const connWallet = { publicKey: new PublicKey(wallet.publicKey) };
-    const tokenAccounts = await getTokenAccountsAndInfo(connWallet.publicKey);
-
+    // Fetch trades ONLY for these walletIds (fixes mixed-wallet PnL)
     const allRows = await prisma.trade.findMany({
-      where: { wallet: { userId } },
+      where: { walletId: { in: walletIds } },
       orderBy: { timestamp: "asc" },
     });
 
     const openRows = allRows.filter(r =>
-      BigInt(r.closedOutAmount ?? 0) < BigInt(r.outAmount ?? 0)
+      BigInt(r.closedOutAmount ?? 0n) < BigInt(r.outAmount ?? 0n)
     );
 
-    const solBalance = await getWalletBalance(connWallet);
-    const solPrice = await getCachedPrice(SOL_MINT, { readOnly: true });
+    // Pull token accounts & SOL balances per wallet, then aggregate
+    const positionsMap = new Map(); // mint -> { amount, name }
+    let totalSol = 0;
+    let totalUsdc = 0;
 
-    // const settings = loadSettings();
-    // const userSettings = settings[wallet.label] || {};
-const tpSlRules = await prisma.tpSlRule.findMany({
-  where: { userId, walletId: wallet.id, status: "active" },
-});
-    const userSettings = {};
-    tpSlRules.forEach(rule => {
-      userSettings[rule.mint] = {
-        tp: rule.tp,
-        sl: rule.sl,
-        enabled: rule.enabled,
-        entryPrice: rule.entryPrice,
-      };
-    });
-    
+    for (const w of wallets) {
+      const connWallet = { publicKey: new PublicKey(w.publicKey) };
+      const tokenAccounts = await getTokenAccountsAndInfo(connWallet.publicKey);
+      const solBalance = await getWalletBalance(connWallet);
+      totalSol += solBalance;
+
+      // USDC
+      const usdcAcc = tokenAccounts.find(
+        t => t.mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      );
+      if (usdcAcc) totalUsdc += usdcAcc.amount * 1;
+
+      for (const { mint, amount, name } of tokenAccounts) {
+        if (STABLES.has(mint) || amount < 1e-6) continue;
+        const cur = positionsMap.get(mint) || { amount: 0, name: name || null };
+        cur.amount += amount;
+        if (!cur.name && name) cur.name = name;
+        positionsMap.set(mint, cur);
+      }
+    }
 
     const positions = [];
-
-    for (const { mint, name, amount } of tokenAccounts) {
-      if (STABLES.has(mint) || amount < 1e-6) continue;
-
+    // Build positions array with weighted entries/PNL using openRows
+    for (const [mint, agg] of positionsMap.entries()) {
       const matches = openRows.filter(r => r.mint === mint);
+      const totalTokReal = matches.reduce(
+        (s, r) => s + Number(r.outAmount) / 10 ** (r.decimals ?? 0), 0
+      );
       const totalCostSOL = matches.reduce(
         (s, r) => s + Number(r.inAmount) / 1e9, 0
       );
-      const totalTokReal = matches.reduce(
-        (s, r) => s + Number(r.outAmount) / 10 ** r.decimals, 0
-      );
-      const weightedEntry = totalTokReal
-        ? +(totalCostSOL / totalTokReal).toFixed(9)
-        : null;
-      const totalCostUSD = matches.reduce(
-        (s, r) => s + (Number(r.outAmount) / 10 ** r.decimals) * r.entryPriceUSD, 0
-      );
-      const entryPriceUSD = totalTokReal
-        ? +(totalCostUSD / totalTokReal).toFixed(6)
-        : null;
+      const weightedEntry = totalTokReal ? +(totalCostSOL / totalTokReal).toFixed(9) : null;
 
-const price = await getTokenPrice(userId, mint);
-      const valueUSD = +(amount * price).toFixed(2);
-      const tpSl = userSettings[mint] || null;
+      const totalCostUSD = matches.reduce(
+        (s, r) => s + (Number(r.outAmount) / 10 ** (r.decimals ?? 0)) * (r.entryPriceUSD ?? 0), 0
+      );
+      const entryPriceUSD = totalTokReal ? +(totalCostUSD / totalTokReal).toFixed(6) : null;
+
+      const price = await getTokenPrice(userId, mint);
+      const cleanName = (agg.name || "Unknown").replace(/[^\x20-\x7E]/g, "");
+      const valueUSD = +(agg.amount * price).toFixed(2);
 
       positions.push({
         mint,
-        name: name?.replace(/[^\x20-\x7E]/g, "") || "Unknown",
-        amount,
+        name: cleanName,
+        amount: agg.amount,
         price,
         valueUSD,
         valueSOL: +(valueUSD / solPrice).toFixed(4),
@@ -150,11 +173,35 @@ const price = await getTokenPrice(userId, mint);
         strategy: matches[0]?.strategy ?? "manual",
         entries: matches.length,
         timeOpen: matches[0] ? new Date(matches[0].timestamp).toLocaleString() : null,
-        tpSl: tpSl ? { tp: tpSl.tp, sl: tpSl.sl, enabled: tpSl.enabled !== false } : null,
+        tpSl: null, // populated below from per-wallet rules if needed (complex across wallets)
         url: `https://birdeye.so/token/${mint}`,
       });
     }
 
+    // Populate TP/SL by wallet rules only when single wallet scope (preserve original behavior)
+    if (!scopeAll) {
+      const w = wallets[0];
+      const tpSlRules = await prisma.tpSlRule.findMany({
+        where: { userId, walletId: w.id, status: "active" },
+      });
+      const userSettings = {};
+      tpSlRules.forEach(rule => {
+        userSettings[rule.mint] = {
+          tp: rule.tp,
+          sl: rule.sl,
+          enabled: rule.enabled,
+          entryPrice: rule.entryPrice,
+        };
+      });
+      for (const p of positions) {
+        const tpSl = userSettings[p.mint];
+        if (tpSl) {
+          p.tpSl = { tp: tpSl.tp, sl: tpSl.sl, enabled: tpSl.enabled !== false };
+        }
+      }
+    }
+
+    // Ensure tokens with openRows but no current holding are included
     const seen = new Set(positions.map(p => p.mint));
     for (const r of openRows) {
       if (seen.has(r.mint) || STABLES.has(r.mint)) continue;
@@ -171,17 +218,16 @@ const price = await getTokenPrice(userId, mint);
       });
     }
 
-    const usdcAcc = tokenAccounts.find(
-      t => t.mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-    );
-    const usdcVal = usdcAcc ? usdcAcc.amount * 1 : 0;
-    const solVal = solBalance * solPrice;
+    const solVal = totalSol * solPrice;
+    const usdcVal = totalUsdc;
 
     res.json({
+      scope: scopeAll ? "all" : "active",
+      walletCount: wallets.length,
       netWorth: +(solVal + usdcVal +
         positions.reduce((s, t) => s + t.valueUSD, 0)).toFixed(2),
-      sol: { amount: solBalance, price: solPrice, valueUSD: solVal },
-      usdc: usdcAcc ? { amount: usdcAcc.amount, valueUSD: usdcVal } : null,
+      sol: { amount: totalSol, price: solPrice, valueUSD: solVal },
+      usdc: { amount: totalUsdc, valueUSD: usdcVal },
       positions
     });
   } catch (err) {
@@ -190,42 +236,6 @@ const price = await getTokenPrice(userId, mint);
   }
 });
 
-
-router.post("/manual/buy", async (req, res) => {
-  try {
-    const {
-      mint,
-      amountInUSDC,
-      amountInSOL,
-      walletLabel,
-      walletId,
-      slippage,
-      force,
-      strategy,
-      skipLog
-    } = req.body;
-
-const result = await performManualBuy({
-  amountInSOL,
-  amountInUSDC,
-  mint,
-  userId: req.user.id,
-  walletId: wallet.id,
-  walletLabel,
-  slippage,
-  strategy,
-  tp,
-  sl,
-  tpPercent,
-  slPercent
-}, req.headers.authorization);
-
-    res.json({ success: true, result });
-  } catch (err) {
-    console.error("❌ Internal /manual/buy failed:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
 
 
 

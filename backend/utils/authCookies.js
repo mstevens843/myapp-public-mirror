@@ -4,10 +4,29 @@
  * adjust TTLs or cookie names from a single place. Cookies are set with
  * httpOnly and sameSite=Lax for CSRF protection. The `secure` flag is set
  * based on NODE_ENV so that cookies are sent over HTTPS in production.
+ *
+ * Excerpt merge: we also set __Host- prefixed cookies (when possible) to
+ * harden against cookie fixation and ensure path=/, secure, and no Domain.
+ * Legacy cookie names are preserved for backward compatibility.
  */
 
 const ACCESS_TOKEN_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+// Centralised cookie bases. We keep legacy Lax for backwards compat while
+// adding hardened __Host- variants with Strict.
+const cookieBaseLegacy = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'Lax',
+};
+
+const cookieBaseHost = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'Strict',
+  path: '/', // required for __Host- prefix
+};
 
 /**
  * Set the short‑lived access token cookie.
@@ -16,10 +35,14 @@ const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
  * @param {string} token
  */
 function setAccessCookie(res, token) {
+  // Legacy cookie (preserved)
   res.cookie('access_token', token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
+    ...cookieBaseLegacy,
+    maxAge: ACCESS_TOKEN_TTL_MS,
+  });
+  // Hardened cookie (new)
+  res.cookie('__Host-access_token', token, {
+    ...cookieBaseHost,
     maxAge: ACCESS_TOKEN_TTL_MS,
   });
 }
@@ -31,10 +54,14 @@ function setAccessCookie(res, token) {
  * @param {string} token
  */
 function setRefreshCookie(res, token) {
+  // Legacy cookie (preserved)
   res.cookie('refresh_token', token, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
+    ...cookieBaseLegacy,
+    maxAge: REFRESH_TOKEN_TTL_MS,
+  });
+  // Hardened cookie (new)
+  res.cookie('__Host-refresh_token', token, {
+    ...cookieBaseHost,
     maxAge: REFRESH_TOKEN_TTL_MS,
   });
 }
@@ -45,22 +72,14 @@ function setRefreshCookie(res, token) {
  * @param {import('express').Response} res
  */
 function clearAuthCookies(res) {
-  res.clearCookie('access_token', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
-  });
-  res.clearCookie('refresh_token', {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
-  });
+  // Clear legacy cookies
+  res.clearCookie('access_token', cookieBaseLegacy);
+  res.clearCookie('refresh_token', cookieBaseLegacy);
+  // Clear hardened cookies
+  res.clearCookie('__Host-access_token', cookieBaseHost);
+  res.clearCookie('__Host-refresh_token', cookieBaseHost);
   // It is safe to clear the CSRF token cookie here as well when logging out.
-  res.clearCookie('csrf_token', {
-    httpOnly: false,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'Lax',
-  });
+  res.clearCookie('csrf_token', { ...cookieBaseLegacy, httpOnly: false });
 }
 
 module.exports = {

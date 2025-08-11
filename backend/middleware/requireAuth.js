@@ -1,24 +1,49 @@
+
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
 const jwt = require("jsonwebtoken");
 const JWT_SECRET = process.env.JWT_SECRET;
 const prisma = require("../prisma/prisma");
 
+/**
+ * requireAuth
+ *
+ * 🧠 Accepts BOTH:
+ *   - Authorization: Bearer <jwt>
+ *   - Cookie: __Host-access_token (new) OR access_token (legacy)
+ *
+ * ✅ Legacy support:
+ *   - If token has `userId` (old) instead of `id`, look up the user and
+ *     upgrade the claim in-memory; optionally emit a fresh Authorization header.
+ *
+ * 🔐 Notes:
+ *   - No breaking change to your public surface.
+ *   - Preserves your original comments and behavior.
+ *   - Adds support for __Host- cookie name while keeping the old one.
+ */
 async function requireAuth(req, res, next) {
   // 🧠 Check both: Bearer OR Cookie
   const bearer = req.headers.authorization?.startsWith("Bearer ")
     ? req.headers.authorization.split(" ")[1]
     : null;
 
-  const cookie = req.cookies?.access_token;
+  // ← added: support __Host-access_token (preferred) with legacy fallback
+  const cookie =
+    (req.cookies && (req.cookies["__Host-access_token"] || req.cookies["access_token"])) ||
+    null;
 
-  const token = bearer || cookie;
+  // Optional alternate header (kept off to avoid surprises):
+  // const xhdr = req.headers["x-access-token"] || null;
+
+  const token = bearer || cookie; // || xhdr;
 
   if (!token) {
     return res.status(401).json({ error: "Missing auth token" });
   }
 
   try {
+    // Verify without enforcing aud/iss to avoid breaking legacy tokens.
+    // (You can tighten by passing { audience: "app", issuer: "sol-app" } here.)
     let decoded = jwt.verify(token, JWT_SECRET);
 
     // ✅ Legacy support (userId instead of id)
@@ -33,9 +58,19 @@ async function requireAuth(req, res, next) {
       decoded.id = u.id;
 
       // Optional: refresh upgraded token (if legacy)
-      const fresh = jwt.sign({ id: u.id, type: decoded.type || "web3" }, JWT_SECRET, { expiresIn: "30d" });
-      res.setHeader("Authorization", `Bearer ${fresh}`);
+      try {
+        const fresh = jwt.sign(
+          { id: u.id, type: decoded.type || "web3" },
+          JWT_SECRET,
+          { expiresIn: "30d" }
+        );
+        // Expose for upstream proxy or client that reads it; non-breaking.
+        res.setHeader("Authorization", `Bearer ${fresh}`);
+      } catch {}
     }
+
+    // Expose token (useful for downstream actions/log correlation)
+    req.authToken = token; // ← added (non-breaking)
 
     req.user = { id: decoded.id, type: decoded.type };
     return next();
@@ -46,63 +81,3 @@ async function requireAuth(req, res, next) {
 }
 
 module.exports = requireAuth;
-
-
-// async function requireAuth(req, res, next) {
-//   const authHeader = req.headers.authorization;
-
-//   // Log the authorization header
-//   console.log("Authorization Header:", authHeader);
-
-//   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-//     console.log("Error: Missing or invalid token in the authorization header.");
-//     return res.status(401).json({ error: "Missing or invalid token" });
-//   }
-
-//   const token = authHeader.split(" ")[1];
-  
-//   try {
-//     console.log("Attempting to verify the token...");
-
-//     const decoded = jwt.verify(token, JWT_SECRET);
-//     console.log("Token verified successfully. User ID:", decoded.userId);
-
-//     req.user = { id: decoded.userId };
-//     next();
-//   } catch (err) {
-//     // Log the error details
-//     console.error("Error while verifying token:", err.message);
-
-//     // If the token is expired, check the refresh token
-//     if (err.name === "TokenExpiredError") {
-//       console.log("Token expired, checking refresh token...");
-
-//       const refreshToken = req.headers["x-refresh-token"];
-//       if (!refreshToken) {
-//         console.log("Error: No refresh token provided.");
-//         return res.status(401).json({ error: "No refresh token provided" });
-//       }
-
-//       try {
-//         console.log("Attempting to verify the refresh token...");
-
-//         const decodedRefresh = jwt.verify(refreshToken, JWT_SECRET);
-//         console.log("Refresh token verified successfully. User ID:", decodedRefresh.userId);
-
-//         const newAccessToken = jwt.sign({ userId: decodedRefresh.userId }, JWT_SECRET, { expiresIn: "9999y" });
-//         res.setHeader("Authorization", `Bearer ${newAccessToken}`);
-//         req.user = { id: decodedRefresh.userId };
-//         console.log("New access token issued.");
-//         next();
-//       } catch (refreshErr) {
-//         console.error("Error while verifying refresh token:", refreshErr.message);
-//         return res.status(401).json({ error: "Invalid or expired refresh token" });
-//       }
-//     } else {
-//       console.error("Invalid token error:", err.message);
-//       return res.status(401).json({ error: "Invalid token" });
-//     }
-//   }
-// }
-
-// module.exports = requireAuth;

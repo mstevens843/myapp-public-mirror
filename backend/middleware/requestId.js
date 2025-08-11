@@ -1,4 +1,3 @@
-const { v4: uuidv4 } = require('uuid');
 
 /**
  * Assigns a unique identifier to each incoming request.  The identifier is
@@ -10,10 +9,10 @@ const { v4: uuidv4 } = require('uuid');
  * @param {import('express').Response} res
  * @param {import('express').NextFunction} next
  */
-function requestId(req, res, next) {
-  const id = uuidv4();
-  req.id = id;
-  res.setHeader('X-Request-Id', id);
+const { v4: uuid } = require("uuid");
+
+function requestId(req, _res, next) {
+  req.id = (req.headers["x-request-id"] || "").toString().trim() || uuid();
   next();
 }
 

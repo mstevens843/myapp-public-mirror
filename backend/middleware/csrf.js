@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const CSRF_COOKIE = "csrf_token";
 
 /**
  * Generate a random CSRF token. We rely on a cryptographically secure
@@ -8,7 +9,7 @@ const crypto = require('crypto');
  * @returns {string}
  */
 function generateCsrfToken() {
-  return crypto.randomBytes(24).toString('hex');
+  return crypto.randomBytes(32).toString("hex");
 }
 
 /**
@@ -23,20 +24,30 @@ function generateCsrfToken() {
  * @param {import('express').Response} res
  * @param {Function} next
  */
+const crypto = require("crypto");
+
+
+function setCsrfCookie(res, token) {
+  res.cookie(CSRF_COOKIE, token, {
+    httpOnly: false,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "Strict",
+    path: "/",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  });
+}
+
 function csrfProtection(req, res, next) {
-  const safeMethods = ['GET', 'HEAD', 'OPTIONS'];
-  if (safeMethods.includes(req.method)) {
-    return next();
-  }
-  const cookieToken = req.cookies && req.cookies['csrf_token'];
-  const headerToken = req.headers['x-csrf-token'];
-  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
-    return next({ status: 403, message: 'Invalid CSRF token' });
+  const method = String(req.method || "").toUpperCase();
+  const unsafe = method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+  if (!unsafe) return next();
+
+  const header = req.get("X-CSRF-Token") || "";
+  const cookie = (req.cookies && req.cookies[CSRF_COOKIE]) || "";
+  if (!header || !cookie || header !== cookie) {
+    return res.status(403).json({ error: "CSRF token invalid or missing" });
   }
   return next();
 }
 
-module.exports = {
-  generateCsrfToken,
-  csrfProtection,
-};
+module.exports = { csrfProtection, generateCsrfToken, setCsrfCookie, CSRF_COOKIE };

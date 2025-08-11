@@ -1,5 +1,3 @@
-const helmet = require('helmet');
-
 /**
  * Configures a set of HTTP security headers using Helmet.  By default we
  * disable the Content Security Policy to avoid breaking existing frontend
@@ -10,23 +8,52 @@ const helmet = require('helmet');
  *
  * @returns {import('express').RequestHandler} Helmet middleware
  */
+/**
+ * Security headers middleware.
+ * Uses Helmet for a strong baseline, with a strict CSP by default.
+ * Set ENABLE_CSP_REPORT_ONLY=1 to switch CSP to report-only during rollout.
+ */
+const helmet = require("helmet");
+
 function securityHeaders() {
-  const reportOnly = process.env.ENABLE_CSP_REPORT_ONLY !== 'false';
+  const isReportOnly = String(process.env.ENABLE_CSP_REPORT_ONLY || '').trim() === '1';
+
   const cspDirectives = {
     defaultSrc: ["'self'"],
-    scriptSrc: ["'self'", "'unsafe-inline'", 'https:'],
-    styleSrc: ["'self'", "'unsafe-inline'", 'https:'],
-    imgSrc: ["'self'", 'data:', 'blob:', '*'],
-    connectSrc: ["'self'", '*'],
-    fontSrc: ["'self'", 'https:'],
-    objectSrc: ["'none'"]
+    baseUri: ["'self'"],
+    objectSrc: ["'none'"],
+    scriptSrc: ["'self'"],
+    styleSrc: ["'self'", "https:", "'unsafe-inline'"], // remove 'unsafe-inline' if not needed
+    imgSrc: ["'self'", "data:", "https:"],
+    fontSrc: ["'self'", "https:", "data:"],
+    connectSrc: ["'self'", "https:"],
+    frameAncestors: ["'none'"],
+    formAction: ["'self'"],
+    upgradeInsecureRequests: [],
   };
-  const cspOptions = { directives: cspDirectives, reportOnly };
-  return helmet({
-    // Always enable CSP.  When reportOnly is true, Helmet will deliver
-    // Content‑Security‑Policy‑Report‑Only headers instead of enforcing them.
-    contentSecurityPolicy: cspOptions,
+
+  const csp = helmet.contentSecurityPolicy({
+    useDefaults: false,
+    directives: cspDirectives,
+    reportOnly: isReportOnly,
   });
+
+  const hsts = helmet.hsts({
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  });
+
+  return [
+    helmet.dnsPrefetchControl({ allow: false }),
+    helmet.frameguard({ action: "deny" }),
+    helmet.noSniff(),
+    helmet.referrerPolicy({ policy: "no-referrer" }),
+    helmet.permittedCrossDomainPolicies({ permittedPolicies: "none" }),
+    helmet.crossOriginResourcePolicy({ policy: "same-site" }),
+    hsts,
+    csp,
+  ];
 }
 
 module.exports = securityHeaders;
