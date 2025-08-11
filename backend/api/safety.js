@@ -18,6 +18,18 @@ const { sendAlert }    = require("../telegram/alerts");
 const requireAuth = require("../middleware/requireAuth");
 const { getUserPreferencesByUserId } = require("../services/userPrefs");
 /* ───────────────────────── helpers ───────────────────────── */
+// ── Pagination helper (idempotent) ───────────────────────────────────────────
+function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
+  const cap  = Number(defaults.cap || 500);
+  let take   = parseInt(req.query?.take ?? defaults.take, 10);
+  let skip   = parseInt(req.query?.skip ?? defaults.skip, 10);
+  if (!Number.isFinite(take) || take <= 0) take = defaults.take;
+  if (!Number.isFinite(skip) || skip <  0) skip = defaults.skip;
+  take = Math.min(Math.max(1, take), cap);
+  skip = Math.max(0, skip);
+  return { take, skip };
+}
+// ─────────────────────────────────────────────────────────────────────────────
 function shortMint(m) { return `${m.slice(0, 4)}…${m.slice(-4)}`; }
 function tsUTC() { return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC"; }
 // function isAppUser(uid) { return uid === "ui" || uid === "web"; }

@@ -38,6 +38,18 @@ const { pauseStrategy } = require('../services/utils/strategy_utils/strategyLaun
 // Import feature flag helper to gate strategy launches
 const { isStrategyEnabled } = require('../config/featureFlags');
 
+// ── Pagination helper (idempotent) ───────────────────────────────────────────
+function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
+  const cap  = Number(defaults.cap || 500);
+  let take   = parseInt(req.query?.take ?? defaults.take, 10);
+  let skip   = parseInt(req.query?.skip ?? defaults.skip, 10);
+  if (!Number.isFinite(take) || take <= 0) take = defaults.take;
+  if (!Number.isFinite(skip) || skip <  0) skip = defaults.skip;
+  take = Math.min(Math.max(1, take), cap);
+  skip = Math.max(0, skip);
+  return { take, skip };
+}
+// ─────────────────────────────────────────────────────────────────────────────
 // Apply auth to all routes in this router
 router.use(requireAuth);
 
@@ -247,6 +259,7 @@ router.post('/start-multi', async (req, res) => {
 
 /* ─────────────────── GET /status (lite)  ───────────────────── */
 router.get('/status', requireAuth, async (req, res) => {
+  const { take, skip } = __getPage(req, { take: 100, cap: 500 });
   try {
     const rows = await prisma.strategyRunStatus.findMany({
       where: { userId: req.user.id },

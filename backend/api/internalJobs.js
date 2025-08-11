@@ -12,6 +12,18 @@ const getTokenName = require("../services/utils/analytics/getTokenName").getToke
 const { performManualBuy, performManualSellByAmount, performManualSell } = require("../services/manualExecutor");
 const { v4: uuid } = require("uuid");
 
+// ── Pagination helper (idempotent) ───────────────────────────────────────────
+function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
+  const cap  = Number(defaults.cap || 500);
+  let take   = parseInt(req.query?.take ?? defaults.take, 10);
+  let skip   = parseInt(req.query?.skip ?? defaults.skip, 10);
+  if (!Number.isFinite(take) || take <= 0) take = defaults.take;
+  if (!Number.isFinite(skip) || skip <  0) skip = defaults.skip;
+  take = Math.min(Math.max(1, take), cap);
+  skip = Math.max(0, skip);
+  return { take, skip };
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 

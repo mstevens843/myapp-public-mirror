@@ -21,6 +21,18 @@ const getTokenMetadata = require("../services/strategies/paid_api/getTokenMetada
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const { Prisma } = require("@prisma/client");
 
+// ── Pagination helper (idempotent) ───────────────────────────────────────────
+function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
+  const cap  = Number(defaults.cap || 500);
+  let take   = parseInt(req.query?.take ?? defaults.take, 10);
+  let skip   = parseInt(req.query?.skip ?? defaults.skip, 10);
+  if (!Number.isFinite(take) || take <= 0) take = defaults.take;
+  if (!Number.isFinite(skip) || skip <  0) skip = defaults.skip;
+  take = Math.min(Math.max(1, take), cap);
+  skip = Math.max(0, skip);
+  return { take, skip };
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Stable-coin mints we ignore in positions
 const STABLES = new Set([
@@ -461,8 +473,36 @@ if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
 router.get("/open", async (req, res) => {
   try {
     console.log(`➡️ API HIT: GET /trades/open for user ${req.user.id}`);
+    const { take, skip } = __getPage(req, { take: 100, cap: 500 });
 
+    // Fetch only OPEN rows from DB and paginate there.
     const rows = await prisma.trade.findMany({
+      where: { wallet: { userId: req.user.id }, exitedAt: null },
+      orderBy: { timestamp: "asc" },
+      take,
+      skip
+    });
+
+    // Ensure only positions with a remaining amount are returned (defensive)
+    const openTrades = rows.filter(trade =>
+      BigInt(trade.outAmount || 0) > BigInt(trade.closedOutAmount || 0)
+    );
+
+    // Convert BigInt to Number for JSON safety
+    const safeTrades = openTrades.map(trade => ({
+      ...trade,
+      inAmount: Number(trade.inAmount),
+      outAmount: Number(trade.outAmount),
+      closedOutAmount: Number(trade.closedOutAmount),
+    }));
+
+    res.json(safeTrades);
+  } catch (err) {
+    console.error("🚨 GET /open error:", err);
+    res.status(500).json({ error: "Failed to fetch open trades." });
+  }
+});
+const rows = await prisma.trade.findMany({
       where: { wallet: { userId: req.user.id } },
       orderBy: { timestamp: "asc" }
     });

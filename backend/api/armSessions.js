@@ -22,6 +22,18 @@ const legacy = require("../middleware/auth/encryption"); // your legacy (iv:tag:
 const bs58 = require("bs58");
 const { encrypt } = require("../middleware/auth/encryption");
 
+// ── Pagination helper (idempotent) ───────────────────────────────────────────
+function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
+  const cap  = Number(defaults.cap || 500);
+  let take   = parseInt(req.query?.take ?? defaults.take, 10);
+  let skip   = parseInt(req.query?.skip ?? defaults.skip, 10);
+  if (!Number.isFinite(take) || take <= 0) take = defaults.take;
+  if (!Number.isFinite(skip) || skip <  0) skip = defaults.skip;
+  take = Math.min(Math.max(1, take), cap);
+  skip = Math.max(0, skip);
+  return { take, skip };
+}
+// ─────────────────────────────────────────────────────────────────────────────
 // helpers
 function ttlClamp(min, def, max, reqVal) {
   const n = Number(reqVal || def);
@@ -996,8 +1008,6 @@ router.post('/setup', async (req, res) => {
 });
 
 module.exports = router;
-
-
 
 
 
