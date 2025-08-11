@@ -53,8 +53,8 @@ const SOL_MINT  = "So11111111111111111111111111111111111111112";
 // breakout mode, the modules below provide stub implementations.  They
 // are optional: unless botCfg.useSignals or botCfg.executionShape are
 // supplied by the UI, they will not impact performance.
-const breakoutSignals = require("./signals/breakout");
-const breakoutRisk    = require("./risk/breakoutPolicy");
+const breakoutSignals = require("./core/signals/breakout");
+const breakoutRisk    = require("./core/risk/breakoutPolicy");
 
 /* ──────────────────────────────────────────────────── */
 module.exports = async function breakoutStrategy(botCfg = {}) {

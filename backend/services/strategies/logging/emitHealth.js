@@ -11,7 +11,7 @@
  * processes.
  */
 
-const { update } = require('../../health/botHealthRegistry');
+const { update } = require('../core/botHealthRegistery');
 
 /**
  * Emit a health update for a given bot. The payload may contain any

@@ -31,8 +31,8 @@ const { getWalletBalance, isAboveMinBalance } = require("../utils");
 // Chad mode is manual by design.  The following modules provide stubs
 // for symmetry with other strategies.  They will only be used if
 // explicitly enabled via cfg.useSignals or cfg.executionShape.
-const chadSignals = require("./signals/chadmode");
-const chadRisk    = require("./risk/chadmodePolicy");
+const chadSignals = require("./core/signals/chadmode");
+const chadRisk    = require("./core/risk/chadmodePolicy");
 
 module.exports = async function chadMode(cfg = {}) {
   const botId = cfg.botId || "manual";

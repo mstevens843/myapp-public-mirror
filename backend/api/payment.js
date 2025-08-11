@@ -23,7 +23,7 @@ const nacl = require('tweetnacl');
 const bs58 = require('bs58');
 
 // ⬇️ NEW: resilient fetch wrapper (timeout + exponential backoff + jitter)
-const retryFetch = require('../services/utils/http/retryFetch');
+const retryFetch = require('../services/retryrefetch');
 
 // Initialise Stripe for card payments
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);

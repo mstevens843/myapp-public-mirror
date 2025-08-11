@@ -1,4 +1,4 @@
-// backend/services/strategies/core/relays/relayClient.js
+// backend/services/strategies/core/relayClient.js
 //
 // RelayClient encapsulates submission of bundles or transactions to one or more
 // private relay endpoints. The relay configuration is driven entirely by the

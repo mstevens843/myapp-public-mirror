@@ -1,4 +1,3 @@
-// backend/services/health/botHealthRegistry.js
 /**
  * In-memory health registry for running bot processes.
  * Thresholds via env (ms): HEALTH_WARN_STALE_MS, HEALTH_ALERT_STALE_MS, HEALTH_WARN_LOOP_MS

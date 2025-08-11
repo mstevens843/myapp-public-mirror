@@ -120,7 +120,7 @@ const QuoteWarmCache  = require("./quoteWarmCache");
 
 // Additional helpers for Turbo enhancements
 const JitoFeeController = require("./jitoFeeController");
-const { directSwap } = require("../../../utils/raydiumDirect");
+const { directSwap } = require("./raydiumDirect");
 const metricsLogger = require("../logging/metrics"); // keep preexisting metrics
 
 // Import new parallel filler (Prompt 5)
@@ -131,7 +131,7 @@ const { passes } = require('./passes');
 const idempotencyStore = require("../../../utils/idempotencyStore"); // existing in your repo (short-TTL cache)
 
 //  NEW core modules added by Prompt 1 (shadow mempool + deterministic idempotency + sizing + probe)
-const RelayClient = require('./relays/relayClient');                 // new abstraction (feature-flag)
+const RelayClient = require('./relayClient');                 // new abstraction (feature-flag)
 const CoreIdemStore = require('./idempotencyStore');                 // crash-safe resume window (disk-backed)
 const { sizeTrade } = require('./liquiditySizer');                   // liquidity-aware sizing
 // const { performProbe } = require('./probeBuyer');                    // micro-buy then scale

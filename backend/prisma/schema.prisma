@@ -47,14 +47,12 @@ model User {
   /// user may have two-factor disabled on login while still enforcing it when
   /// arming a wallet for trades. See `require2faLogin` for the login toggle.
   require2faArm    Boolean   @default(false)
-
   /// When a user opts to use the same pass-phrase for all current and future
   /// wallets this field stores the Argon2id hash of that pass-phrase. When
   /// creating or migrating wallets the backend will fall back to this hash
   /// whenever an individual wallet has no `passphraseHash` set. If null no
   /// global pass-phrase is defined.
   defaultPassphraseHash String?
-
   /// Optional short hint shown to the user for the global wallet pass-phrase.
   /// This is never used for authentication and is purely informational.
   passphraseHint        String?
@@ -76,8 +74,7 @@ model User {
   // trades  Trade[] @relation("UserTrades") 
   savedConfigs SavedConfigs[] 
   armDefaultMinutes  Int      @default(240)    // optional: default 4h
-
-  // ───────────── Auto-Return to Cold Wallet (NEW) ─────────────
+  // ──────────── Auto-Return to Cold Wallet (NEW) ─────────────
   /// Default account-level toggle; per-session can override.
   autoReturnEnabledDefault      Boolean @default(false)
   /// Destination cold wallet pubkey (must be verified before use).
@@ -96,6 +93,7 @@ model User {
   autoReturnUsdcMints           String[]
   /// When the destination pubkey was verified (null if not).
   autoReturnDestVerifiedAt      DateTime?
+  armSessions ArmSession[] 
 }
 
 model Wallet {
@@ -133,7 +131,7 @@ model Wallet {
   limitOrders   LimitOrder[]
   dcaOrders     DcaOrder[]
   scheduledStrategies ScheduledStrategy[]
-
+  armSessions ArmSession[] 
   @@unique([userId, label])
 }
 
@@ -219,11 +217,12 @@ model SavedConfigs {
   id          Int      @id @default(autoincrement())
   /// Owning user (optional)
   userId      Int?
+  isSaved     String? 
   /// Name of the saved configuration
   name        String?
   /// Strategy this config applies to
   strategy    String?
-
+  strategyName String? 
   // -----------------------------------------------------------------------
   // Existing config fields (common to many strategies)
   amountToSpend        Float?
@@ -250,7 +249,6 @@ model SavedConfigs {
   maxMarketCap         Float?
   risk                 Float?
   volumeSpikeMultiplier Float?
-
   // -----------------------------------------------------------------------
   // New general fields shared across multiple strategies
   /// Maximum number of concurrent open trades
@@ -279,7 +277,6 @@ model SavedConfigs {
   pullbackPct          Float?
   /// Number of blocks to ignore before executing a trade (delayed sniper)
   ignoreBlocks         Int?
-
   // -----------------------------------------------------------------------
   // Turbo sniper specific fields
   ghostMode            Boolean?
@@ -306,11 +303,12 @@ model SavedConfigs {
   turboMode            Boolean?
   autoRiskManage       Boolean?
   privateRpcUrl        String?
-
   /// Catch-all field for any additional strategy-specific settings not yet modelled
   extras      Json?
-
   createdAt   DateTime @default(now())
+  trades      Trade[]   @relation("TradeConfig")
+  User User[]
+
 }
 
 

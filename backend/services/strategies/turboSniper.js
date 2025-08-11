@@ -13,7 +13,7 @@
 const { Connection, clusterApiUrl } = require('@solana/web3.js');
 const TradeExecutorTurbo = require('./core/tradeExecutorTurbo');
 const pumpfunListener = require('./pumpfun/listener');
-const airdropSniffer = require('../airdrops/sniffer');
+const airdropSniffer = require('./airdrops/sniffer');
 const { incCounter, observeHistogram } = require('./logging/metrics');
 
 /**

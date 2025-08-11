@@ -48,8 +48,8 @@ const { initTxWatcher }        = require("./core/txTracker");
 // expose asynchronous signal generation and pure risk policies.  They
 // will only be used when enabled via botCfg.useSignals or
 // botCfg.executionShape.
-const scalperSignals = require("./signals/scalper");
-const scalperRisk    = require("./risk/scalperPolicy");
+const scalperSignals = require("./core/signals/scalper");
+const scalperRisk    = require("./core/risk/scalperPolicy");
 
 /* ──────────────────────────────────────────────── */
 

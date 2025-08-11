@@ -23,8 +23,8 @@ import ConfirmEmail from "./components/Auth/ConfirmEmail";
 import Layout from "./Layout";
 import EmailConfirmed from "./components/Auth/EmailConfirmed";
 import { SupabaseSessionProvider } from "./contexts/SupbaseSessionContext";
-import { PrefsProvider } from "./contexts/prefsContext";         // 🔁 FIXED CASING
-import { UserProvider } from "./contexts/UserProvider";          // ✅ your updated context
+import { PrefsProvider } from "./contexts/prefsContext"; 
+import { UserProvider } from "./contexts/UserProvider";      
 import { UserPrefsProvider } from "@/contexts/UserPrefsContext";
 import HistoryPanelRoute from "./components/Tables_Charts/HistoryPanel"; // (unused here?)
 import "./styles/dashboard.css";
@@ -76,26 +76,33 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                   <ErrorBoundary>
                     <Routes>
                       <Route path="/" element={<LandingPage />} />
-                      <Route path="/app" element={<App />} />
-                      <Route path="/wallets" element={<WalletsTab />} />
-                      <Route path="/payments" element={<PaymentsTab />} />
-                      <Route path="/account" element={<MyAccountTab />} />
-                      <Route path="/settings" element={<SettingsPanel />} />
-                      <Route path="/telegram" element={<TelegramTab />} />
-                      <Route path="/watchlist" element={<Watchlist />} />
-                      <Route path="/open-trades" element={<OpenTradesTab />} />
-                      <Route path="/2fa" element={<Verify2FA />} />
-                      <Route path="/forgot" element={<ForgotPassword />} />
-                      <Route path="/reset" element={<ResetPassword />} />
-                      <Route path="/payment-success" element={<PaymentSuccess />} />
-                      <Route path="/payment-cancel" element={<PaymentCancel />} />
-                      <Route path="/confirm-email" element={<ConfirmEmail />} />
-                      <Route path="/terms" element={<TermsOfService />} />
-                      <Route path="/privacy" element={<PrivacyPolicy />} />
-                      <Route path="/email-confirmed" element={<EmailConfirmed />} />
-                      <Route path="/history" element={<HistoryPanelRoute />} />
-                      <Route path="/charts" element={<ChartPanelRoute />} />
-                    </Routes>
+  <Route path="/2fa" element={<Verify2FA />} />
+  <Route path="/forgot" element={<ForgotPassword />} />
+  <Route path="/reset" element={<ResetPassword />} />
+  <Route path="/payment-success" element={<PaymentSuccess />} />
+  <Route path="/payment-cancel" element={<PaymentCancel />} />
+  <Route path="/confirm-email" element={<ConfirmEmail />} />
+  <Route path="/email-confirmed" element={<EmailConfirmed />} />
+  <Route path="/terms" element={<TermsOfService />} />
+  <Route path="/privacy" element={<PrivacyPolicy />} />
+
+  {/* App shell + tabs */}
+  <Route element={<Layout />}>
+    {/* Optional: default to /app when inside the shell */}
+    <Route index element={<App />} />
+    <Route path="app" element={<App />} />
+    <Route path="wallets" element={<WalletsTab />} />
+    <Route path="payments" element={<PaymentsTab />} />
+    <Route path="account" element={<MyAccountTab />} />
+    <Route path="settings" element={<SettingsPanel />} />
+    <Route path="telegram" element={<TelegramTab />} />
+    <Route path="watchlist" element={<Watchlist />} />
+    <Route path="open-trades" element={<OpenTradesTab />} />
+     <Route path="portfolio" element={<ChartPanelRoute/>} />
+    {/* If you actually want a Portfolio tab, add its route: */}
+    {/* <Route path="portfolio" element={<PortfolioTab />} /> */}
+  </Route>
+</Routes>
                     {/* Global Toaster for Sonner */}
                     <Toaster position="top-right" richColors />
                   </ErrorBoundary>

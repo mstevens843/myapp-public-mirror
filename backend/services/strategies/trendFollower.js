@@ -44,8 +44,8 @@ const SOL_MINT  = "So11111111111111111111111111111111111111112";
 // These optional modules provide stubbed signal generation and risk
 // policies for the Trend Follower.  They will only be used when
 // enabled via botCfg.useSignals or botCfg.executionShape.
-const trendSignals = require("./signals/trendFollower");
-const trendRisk    = require("./risk/trendFollowerPolicy");
+const trendSignals = require("./core/signals/trendFollower");
+const trendRisk    = require("./core/risk/trendFollowerPolicy");
 
 module.exports = async function trendFollowerStrategy(botCfg = {}) {
   console.log("🚀 Trend Follower Strategy loaded", botCfg);

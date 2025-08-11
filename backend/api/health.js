@@ -21,12 +21,12 @@ try {
 let rateLimiter;
 try {
   // adjust if your limiter export differs (e.g., { limiter } vs function)
-  rateLimiter = require('../middleware/rateLimiter');
+  rateLimiter = require('../middleware/rateLimit');
 } catch {
   rateLimiter = () => (_req, _res, next) => next();
 }
 
-const { snapshot } = require('../services/strategies/core/botHealthRegistry');
+const { snapshot } = require('../services/strategies/core/botHealthRegistery');
 
 // protect whole router
 router.use(requireAuth);

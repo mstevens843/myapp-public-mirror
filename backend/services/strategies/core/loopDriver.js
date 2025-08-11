@@ -7,7 +7,7 @@
 
 const { lastTickTimestamps } = require('../../utils/strategy_utils/activeStrategyTracker');
 const { emitHealth } = require('../logging/emitHealth');
-const metrics = require('../../utils/metrics');
+const metrics = require('../core/metrics');
 
 /**
  * Generic driver for running a strategy loop on a timer.

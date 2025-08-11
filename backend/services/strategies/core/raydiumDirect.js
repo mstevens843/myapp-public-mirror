@@ -21,7 +21,7 @@
  *   the router path.
  */
 
-const { getSwapQuote, executeSwapTurbo } = require('./swap');
+const { getSwapQuote, executeSwapTurbo } = require('../../../utils/swap');
 
 /**
  * Perform a direct Raydium swap. A quote is fetched with only the

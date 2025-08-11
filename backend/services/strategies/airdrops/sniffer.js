@@ -11,7 +11,7 @@
 
 const { Connection, PublicKey } = require('@solana/web3.js');
 const fetch = require('node-fetch');
-const { incCounter, observeHistogram } = require('../strategies/logging/metrics');
+const { incCounter, observeHistogram } = require('../logging/metrics');
 
 // Token Program ID for SPL tokens
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');

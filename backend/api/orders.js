@@ -21,7 +21,7 @@ const { runJob } = require("../services/jobs/jobRunner");
 // Additional middleware for validation and CSRF protection
 const validate = require("../middleware/validate");
 const { csrfProtection } = require("../middleware/csrf");
-const { limitOrderSchema, dcaOrderSchema } = require("./schemas/orders.schema");
+const { limitOrderSchema, dcaOrderSchema } = require("./schemas/order.schema");
 
 
 function log(...msg)  { console.log(new Date().toISOString(), "[orders]", ...msg); }

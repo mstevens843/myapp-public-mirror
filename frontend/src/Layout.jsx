@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import logo from "@/assets/solpulse-logo.png";
 import AccountMenu from "@/components/Dashboard/Account/AccountMenu";
-import WhatsNew from "@/components/WhatsNew";
+import WhatsNew from "./WhatsNew";
 
 /* 🔐 Global Arm chip helpers */
 import { toast } from "sonner";

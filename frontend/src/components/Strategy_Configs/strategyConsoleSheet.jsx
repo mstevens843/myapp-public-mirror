@@ -98,8 +98,11 @@ export default function StrategyConsoleSheet({
   const summaryRegex = /Tick #(\d+).*Scanned: (\d+), Filters: (\d+), Safety: (\d+), (?:Fully Passed|Bought): (\d+)/;
 
   /* --- height (resizable) ------------------------------------------- */
-  const defaultH = Number(localStorage.getItem(LS_KEY)) || 500;
-  const [height, setHeight] = useState(defaultH);
+ // SSR-safe height init
+  const [height, setHeight] = useState(() => {
+    try { return Number(localStorage.getItem(LS_KEY)) || 500; } catch { return 500; }
+  });
+
   const startY = useRef(null);
 
   const onDragStart = (e) => {
@@ -237,15 +240,22 @@ export default function StrategyConsoleSheet({
   // Auto-scroll to the newest log entry when logs update or when
   // switching back to the logs tab.  Without this effect the user
   // would have to manually scroll to see new messages.
+  // Auto-scroll to newest entry when logs update / tab changes
+
+    /* Hide summary lines when on “Logs” — define BEFORE it’s used below */
+const visibleLogs = useMemo(() => (
+  activeTab === "logs"
+    ? logs.filter((l) => !l.includes("📊 Tick") && !l.includes("[SUMMARY]"))
+    : logs
+), [logs, activeTab]);
+
+
   useEffect(() => {
     if (activeTab === "logs" && listRef.current) {
-      try {
-        listRef.current.scrollToItem(Math.max(0, visibleLogs.length - 1));
-      } catch (err) {
-        // list may not be initialised yet; ignore errors
-      }
+      const last = Math.max(0, visibleLogs.length - 1);
+      try { listRef.current.scrollToItem(last); } catch {}
     }
-  }, [visibleLogs.length, activeTab]);
+  }, [activeTab, visibleLogs.length]);
 
   const renderSummary = () =>
     summaryHistory.length ? (
@@ -273,13 +283,7 @@ export default function StrategyConsoleSheet({
       </div>
     );
 
-  /* Hide summary lines when on “Logs” */
-  const visibleLogs =
-    activeTab === "logs"
-      ? logs.filter(
-          (l) => !l.includes("📊 Tick") && !l.includes("[SUMMARY]")
-        )
-      : logs;
+
 
   /* ------------------------------------------------------------------ */
   /* JSX                                                                */
