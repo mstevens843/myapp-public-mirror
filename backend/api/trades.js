@@ -128,21 +128,34 @@ const injectUntracked = async (userId) => {
 /* ───────────────────────────── 1. RECENT CLOSED TRADES ─────────────────────────── */
 router.get("/", async (req, res) => {
   try {
+    // Support pagination via ?take and ?skip query params while enforcing
+    // reasonable caps. By default we return the 100 most recent closed
+    // trades. Clients may request fewer or more items up to a hard cap of
+    // 500 to prevent overly large responses. Negative values are coerced to
+    // zero.
+    let { take = 100, skip = 0 } = req.query;
+    take = Math.min(parseInt(take, 10) || 100, 500);
+    skip = Math.max(parseInt(skip, 10) || 0, 0);
+
     const rows = await prisma.closedTrade.findMany({
       where  : { wallet: { userId: req.user.id } },
       orderBy: { exitedAt: "desc" },
-      take   : 100,
+      take,
+      skip,
     });
 
-    await Promise.all(rows.map(async r => {
+    // Populate missing token names via the metadata helper. Since tokenName
+    // may be null in the DB we resolve it on the fly. This runs in
+    // parallel for efficiency.
+    await Promise.all(rows.map(async (r) => {
       if (!r.tokenName) r.tokenName = await getTokenName(r.mint);
     }));
 
-    const safeRows = rows.map(row => ({
+    const safeRows = rows.map((row) => ({
       ...row,
       inAmount: Number(row.inAmount),
       outAmount: Number(row.outAmount),
-      closedOutAmount: Number(row.closedOutAmount)
+      closedOutAmount: Number(row.closedOutAmount),
     }));
 
     res.json(safeRows);
@@ -154,6 +167,9 @@ router.get("/", async (req, res) => {
 
 /* ───────────────────────────── 2. HISTORY (with filters) ───────────────────────── */
 router.get("/history", async (req, res) => {
+  // Accept RFC3339 timestamps or YYYY-MM-DD strings for `from` and `to`.
+  // Support pagination via `limit` (take) and `offset` (skip). Cap the
+  // limit at 500 and coerce negative values to zero.
   const { from, to, limit = 300, offset = 0 } = req.query;
 
   const where = { wallet: { userId: req.user.id } };
@@ -163,23 +179,28 @@ router.get("/history", async (req, res) => {
     if (to)   where.exitedAt.lt  = new Date(to);
   }
 
+  let take = parseInt(limit, 10);
+  let skip = parseInt(offset, 10);
+  take = Math.min(Number.isNaN(take) ? 300 : take, 500);
+  skip = Math.max(Number.isNaN(skip) ? 0 : skip, 0);
+
   try {
     const rows = await prisma.closedTrade.findMany({
       where,
       orderBy: { exitedAt: "desc" },
-      skip   : Number(offset),
-      take   : Number(limit),
+      skip,
+      take,
     });
 
-    await Promise.all(rows.map(async r => {
+    await Promise.all(rows.map(async (r) => {
       if (!r.tokenName) r.tokenName = await getTokenName(r.mint);
     }));
 
-    const safeRows = rows.map(row => ({
+    const safeRows = rows.map((row) => ({
       ...row,
       inAmount: Number(row.inAmount),
       outAmount: Number(row.outAmount),
-      closedOutAmount: Number(row.closedOutAmount)
+      closedOutAmount: Number(row.closedOutAmount),
     }));
 
     res.json(safeRows);

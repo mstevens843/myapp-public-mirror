@@ -270,12 +270,20 @@ if (modeFromCLI) {
   }
 
   // Parse JSON unless Stripe webhook
+  //
+  // Explicitly limit JSON body size to mitigate abusive payloads. The
+  // default `express.json()` will happily consume arbitrarily large bodies
+  // which can exhaust memory or CPU. Cap the request size at 100 kilobytes
+  // which is more than enough for all our API payloads. Should a client
+  // exceed this limit Express will respond with a 413 status code. Note
+  // that Stripe webhooks are handled separately via `express.raw()` so
+  // JSON parsing must be skipped for that route.
   app.use((req, res, next) => {
     if (req.originalUrl === '/api/payment/webhook') {
-      next(); // skip, let express.raw() handle it
-    } else {
-      express.json()(req, res, next);
+      return next(); // skip, let express.raw() handle it
     }
+    // Apply a 100kb limit to all JSON bodies
+    return express.json({ limit: '100kb' })(req, res, next);
   });
 
   // CSRF protection (double‑submit cookie) for unsafe methods

@@ -70,9 +70,17 @@ async function getSplBalance(pubkey, mint, decimals = 9) {
 
 /* ─────────────────────── pending endpoints ─────────────────── */
 router.get("/pending-limit", requireAuth, async (req, res) => {
+  // Support take/skip query params to paginate results. Defaults to 100
+  // and capped at 500. Negative values are coerced to zero.
+  let { take = 100, skip = 0 } = req.query;
+  take = Math.min(parseInt(take, 10) || 100, 500);
+  skip = Math.max(parseInt(skip, 10) || 0, 0);
+
   const rows = await prisma.limitOrder.findMany({
     where  : { userId: req.user.id, status: { in: ["open", "executed"] }},
     orderBy: { createdAt: "asc" },
+    take,
+    skip,
     select : {
       id: true,
       type: true,
@@ -89,13 +97,20 @@ router.get("/pending-limit", requireAuth, async (req, res) => {
       tx: true 
     }
   });
-  res.json(rows.map(r => ({ ...r, type: "limit" }))); // ensure type
+  res.json(rows.map((r) => ({ ...r, type: "limit" }))); // ensure type
 });
 
 router.get("/pending-dca", requireAuth, async (req, res) => {
+  // Support pagination on dca orders. Defaults to 100 and capped at 500.
+  let { take = 100, skip = 0 } = req.query;
+  take = Math.min(parseInt(take, 10) || 100, 500);
+  skip = Math.max(parseInt(skip, 10) || 0, 0);
+
   const rows = await prisma.dcaOrder.findMany({
     where  : { userId: req.user.id, status: { in: ["active", "filled"] }},
     orderBy: { createdAt: "asc" },
+    take,
+    skip,
     select : {
       id: true,
       type: true,
@@ -122,7 +137,7 @@ router.get("/pending-dca", requireAuth, async (req, res) => {
       createdAt: true
     }
   });
-  res.json(rows.map(r => ({ ...r, type: "dca" }))); // ensure type
+  res.json(rows.map((r) => ({ ...r, type: "dca" }))); // ensure type
 });
 /* ───────────────────────── POST /limit ─────────────────────── */
 // Apply requireAuth, CSRF protection and schema validation before executing

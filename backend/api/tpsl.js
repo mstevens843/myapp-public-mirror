@@ -60,9 +60,17 @@ router.get("/", requireAuth, async (req, res) => {
   console.log("🔍 TP/SL findMany WHERE:", where);
 
   try {
+    // Allow pagination via ?take and ?skip. Defaults to returning up to 100
+    // active rules. Hard cap of 500 to avoid returning excessively large
+    // result sets.
+    let { take = 100, skip = 0 } = req.query;
+    take = Math.min(parseInt(take, 10) || 100, 500);
+    skip = Math.max(parseInt(skip, 10) || 0, 0);
     const rules = await prisma.tpSlRule.findMany({
       where,
-      orderBy: { createdAt: "asc" }
+      orderBy: { createdAt: "asc" },
+      take,
+      skip,
     });
     res.json(rules);
   } catch (err) {
