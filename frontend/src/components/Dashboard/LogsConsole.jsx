@@ -18,13 +18,8 @@ import React, { useState, useEffect, useRef } from "react";
 // time, dramatically reducing DOM churn.  Note: react-window is already
 // a dependency elsewhere in the project (e.g. StrategyConsoleSheet).
 import { FixedSizeList } from "react-window";
-// Import a lightweight virtualization helper.  FixedSizeList only
-// renders the visible portion of a long list which keeps our DOM
-// footprint small and prevents memory leaks when the log stream is
-// active for hours.  react-window is already a project dependency
-// used elsewhere (e.g. in the strategy console).
-import { FixedSizeList } from "react-window";
 import { toast } from "react-toastify";
+import { authFetch } from "@/utils/authFetch";
 import "@/styles/components/LogsConsole.css";
 
 /**
@@ -106,10 +101,10 @@ const LogsConsole = () => {
     if (!confirm) return;
 
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/trades/reset`, {
+      // Use authFetch so the CSRF token and cookies are sent automatically.
+      const res = await authFetch(`/api/trades/reset`, {
         method: "POST",
       });
-
       const data = await res.json();
       if (res.ok) {
         toast.success("🧹 Logs cleared successfully.");

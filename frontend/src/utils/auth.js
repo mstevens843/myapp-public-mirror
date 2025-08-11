@@ -72,16 +72,8 @@ export async function loginUser(userData) {
       return null;
     }
 
-    // ✅ Store tokens
-    if (data.accessToken && data.refreshToken) {
-      localStorage.setItem("accessToken", data.accessToken);
-      localStorage.setItem("refreshToken", data.refreshToken);
-      console.log("✅ Tokens saved:", data.accessToken.slice(0, 10) + "...");
-    }
-
-    // ✅ Store active wallet
+    // ✅ Persist only the active wallet; tokens are managed via HttpOnly cookies
     if (data.activeWallet) {
-      // localStorage.setItem("activeWallet", data.activeWallet);
       localStorage.setItem("activeWallet", JSON.stringify(data.activeWallet));
     }
 
@@ -94,9 +86,9 @@ export async function loginUser(userData) {
 
 export async function resendConfirmationEmail(email) {
   try {
-    const res = await fetch(`${BASE}/api/auth/resend-confirm`, {
+    // Use authFetch so CSRF header and cookies are included
+    const res = await authFetch(`/api/auth/resend-confirm`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
     });
 
@@ -135,8 +127,7 @@ export async function logoutUser() {
     await supabase.auth.signOut();
 
     // Clear localStorage items used for your app session
-    localStorage.removeItem("accessToken");
-    localStorage.removeItem("refreshToken");
+    // Tokens are sent via HttpOnly cookies; nothing to remove from storage
     sessionStorage.clear();
     // Optional: clear cookies if you store things there (like chatId etc)
     Cookies.remove("chatId");
@@ -157,9 +148,9 @@ export async function logoutUser() {
  */
 export async function refreshToken(refreshToken) {
   try {
-    const res = await fetch(`${BASE}/api/auth/refresh`, {
+    // Use authFetch for CSRF and cookie-based auth
+    const res = await authFetch(`/api/auth/refresh`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ refreshToken }),
     });
 
@@ -232,17 +223,9 @@ export async function refreshToken(refreshToken) {
 
 export async function saveWallet(label, privateKey) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-    
-    const res = await fetch(`${BASE}/api/wallets/save`, {
+    // Send save wallet request via authFetch using cookie-based auth
+    const res = await authFetch(`/api/wallets/save`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
       body: JSON.stringify({ label, privateKey }),
     });
 
@@ -276,18 +259,9 @@ export async function saveWallet(label, privateKey) {
  */
 export async function importWallet(label, privateKey) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/wallets/import-wallet`, {
+    // Use authFetch to import a wallet with cookie-based auth
+    const res = await authFetch(`/api/wallets/import-wallet`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
       body: JSON.stringify({ label, privateKey }),
     });
 
@@ -320,7 +294,7 @@ export async function importWallet(label, privateKey) {
  */
 export async function wipeAllWallets() {
   try {
-    const res = await fetch(`${BASE}/api/wallets/wipe`, {
+    const res = await authFetch(`/api/wallets/wipe`, {
       method: "DELETE",
     });
 
@@ -356,18 +330,8 @@ walletId - The ID of the wallet to export.
  */
 export async function exportWallet(walletId) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/wallets/export/${walletId}`, {
+    const res = await authFetch(`/api/auth/wallets/export/${walletId}`, {
       method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
     });
 
     const text = await res.text();
@@ -401,18 +365,8 @@ export async function exportWallet(walletId) {
  */
 export async function deleteWallet(walletId) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/wallets/delete/${walletId}`, {
+    const res = await authFetch(`/api/auth/wallets/delete/${walletId}`, {
       method: "DELETE",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
     });
 
     const text = await res.text();
@@ -447,18 +401,8 @@ export async function deleteWallet(walletId) {
 // src/utils/sendSol.js
 export async function sendSol(senderWalletId, recipientAddress, amount) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return { success: false, error: 'No access token' };
-    }
-
-    const res = await fetch(`${BASE}/api/wallets/send-sol`, {
+    const res = await authFetch(`/api/wallets/send-sol`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
       body: JSON.stringify({
         senderWalletId,
         recipientAddress,
@@ -493,18 +437,8 @@ export async function sendSol(senderWalletId, recipientAddress, amount) {
 
 export async function fetchTokensByWallet(walletId) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/tokens/by-wallet?walletId=${walletId}`, {
+    const res = await authFetch(`/api/auth/tokens/by-wallet?walletId=${walletId}`, {
       method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
     });
 
     const text = await res.text();
@@ -533,15 +467,8 @@ export async function fetchTokensByWallet(walletId) {
 
 
 export async function fetchPortfolio(walletId) {
-  const token = localStorage.getItem("accessToken");
-  // Use configured API base or fall back to relative path.  Without this guard
-  // `import.meta.env.VITE_API_BASE_URL` may be undefined and produce
-  // "undefined/..." URLs at runtime.
-  const base = import.meta.env.VITE_API_BASE_URL || "";
-  const res = await fetch(`${base}/api/wallets/portfolio?walletId=${walletId}`, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+  const res = await authFetch(`/api/wallets/portfolio?walletId=${walletId}`, {
+    method: "GET",
   });
   if (!res.ok) throw new Error(`Failed to fetch portfolio: ${res.status}`);
   return res.json();
@@ -554,19 +481,9 @@ export async function fetchPortfolio(walletId) {
  */
 export async function loadWallet(labels = []) {
   try {
-    const token = localStorage.getItem('accessToken'); // Get token from localStorage
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    // const res = await fetch(`${BASE}/api/wallets/load?labels=${labels.join(",")}`, {
-    const res = await fetch(`${BASE}/api/wallets/load`, {
+    // Load wallets via authFetch; cookie-based authentication
+    const res = await authFetch(`/api/wallets/load`, {
       method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
     });
 
     const text = await res.text();
@@ -604,36 +521,27 @@ export async function loadWallet(labels = []) {
 
 export async function generateWallet(label) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/wallet/generate`, {
+    // Use authFetch so cookies and CSRF tokens are attached automatically
+    const res = await authFetch(`/api/auth/wallet/generate`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,  
-      },
-      body: JSON.stringify({ label }),   // 👈 ADD THIS
+      body: JSON.stringify({ label }),
     });
-
     const text = await res.text();
     let data;
-
     try {
       data = JSON.parse(text);
     } catch {
       console.error("❌ Invalid JSON in response:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ Wallet generation error:", res.status, data?.error || text);
+      console.error(
+        "❌ Wallet generation error:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
     return data;
   } catch (err) {
     console.error("❌ Wallet generation failed:", err.message);
@@ -648,30 +556,17 @@ export async function generateWallet(label) {
  */
 export async function fetchActiveWallet() {
   try {
-    const token = localStorage.getItem("accessToken");
-    if (!token) {
-      console.error("No access token found");
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/wallet/active`, {
+    const res = await authFetch(`/api/auth/wallet/active`, {
       method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
     });
-
     const text = await res.text();
     let data;
-
     try {
       data = JSON.parse(text);
     } catch {
       console.error("❌ Invalid JSON in response:", text);
       return null;
     }
-
     if (!res.ok) {
       console.error(
         "❌ Fetch active wallet error:",
@@ -680,7 +575,6 @@ export async function fetchActiveWallet() {
       );
       return null;
     }
-
     return data.activeWalletId || null;
   } catch (err) {
     console.error("❌ Fetch active wallet failed:", err.message);
@@ -698,38 +592,27 @@ export async function fetchActiveWallet() {
 
 export async function setActiveWalletApi(walletId) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/wallet/set-active`, {
+    const res = await authFetch(`/api/auth/wallet/set-active`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,   // ✅ add token
-      },
-       body: JSON.stringify({ walletId: String(walletId) }), 
+      body: JSON.stringify({ walletId: String(walletId) }),
     });
-
     const text = await res.text();
-    console.log("🪵 raw text from server:", text);
     let data;
-
     try {
       data = JSON.parse(text);
     } catch {
       console.error("❌ Invalid JSON in response:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ Set active wallet error:", res.status, data?.error || text);
+      console.error(
+        "❌ Set active wallet error:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
-    return data; // Return success message or wallet info
+    return data;
   } catch (err) {
     console.error("❌ Set active wallet failed:", err.message);
     return null;
@@ -739,12 +622,10 @@ export async function setActiveWalletApi(walletId) {
 
 export async function requestPasswordReset(email) {
   try {
-    const res = await fetch(`${BASE}/api/auth/request-password-reset`, {  // or adjust path
+    const res = await authFetch(`/api/auth/request-password-reset`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
     });
-
     const text = await res.text();
     let data;
     try {
@@ -753,12 +634,14 @@ export async function requestPasswordReset(email) {
       console.error("❌ Invalid JSON:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ Request reset error:", res.status, data?.error || text);
+      console.error(
+        "❌ Request reset error:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
     return data;
   } catch (err) {
     console.error("Request reset failed:", err);
@@ -767,12 +650,9 @@ export async function requestPasswordReset(email) {
 }
 
 export async function verifyResetToken(token) {
-    console.log("📡 Calling verify-reset-token at:", `${BASE}/auth/verify-reset-token`);
-
   try {
-    const res = await fetch(`${BASE}/api/auth/verify-reset-token`, {
+    const res = await authFetch(`/api/auth/verify-reset-token`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
     });
     return await res.json();
@@ -784,9 +664,8 @@ export async function verifyResetToken(token) {
 
 export async function resetPassword(token, newPassword, confirmPassword) {
   try {
-    const res = await fetch(`${BASE}/api/auth/reset-password`, {
+    const res = await authFetch(`/api/auth/reset-password`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token, newPassword, confirmPassword }),
     });
     return await res.json();

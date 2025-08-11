@@ -60,6 +60,7 @@ export default function LaunchAppModal({ open, setOpen }) {
                 <a
                   href="/terms"
                   target="_blank"
+                  rel="noopener noreferrer"
                   className="text-emerald-400 underline hover:text-white"
                 >
                   Terms
@@ -68,6 +69,7 @@ export default function LaunchAppModal({ open, setOpen }) {
                 <a
                   href="/privacy"
                   target="_blank"
+                  rel="noopener noreferrer"
                   className="text-emerald-400 underline hover:text-white"
                 >
                   Privacy
@@ -106,6 +108,7 @@ export default function LaunchAppModal({ open, setOpen }) {
                 <a
                   href="/terms"
                   target="_blank"
+                  rel="noopener noreferrer"
                   className="text-emerald-400 underline hover:text-white"
                 >
                   Terms
@@ -114,6 +117,7 @@ export default function LaunchAppModal({ open, setOpen }) {
                 <a
                   href="/privacy"
                   target="_blank"
+                  rel="noopener noreferrer"
                   className="text-emerald-400 underline hover:text-white"
                 >
                   Privacy

@@ -438,7 +438,7 @@ export const deleteTpSlSetting = (id) => {
 export const getPrefs = (chatId = "default") =>
   authFetch(`${BASE}/api/prefs/${chatId}`).then(r => {
     if (!r) {
-      console.log("🚫 getPrefs skipped because no token or fetch returned null.");
+      console.log("🚫 getPrefs skipped because no auth session or fetch returned null.");
       return null;
     }
     return r.json();
@@ -450,7 +450,7 @@ export const savePrefs = (chatId, obj) =>
     body   : JSON.stringify(obj),
   }).then(r => {
     if (!r) {
-      console.log("🚫 savePrefs skipped because no token or fetch returned null.");
+      console.log("🚫 savePrefs skipped because no auth session or fetch returned null.");
       return null;
     }
     return r.json();

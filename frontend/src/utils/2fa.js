@@ -2,6 +2,7 @@
 // origin if no API base URL is configured.
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
 import { toast } from "sonner";
+import { authFetch } from "./authFetch";
 
 /**
  * enable2FA()
@@ -9,18 +10,9 @@ import { toast } from "sonner";
  */
 export async function enable2FA() {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/enable-2fa`, {
+    // Use authFetch to include cookies and CSRF automatically
+    const res = await authFetch(`/api/auth/enable-2fa`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
     });
 
     const text = await res.text();
@@ -48,18 +40,8 @@ export async function enable2FA() {
  */
 export async function verify2FA(twoFAToken) {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/verify-2fa`, {
+    const res = await authFetch(`/api/auth/verify-2fa`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
       body: JSON.stringify({ token: twoFAToken }),
     });
 
@@ -88,18 +70,8 @@ export async function verify2FA(twoFAToken) {
  */
 export async function disable2FA() {
   try {
-    const token = localStorage.getItem('accessToken');
-    if (!token) {
-      console.error('No access token found');
-      return null;
-    }
-
-    const res = await fetch(`${BASE}/api/auth/disable-2fa`, {
+    const res = await authFetch(`/api/auth/disable-2fa`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
     });
 
     const text = await res.text();
@@ -127,31 +99,27 @@ export async function disable2FA() {
  */
 export async function verify2FALogin(userId, twoFAToken) {
   try {
-    const res = await fetch(`${BASE}/api/auth/verify-2fa-login`, {
+    const res = await authFetch(`/api/auth/verify-2fa-login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, token: twoFAToken }),
     });
-
     const text = await res.text();
     let data;
-    try { data = JSON.parse(text); } catch {
+    try {
+      data = JSON.parse(text);
+    } catch {
       console.error("❌ Invalid JSON:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ Verify 2FA login error:", res.status, data?.error || text);
+      console.error(
+        "❌ Verify 2FA login error:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
-    // ✅ ACTUAL CRITICAL STEP
-    if (data.accessToken) {
-      localStorage.setItem("accessToken", data.accessToken);
-    } else {
-      console.error("❌ No access token returned from verify2FALogin");
-    }
-
+    // On success, simply return the data; tokens are delivered via HttpOnly cookies
     return data;
   } catch (err) {
     console.error("❌ Verify 2FA login failed:", err.message);

@@ -6,6 +6,7 @@ import { X, Search }     from "lucide-react";
 import { ChevronDown } from "lucide-react";
 import { useUser } from "@/contexts/UserProvider";
 import { fetchPortfolio } from "@/utils/auth";  
+import { authFetch } from "@/utils/authFetch";
 
 export const REQUIRED_FIELDS = ["wallets", "tokenMint", "positionSize"];
 
@@ -272,14 +273,16 @@ const walletsWithSol = useMemo(() => {
             onClick={async () => {
               setChecking(true);
               try {
-                await fetch("/api/wallets/validate-mint", {
-                  method :"POST",
-                  headers:{ "Content-Type":"application/json" },
-                  body   :JSON.stringify({ mint: customMint }),
-                }).catch(()=>{});
+                // Validate mint via authFetch; CSRF & cookies included automatically
+                await authFetch('/api/wallets/validate-mint', {
+                  method: 'POST',
+                  body: JSON.stringify({ mint: customMint }),
+                });
                 update({ tokenMint: customMint });
-                setCustomMint("");
-              } finally { setChecking(false); }
+                setCustomMint('');
+              } finally {
+                setChecking(false);
+              }
             }}
           >
             {checking ? "…" : "Add"}

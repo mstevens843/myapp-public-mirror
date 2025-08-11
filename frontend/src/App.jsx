@@ -515,15 +515,10 @@ const { prefs } = useUserPrefs();
 
   
   useEffect(() => {
-    const token = localStorage.getItem("accessToken");
-    if (!token) {
-      console.log("🚫 No token yet, skipping prefs fetch");
-      return;
-    }
-
-
-
-
+    // Always attempt to load preferences using cookies for auth.  We no
+    // longer gate this on a localStorage token since authentication
+    // happens via HttpOnly cookies.  getPrefs will send the cookie and
+    // CSRF token automatically via authFetch.
     const chatId = getChatIdFromCookie();
     getPrefs(chatId).then((prefs) => {
       console.log("✅ Loaded user prefs from cookie:", prefs);
@@ -1055,9 +1050,9 @@ try {
 
   const fetchWalletBalance = async (label) => {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/wallets/balance`, {
+      // Use authFetch so that cookies and CSRF tokens are included.  No Authorization header is sent.
+      const res = await authFetch(`/api/wallets/balance`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label }),
       });
       const data = await res.json();
@@ -1109,9 +1104,12 @@ useEffect(() => {
 
   const handleClearLogs = () => {
     if (!window.confirm("🧹 Are you sure you want to clear all trade logs?")) return;
-    fetch(`${import.meta.env.VITE_API_BASE_URL}/api/trades/reset`, { method: "POST" })
-      .then(res => res.json())
-      .then(() => { toast.success("🧹 All logs cleared."); setTrades([]); })
+    authFetch(`/api/trades/reset`, { method: "POST" })
+      .then((res) => res.json())
+      .then(() => {
+        toast.success("🧹 All logs cleared.");
+        setTrades([]);
+      })
       .catch(() => toast.error("❌ Failed to clear logs."));
   };
     

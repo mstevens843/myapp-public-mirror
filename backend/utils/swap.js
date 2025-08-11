@@ -8,6 +8,8 @@
  * - Loads wallet from env or strategy context
  */
 
+
+
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const axios = require("axios");
 const { Connection, Keypair, PublicKey, Transaction, VersionedTransaction } = require("@solana/web3.js");
@@ -178,6 +180,8 @@ async function executeSwap({
 /**
  * Turbo path — still the ultra-fast path. Accepts the same new knobs.
  * Uses skipPreflight + optional private RPC for low latency.
+ *  Turbo is the “no seatbelt” lane: it skips preflight and (optionally) uses a faster RPC/relay. 
+ * The standard path keeps the safety check.
  */
 async function executeSwapTurbo({
   quote,

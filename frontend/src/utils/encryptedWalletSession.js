@@ -12,17 +12,13 @@ import { authFetch } from "./authFetch";
  * ──────────────────────────────────────────────────────────── */
 export async function checkVaultBalance(payload) {
   try {
-    console.log("📤 checkVaultBalance → Sending payload:", payload);
-
-    const res = await fetch(`${BASE}/api/auth/vault-balance`, {
+    // Use authFetch so cookies and CSRF tokens are automatically sent.
+    const res = await authFetch(`${BASE}/api/auth/vault-balance`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const text = await res.text();
-    console.log("📥 checkVaultBalance → Raw response text:", text);
-
     let data;
     try {
       data = JSON.parse(text);
@@ -30,13 +26,10 @@ export async function checkVaultBalance(payload) {
       console.error("❌ checkVaultBalance → Invalid JSON:", text);
       return null;
     }
-
     if (!res.ok) {
       console.error("❌ checkVaultBalance → Failed:", res.status, data?.error || text);
       return null;
     }
-
-    console.log("✅ checkVaultBalance → Balance data:", data);
     return data;
   } catch (err) {
     console.error("❌ checkVaultBalance → Request error:", err.message);

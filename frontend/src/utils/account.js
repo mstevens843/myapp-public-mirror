@@ -1,4 +1,5 @@
 import { toast } from "sonner";
+import { authFetch } from "./authFetch";
 
 // Use a blank string when VITE_API_BASE_URL is not set.  This ensures
 // fetch calls resolve to relative endpoints instead of "undefined/...".
@@ -6,17 +7,9 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 export async function getProfile() {
   try {
-    const token = localStorage.getItem("accessToken");
-    if (!token) throw new Error("No access token found");
-
-    const res = await fetch(`${BASE_URL}/api/account/profile`, {
+    const res = await authFetch(`/api/account/profile`, {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
     });
-
     if (!res.ok) throw new Error("Failed to fetch profile");
     return await res.json();
   } catch (err) {
@@ -28,19 +21,10 @@ export async function getProfile() {
 
 export async function updateProfile(profile) {
   try {
-    const token = localStorage.getItem("accessToken");
-    if (!token) throw new Error("No access token found");
-
-    const res = await fetch(`${BASE_URL}/api/account/profile`, {
+    const res = await authFetch(`/api/account/profile`, {
       method: "PATCH",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
       body: JSON.stringify(profile),
     });
-
     if (!res.ok) throw new Error("Failed to update profile");
     return true;
   } catch (err) {
@@ -52,19 +36,10 @@ export async function updateProfile(profile) {
 
 export async function changePassword({ currentPassword, newPassword }) {
   try {
-    const token = localStorage.getItem("accessToken");
-    if (!token) throw new Error("No access token found");
-
-    const res = await fetch(`${BASE_URL}/api/account/change-password`, {
+    const res = await authFetch(`/api/account/change-password`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
       body: JSON.stringify({ currentPassword, newPassword }),
     });
-
     if (!res.ok) throw new Error("Failed to change password");
     return true;
   } catch (err) {
@@ -76,17 +51,9 @@ export async function changePassword({ currentPassword, newPassword }) {
 
 export async function deleteAccount() {
   try {
-    const token = localStorage.getItem("accessToken");
-    if (!token) throw new Error("No access token found");
-
-    const res = await fetch(`${BASE_URL}/api/account/delete`, {
+    const res = await authFetch(`/api/account/delete`, {
       method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
     });
-
     if (!res.ok) throw new Error("Failed to delete account");
     return true;
   } catch (err) {
@@ -105,41 +72,34 @@ export async function deleteAccount() {
  * @param {string} supabaseToken - The access token from Supabase session
  */
 export async function exchangeSupabaseSession(supabaseToken) {
-  console.log("🔁 exchangeSupabaseSession() CALLED");
-  console.log("👉 Supabase token (short):", supabaseToken?.slice(0, 20) + "..." || "(null)");
-
   try {
-    const res = await fetch(`${BASE_URL}/api/auth/convert-supabase`, {
+    const res = await authFetch(`/api/auth/convert-supabase`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ supabaseToken })
+      body: JSON.stringify({ supabaseToken }),
     });
-
     const raw = await res.text();
-    console.log("📥 Raw response from /convert-supabase:", raw);
-
     if (!res.ok) {
-      console.error("❌ exchangeSupabaseSession HTTP error:", res.status, raw);
+      console.error(
+        "❌ exchangeSupabaseSession HTTP error:",
+        res.status,
+        raw
+      );
       toast.error("Failed to finalize login. Try again.");
       return null;
     }
-
-    const data = JSON.parse(raw);
-
-    if (data?.accessToken) {
-      console.log("✅ Received platform accessToken:", data.accessToken.slice(0, 16) + "...");
-      if (data?.activeWallet) {
-        console.log("💰 Active wallet:", data.activeWallet);
-        localStorage.setItem("activeWallet", data.activeWallet);
-      }
-
-      localStorage.setItem("accessToken", data.accessToken);
-      return data;
-    } else {
-      console.error("❌ No accessToken in backend response:", data);
-      toast.error("Login session exchange failed.");
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      console.error("❌ Invalid JSON in convert-supabase response:", raw);
+      toast.error("Invalid server response during login.");
       return null;
     }
+    if (data?.activeWallet) {
+      localStorage.setItem("activeWallet", data.activeWallet);
+    }
+    // Do not persist accessToken or refreshToken here; cookies handle auth
+    return data;
   } catch (err) {
     console.error("💥 exchangeSupabaseSession EXCEPTION:", err);
     toast.error("Server error during login.");

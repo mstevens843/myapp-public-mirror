@@ -14,14 +14,13 @@ const ResetPassword = () => {
   const [confirmPassword, setConfirmPassword] = useState("");
 
   useEffect(() => {
-    console.log("🧭 URL token is:", token);
+    // Never log the reset token or any sensitive values to the console.
     if (!token) return;
 
     (async () => {
-      console.log("🚀 Attempting to verify reset token with backend...");
+      // Verify the reset token with the backend.  A truthy response
+      // indicates the link is valid; errors will be surfaced via toast.
       const res = await verifyResetToken(token);
-      console.log("✅ verifyResetToken returned:", res);
-
       setValid(!!res?.message);
       setLoading(false);
     })();
@@ -29,14 +28,12 @@ const ResetPassword = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    console.log("💾 Attempting password reset...");
+    // Do not log sensitive operations.  Validate matching passwords.
     if (password !== confirmPassword) {
-      console.log("❌ Passwords do not match.");
       return toast.error("Passwords do not match.");
     }
 
     const data = await resetPassword(token, password, confirmPassword);
-    console.log("🚀 resetPassword API returned:", data);
 
     if (data?.message) {
       toast.success("Password reset successful!");

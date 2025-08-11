@@ -41,9 +41,11 @@ const handleGenerate = async () => {
       return;
     }
 
-    // ✅ Save accessToken + refreshToken
-    if (res.accessToken) localStorage.setItem("accessToken", res.accessToken);
-    if (res.refreshToken) localStorage.setItem("refreshToken", res.refreshToken);
+    // Cookies are set by the backend.  Do not persist tokens in storage.
+    // Remove any legacy tokens that might still exist to prevent
+    // accidentally sending Authorization headers from the frontend.
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("refreshToken");
 
     setVault(res.vaultPublicKey);
     setPrivateKey(res.vaultPrivateKey);
@@ -175,6 +177,7 @@ const handleGenerate = async () => {
           <a
             href="/terms"
             target="_blank"
+            rel="noopener noreferrer"
             className="underline hover:text-white text-emerald-400"
           >
             Terms
@@ -183,6 +186,7 @@ const handleGenerate = async () => {
           <a
             href="/privacy"
             target="_blank"
+            rel="noopener noreferrer"
             className="underline hover:text-white text-emerald-400"
           >
             Privacy

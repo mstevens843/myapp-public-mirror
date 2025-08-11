@@ -87,13 +87,13 @@ if (response) {
     return;
   }
 
-  if (rememberMe) {
-    localStorage.setItem("accessToken", response.accessToken);
-    localStorage.setItem("refreshToken", response.refreshToken);
-  } else {
-    sessionStorage.setItem("accessToken", response.accessToken);
-    sessionStorage.setItem("refreshToken", response.refreshToken);
-  }
+  // The backend sets HttpOnly cookies on successful auth.  Do not persist
+  // access or refresh tokens in localStorage/sessionStorage.  Remove any
+  // leftover tokens so authFetch never attaches Authorization headers.
+  localStorage.removeItem("accessToken");
+  localStorage.removeItem("refreshToken");
+  sessionStorage.removeItem("accessToken");
+  sessionStorage.removeItem("refreshToken");
 
   if (response.activeWallet) {
     localStorage.setItem("activeWallet", response.activeWallet);
@@ -228,6 +228,7 @@ if (response) {
           <a
             href="/terms"
             target="_blank"
+            rel="noopener noreferrer"
             className="underline hover:text-white text-emerald-400"
           >
             Terms
@@ -236,6 +237,7 @@ if (response) {
           <a
             href="/privacy"
             target="_blank"
+            rel="noopener noreferrer"
             className="underline hover:text-white text-emerald-400"
           >
             Privacy

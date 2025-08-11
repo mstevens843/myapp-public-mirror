@@ -28,9 +28,9 @@ const Verify2FA = () => {
     const data = await verify2FALogin(userId, token);
     setLoading(false);
 
-    if (data?.accessToken) {
-      localStorage.setItem("accessToken", data.accessToken);
-      localStorage.setItem("refreshToken", data.refreshToken);
+    // When the backend verifies the 2FA code it will set cookies automatically.
+    // We no longer persist tokens client‑side.  Treat any truthy response without error as success.
+    if (data && !data.error) {
       localStorage.removeItem("twoFAFailures");
       toast.success("2FA verified. Welcome!");
       navigate("/app");
@@ -43,8 +43,6 @@ const Verify2FA = () => {
         toast.error(
           `Too many failed attempts. Please contact ${SUPPORT_EMAIL} to recover your account.`
         );
-        localStorage.removeItem("accessToken");
-        localStorage.removeItem("refreshToken");
         localStorage.removeItem("twoFAFailures");
         navigate("/login");
       } else {

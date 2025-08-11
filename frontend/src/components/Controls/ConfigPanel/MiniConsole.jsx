@@ -60,10 +60,17 @@ const MiniConsole = ({
         return (
           <div key={idx} className="flex">
             <span className={`flex-shrink-0 w-[2px] mr-2 rounded-sm ${bar}`} />
-            <pre
-              className="whitespace-pre-wrap text-zinc-300"
-              dangerouslySetInnerHTML={{ __html: logText }}
-            />
+            {/*
+              Render log text directly instead of injecting HTML.  Using
+              dangerouslySetInnerHTML here could lead to XSS if logs ever
+              contain untrusted strings.  We treat all log entries as plain
+              text and rely on <pre> with whitespace preservation to
+              display newlines and spacing.  The text is never interpreted
+              as HTML.
+            */}
+            <pre className="whitespace-pre-wrap text-zinc-300">
+              {logText}
+            </pre>
           </div>
         );
       })

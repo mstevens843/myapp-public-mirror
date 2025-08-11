@@ -45,6 +45,7 @@ export default function BuySummarySheet({ open, onClose, summary }) {
             <a
               href={`https://explorer.solana.com/tx/${summary.tx}?cluster=mainnet-beta`}
               target="_blank"
+              rel="noopener noreferrer"
               className="text-blue-400 underline"
             >
               View Transaction

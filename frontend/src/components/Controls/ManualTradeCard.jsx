@@ -6,7 +6,8 @@ import { motion } from "framer-motion";
 import ConfirmModal from "./Modals/ConfirmModal"; // adjust path if needed
 import LimitModal from "./Modals/LimitModal";
 import DcaModal from "./Modals/DcaModal";
-import { checkExistingPosition } from "../../utils/api"
+import { checkExistingPosition } from "../../utils/api";
+import { authFetch } from "@/utils/authFetch";
 export default function ManualTradeCard({
   config,
   prefs,
@@ -85,7 +86,7 @@ useEffect(() => {
       const lamports = Math.floor(parseFloat(manualBuyAmount) * 1e9); // convert SOL to lamports
       const slippage = swapOpts.slippage || 1;
 
-      const res = await fetch(`/api/quote?inputMint=${SOL_MINT}&outputMint=${targetMint}&amount=${lamports}&slippage=${slippage}`);
+      const res = await authFetch(`/api/quote?inputMint=${SOL_MINT}&outputMint=${targetMint}&amount=${lamports}&slippage=${slippage}`);
       const data = await res.json();
 
       if (data.error) throw new Error(data.error);

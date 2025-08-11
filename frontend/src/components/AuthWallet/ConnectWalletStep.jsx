@@ -96,15 +96,17 @@ const handlePhantomConnect = async () => {
     const userCheck = await checkUserExists({ phantomPublicKey: freshPublicKey });
 
     if (userCheck.exists) {
-      const { accessToken, refreshToken, twoFARequired } = userCheck;
+      const { twoFARequired } = userCheck;
       if (twoFARequired) {
         navigate(`/verify-2fa?userId=${freshPublicKey}`);
         return;
       }
 
-      // Persist tokens so authFetch can attach them
-      if (accessToken)  localStorage.setItem("accessToken",  accessToken);
-      if (refreshToken) localStorage.setItem("refreshToken", refreshToken);
+      // The backend will set HttpOnly cookies on successful login.
+      // Do not persist access/refresh tokens on the client. Remove any
+      // leftover tokens to prevent Authorization headers being attached.
+      localStorage.removeItem("accessToken");
+      localStorage.removeItem("refreshToken");
 
       toast.success("🔓 Welcome back!");
       navigate("/app");

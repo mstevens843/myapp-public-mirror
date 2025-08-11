@@ -2,7 +2,7 @@
 // would result in "undefined/api/..." when template literals are used.
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
 import { supabase } from "@/lib/supabase";
-import Cookies from "js-cookie"
+import Cookies from "js-cookie";
 import { authFetch } from "./authFetch";
 
 
@@ -14,31 +14,26 @@ import { authFetch } from "./authFetch";
  */
 export async function checkVaultBalance(payload) {
   try {
-    console.log("📤 checkVaultBalance → Sending payload:", payload);
-
-    const res = await fetch(`${BASE}/api/auth/vault-balance`, {
+    const res = await authFetch(`/api/auth/vault-balance`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const text = await res.text();
-    console.log("📥 checkVaultBalance → Raw response text:", text);
-
     let data;
-    try { data = JSON.parse(text); 
-
-     } catch {
+    try {
+      data = JSON.parse(text);
+    } catch {
       console.error("❌ checkVaultBalance → Invalid JSON:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ checkVaultBalance → Failed:", res.status, data?.error || text);
+      console.error(
+        "❌ checkVaultBalance → Failed:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
-    console.log("✅ checkVaultBalance → Balance data:", data);
     return data;
   } catch (err) {
     console.error("❌ checkVaultBalance → Request error:", err.message);
@@ -53,17 +48,11 @@ export async function checkVaultBalance(payload) {
  */
 export async function checkVaultBalanceDirect(payload) {
   try {
-    console.log("📤 checkVaultBalanceDirect → Sending payload:", payload);
-
-    const res = await fetch(`${BASE}/api/auth/vault-balance-direct`, {
+    const res = await authFetch(`/api/auth/vault-balance-direct`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const text = await res.text();
-    console.log("📥 checkVaultBalanceDirect → Raw response text:", text);
-
     let data;
     try {
       data = JSON.parse(text);
@@ -71,13 +60,14 @@ export async function checkVaultBalanceDirect(payload) {
       console.error("❌ checkVaultBalanceDirect → Invalid JSON:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ checkVaultBalanceDirect → Failed:", res.status, data?.error || text);
+      console.error(
+        "❌ checkVaultBalanceDirect → Failed:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
-    console.log("✅ checkVaultBalanceDirect → Balance data:", data);
     return data;
   } catch (err) {
     console.error("❌ checkVaultBalanceDirect → Request error:", err.message);
@@ -115,27 +105,26 @@ export async function smartVaultBalance({ phantomPublicKey, vaultPubkey }) {
  */
 export async function phantomLogin(payload) {
   try {
-    const res = await fetch(`${BASE}/api/auth/phantom`, {
+    const res = await authFetch(`/api/auth/phantom`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const text = await res.text();
     let data;
-
     try {
       data = JSON.parse(text);
     } catch {
       console.error("❌ Invalid JSON in response:", text);
       return null;
     }
-
     if (!res.ok) {
-      console.error("❌ Phantom login failed:", res.status, data?.error || text);
+      console.error(
+        "❌ Phantom login failed:",
+        res.status,
+        data?.error || text
+      );
       return null;
     }
-
     return data;
   } catch (err) {
     console.error("❌ Phantom login request error:", err.message);

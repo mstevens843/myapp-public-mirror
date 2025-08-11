@@ -40,13 +40,12 @@ export default function EmailConfirmed() {
 
       if (!session) { console.error("❌ No Supabase session"); set("No session found."); return; }
 
-      console.log("📦 Supabase session object:", session);
-      console.log("📨 Access token (short):", session?.access_token?.slice(0, 24) + "...");
-
       /* ═════════ 4. Swap for platform JWT ═════════ */
       const result = await exchangeSupabaseSession(session.access_token);
-      if (!result?.accessToken) { set("Internal login failed."); return; }
-
+      // exchangeSupabaseSession returns an object on success.  Do not
+      // inspect accessToken here; cookies are managed server‑side.  If
+      // the result is truthy we assume success and navigate to app.
+      if (!result) { set("Internal login failed."); return; }
       nav("/app", { replace: true });
     })();
   }, [search, hash, nav]);

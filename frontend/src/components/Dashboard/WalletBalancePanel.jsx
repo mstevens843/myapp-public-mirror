@@ -319,7 +319,7 @@ export default function WalletBalancePanel() {
     <a
       href={`https://birdeye.so/token/${targetToken}`}
       target="_blank"
-      rel="noreferrer"
+      rel="noopener noreferrer"
       className="text-blue-400 hover:underline"
     >
       Birdeye
@@ -328,7 +328,7 @@ export default function WalletBalancePanel() {
     <a
       href={`https://dexscreener.com/solana/${targetToken}`}
       target="_blank"
-      rel="noreferrer"
+      rel="noopener noreferrer"
       className="text-blue-400 hover:underline"
     >
       DEX Screener
