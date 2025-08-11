@@ -489,6 +489,20 @@ scheduleLauncher: (cfg, wallets, target, resolved, activeWallet) => {
       maxOpenTrades: safeNum(cfg.maxOpenTrades),
       delayBeforeBuyMs: safeNum(cfg.delayBeforeBuyMs),
       priorityFeeLamports: pick(cfg.priorityFeeLamports, (cfg._prefs || {}).defaultPriorityFee, 0),
+      // Smart exit wiring: pass through mode and nested configuration
+      // only when defined.  Undefined values are pruned by sanitizeConfig.
+      smartExitMode: cfg.smartExitMode || undefined,
+      smartExit: cfg.smartExit || undefined,
+      // Liquidity gate wiring
+      liqGate: cfg.liqGate || undefined,
+      // Post buy watcher is nested under its own key.  Include if
+      // present to retain custom duration / exits / rug delay.
+      postBuyWatch: cfg.postBuyWatch || undefined,
+      // UI stamping flag.  This is forwarded to the backend but
+      // consumed primarily on the front‑end to label open trades.
+      ui: Object.assign({}, cfg.ui || {}, {
+        stampSmartExit: cfg.ui?.stampSmartExit !== false,
+      }),
     };
   },
 };

@@ -288,10 +288,51 @@ async function turboSniperStrategy(botCfg = {}) {
   const SKIP_PREFLIGHT      = botCfg.skipPreflight === false ? false : true;
 
   // Post-buy watcher configuration
+  // In addition to the existing LP pull and authority flip exits this
+  // object now carries optional smart exit modes.  Smart exits are
+  // configured via `smartExitMode` and the corresponding nested
+  // config under `smartExit`.  The executor inspects these values
+  // and performs time/volume/liquidity exits post-buy.  See
+  // services/strategies/core/tradeExecutorTurbo.js for details.
   const POST_BUY_WATCH = {
     durationSec: botCfg.postBuyWatch?.durationSec != null ? +botCfg.postBuyWatch.durationSec : 180,
     lpPullExit: botCfg.postBuyWatch?.lpPullExit !== false,
     authorityFlipExit: botCfg.postBuyWatch?.authorityFlipExit !== false,
+    // Rug delay is optional and defaults to zero blocks.  A non-zero
+    // delay causes a fixed ms delay before executing a forced exit.
+    rugDelayBlocks: botCfg.postBuyWatch?.rugDelayBlocks != null ? +botCfg.postBuyWatch.rugDelayBlocks : 0,
+    // Smart exit selection: one of 'time', 'volume', 'liquidity'.  When set
+    // the executor will evaluate the chosen mode after purchase and
+    // automatically exit when the conditions are met.  Undefined to
+    // disable smart exit behaviour.
+    smartExitMode: botCfg.smartExitMode || null,
+    // Config details for each smart exit mode.  Missing values fall
+    // back to sane defaults inside the executor.  See validator for
+    // default values and range checks.
+    smartExit: {
+      time: {
+        maxHoldSec: botCfg.smartExit?.time?.maxHoldSec != null ? +botCfg.smartExit.time.maxHoldSec : undefined,
+        minPnLBeforeTimeExitPct: botCfg.smartExit?.time?.minPnLBeforeTimeExitPct != null ? +botCfg.smartExit.time.minPnLBeforeTimeExitPct : undefined,
+      },
+      volume: {
+        volWindowSec: botCfg.smartExit?.volume?.volWindowSec != null ? +botCfg.smartExit.volume.volWindowSec : undefined,
+        volDropPct: botCfg.smartExit?.volume?.volDropPct != null ? +botCfg.smartExit.volume.volDropPct : undefined,
+      },
+      liquidity: {
+        lpOutflowExitPct: botCfg.smartExit?.liquidity?.lpOutflowExitPct != null ? +botCfg.smartExit.liquidity.lpOutflowExitPct : undefined,
+      },
+    },
+    // Liquidity gate parameters are not used by the executor directly
+    // yet but are passed through so the validator can enforce bounds and
+    // the UI can persist these values.  minPoolUsd, maxImpactPctAtLarge
+    // and the two probe sizes are optional.  When omitted the
+    // executor will ignore liquidity gating.
+    liqGate: {
+      minPoolUsd: botCfg.liqGate?.minPoolUsd != null ? +botCfg.liqGate.minPoolUsd : undefined,
+      maxImpactPctAtLarge: botCfg.liqGate?.maxImpactPctAtLarge != null ? +botCfg.liqGate.maxImpactPctAtLarge : undefined,
+      liqProbeSmallSol: botCfg.liqGate?.liqProbeSmallSol != null ? +botCfg.liqGate.liqProbeSmallSol : undefined,
+      liqProbeLargeSol: botCfg.liqGate?.liqProbeLargeSol != null ? +botCfg.liqGate.liqProbeLargeSol : undefined,
+    },
   };
 
   // Iceberg and impact guard configuration
@@ -553,6 +594,33 @@ async function turboSniperStrategy(botCfg = {}) {
                 abortOnImpactPct: PROBE_ABORT_IMPACT_PCT,
                 delayMs: PROBE_DELAY_MS,
               },
+  // Smart exit configuration and liquidity gate parameters are passed
+  // through to the executor.  They are kept separate from
+  // postBuyWatch to avoid mixing top‑level keys.
+  smartExitMode: botCfg.smartExitMode || null,
+  smartExit: {
+    time: {
+      maxHoldSec: botCfg.smartExit?.time?.maxHoldSec != null ? +botCfg.smartExit.time.maxHoldSec : undefined,
+      minPnLBeforeTimeExitPct: botCfg.smartExit?.time?.minPnLBeforeTimeExitPct != null ? +botCfg.smartExit.time.minPnLBeforeTimeExitPct : undefined,
+    },
+    volume: {
+      volWindowSec: botCfg.smartExit?.volume?.volWindowSec != null ? +botCfg.smartExit.volume.volWindowSec : undefined,
+      volDropPct: botCfg.smartExit?.volume?.volDropPct != null ? +botCfg.smartExit.volume.volDropPct : undefined,
+    },
+    liquidity: {
+      lpOutflowExitPct: botCfg.smartExit?.liquidity?.lpOutflowExitPct != null ? +botCfg.smartExit.liquidity.lpOutflowExitPct : undefined,
+    },
+  },
+  liqGate: {
+    minPoolUsd: botCfg.liqGate?.minPoolUsd != null ? +botCfg.liqGate.minPoolUsd : undefined,
+    maxImpactPctAtLarge: botCfg.liqGate?.maxImpactPctAtLarge != null ? +botCfg.liqGate.maxImpactPctAtLarge : undefined,
+    liqProbeSmallSol: botCfg.liqGate?.liqProbeSmallSol != null ? +botCfg.liqGate.liqProbeSmallSol : undefined,
+    liqProbeLargeSol: botCfg.liqGate?.liqProbeLargeSol != null ? +botCfg.liqGate.liqProbeLargeSol : undefined,
+  },
+  // When enabled, open trades will display the selected smart exit mode
+  // instead of TP/SL in the trade table.  This flag is solely for UI
+  // purposes and does not impact backend logic.
+  stampSmartExit: botCfg.ui?.stampSmartExit !== false,
               quoteLatencyMs: 0,
               cuPriceCurve: botCfg.cuPriceCurve,
               tipCurveCoefficients: botCfg.tipCurveCoefficients,

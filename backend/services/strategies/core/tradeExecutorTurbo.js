@@ -1390,19 +1390,48 @@ const sendRawOverride = rpcPool
 
     /* Post-buy watcher */
     if (txHash && postBuyWatch) {
+      // Destructure extended post-buy watcher config.  In addition to
+      // the classic LP pull and authority flip exits we now support
+      // optional smart exit modes (time, volume, liquidity) and a rug
+      // delay measured in blocks.  All numeric values are converted
+      // up-front to avoid repeated parsing during the interval loop.
       const {
         durationSec = 180,
         lpPullExit = true,
         authorityFlipExit = true,
         rugDelayBlocks = 0,
+        smartExitMode = null,
+        smartExit = {},
       } = postBuyWatch;
+
+      const { time: smartTime = {}, volume: smartVolume = {}, liquidity: smartLiquidity = {} } = smartExit;
+      const maxHoldSec = smartTime.maxHoldSec != null ? +smartTime.maxHoldSec : null;
+      const minPnLBeforeTimeExitPct = smartTime.minPnLBeforeTimeExitPct != null ? +smartTime.minPnLBeforeTimeExitPct : null;
+      const volWindowSec = smartVolume.volWindowSec != null ? +smartVolume.volWindowSec : null;
+      const volDropPct  = smartVolume.volDropPct != null ? +smartVolume.volDropPct : null;
+      const lpOutflowExitPct = smartLiquidity.lpOutflowExitPct != null ? +smartLiquidity.lpOutflowExitPct : null;
+
       const startTime = Date.now();
       const endTime = startTime + Math.max(0, durationSec) * 1000;
+      // If a time-based smart exit is configured we compute its
+      // independent timeout.  Otherwise it remains null and is
+      // ignored.
+      const smartTimeEnd = maxHoldSec != null ? startTime + Math.max(0, maxHoldSec) * 1000 : null;
+      // Track the maximum observed sell quote for volume based exits.
+      let maxOutObserved = null;
+      let lastVolWindowTs = Date.now();
+
       const intervalMs = 5000;
       const sellInputMint = sizedQuote.outputMint;
       const sellOutputMint = sizedQuote.inputMint;
       const sellAmount = sizedQuote.outAmount;
       let active = true;
+      // Convert sellAmount (string/number) into a BigInt baseline for
+      // relative comparisons in liquidity and volume exits.  Fallback to
+      // zero on parse failure.
+      const initialOutAmount = (() => {
+        try { return BigInt(sellAmount); } catch { return 0n; };
+      })();
       const delayMs = Math.max(0, Number(rugDelayBlocks) || 0) * 400;
       async function executeDelayedExit(exitQuote) {
         if (!exitQuote) return;
@@ -1421,37 +1450,115 @@ const sendRawOverride = rpcPool
           });
         } catch { /* ignore */ }
       }
+
       const intervalId = setInterval(async () => {
-        if (!active || Date.now() > endTime) {
+        const now = Date.now();
+        // Bail out if watcher is no longer active or the global duration
+        // expired.  The durationSec guard remains in place to avoid
+        // indefinite looping when no exits fire.
+        if (!active || now > endTime) {
           clearInterval(intervalId);
           return;
         }
         try {
-          if (lpPullExit) {
-            const sq = await getWarmQuote({
+          // Always attempt to fetch a warm quote when any exit is
+          // configured that depends on pricing.  This includes lpPull,
+          // volume, liquidity and time PnL exits.  Warm quote returns
+          // null on failure so downstream checks must handle null.
+          let sq = null;
+          let currentOut = null;
+          const needsQuote = lpPullExit || smartExitMode === 'time' || smartExitMode === 'volume' || smartExitMode === 'liquidity';
+          if (needsQuote) {
+            sq = await getWarmQuote({
               inputMint: sellInputMint,
               outputMint: sellOutputMint,
               amount: String(sellAmount),
               slippage: 5.0,
             });
-            const outAmt = sq?.outAmount ? BigInt(sq.outAmount) : null;
-            if (!sq || outAmt === null || outAmt < BigInt(sellAmount) / 2n) {
+            if (sq && sq.outAmount != null) {
+              try { currentOut = BigInt(sq.outAmount); } catch { currentOut = null; }
+            }
+          }
+          // LP pull exit: sell when current output is less than half
+          // of our original output amount.  This protects against
+          // sudden liquidity drains.  Only runs when enabled.
+          if (lpPullExit) {
+            if (!sq || currentOut === null || currentOut < (initialOutAmount / 2n)) {
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
               return;
             }
           }
+          // Authority flip exit: if freeze authority flips we exit.
           if (authorityFlipExit) {
             const freeze = await checkFreezeAuthority(connPost, sellInputMint);
             if (freeze) {
-              const exitQuote = await getWarmQuote({
+              const exitQuote = sq || await getWarmQuote({
                 inputMint: sellInputMint,
                 outputMint: sellOutputMint,
                 amount: String(sellAmount),
                 slippage: 5.0,
               });
               await executeDelayedExit(exitQuote);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
+          }
+          // Smart exit: time based
+          if (smartExitMode === 'time' && smartTimeEnd != null && now >= smartTimeEnd) {
+            // If no PnL threshold is provided or we cannot compute
+            // currentOut, exit immediately.  Otherwise compute PnL and
+            // require that it meets the minimum before exiting.
+            let shouldExit = false;
+            if (minPnLBeforeTimeExitPct == null || currentOut === null) {
+              shouldExit = true;
+            } else {
+              try {
+                const diff = currentOut - initialOutAmount;
+                // When diff is negative this yields a negative PnL
+                const pnlPct = Number(diff) * 100 / Number(initialOutAmount);
+                if (pnlPct >= minPnLBeforeTimeExitPct) shouldExit = true;
+              } catch { shouldExit = true; }
+            }
+            if (shouldExit) {
+              await executeDelayedExit(sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
+          }
+          // Smart exit: volume based
+          if (smartExitMode === 'volume' && volWindowSec != null && volDropPct != null && currentOut !== null) {
+            // Initialize maxOutObserved on the first iteration
+            if (maxOutObserved === null) {
+              maxOutObserved = currentOut;
+              lastVolWindowTs = now;
+            }
+            // Reset maxOutObserved if the window expired
+            if (now - lastVolWindowTs >= volWindowSec * 1000) {
+              maxOutObserved = currentOut;
+              lastVolWindowTs = now;
+            }
+            // Update maxOutObserved if current quote surpasses it
+            if (currentOut > maxOutObserved) {
+              maxOutObserved = currentOut;
+            }
+            // Compute percentage drop from the peak to current
+            const drop = maxOutObserved > 0n ? (Number(maxOutObserved - currentOut) * 100) / Number(maxOutObserved) : 0;
+            if (drop >= volDropPct) {
+              await executeDelayedExit(sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
+          }
+          // Smart exit: liquidity based
+          if (smartExitMode === 'liquidity' && lpOutflowExitPct != null && currentOut !== null) {
+            const drop = initialOutAmount > 0n ? (Number(initialOutAmount - currentOut) * 100) / Number(initialOutAmount) : 0;
+            if (drop >= lpOutflowExitPct) {
+              await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
               return;

@@ -57,7 +57,9 @@ export const OPTIONAL_FIELDS = [
   "tipCurveCoefficients",
   "riskLevels",
   "stopLossPercent",
-  "rugDelayBlocks",
+  // post-buy watch options are nested under postBuyWatch to keep
+  // related fields together.  RugDelayBlocks is nested accordingly.
+  "postBuyWatch.rugDelayBlocks",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -190,6 +192,35 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       durationSec: 180,
       lpPullExit: true,
       authorityFlipExit: true,
+      rugDelayBlocks: 0,
+    },
+
+    // Smart exit configuration.  When smartExitMode is set to one of
+    // "time", "volume" or "liquidity" the corresponding nested
+    // configuration is used.  An empty string disables smart exits.
+    smartExitMode       : "",
+    smartExit           : {
+      time: {
+        maxHoldSec: "",
+        minPnLBeforeTimeExitPct: "",
+      },
+      volume: {
+        volWindowSec: "",
+        volDropPct: "",
+      },
+      liquidity: {
+        lpOutflowExitPct: "",
+      },
+    },
+
+    // LP Gate configuration used to guard entries.  All fields are
+    // optional; leave blank to disable.  The large/small probes are
+    // expressed in whole SOL units.
+    liqGate             : {
+      minPoolUsd: "",
+      maxImpactPctAtLarge: "",
+      liqProbeSmallSol: "",
+      liqProbeLargeSol: "",
     },
 
     // Iceberg & impact guard
@@ -301,11 +332,10 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
      */
     stopLossPercent: "",
 
-    /**
-     * Number of blocks to wait after a pool is detected before
-     * attempting to sell due to suspected rug pull.  Set to zero to
-     * disable the delay.
-     */
+    // NOTE: rugDelayBlocks has been moved under postBuyWatch.rugDelayBlocks.
+    // The top-level property is retained for backward compatibility but
+    // is not used by the updated turbo sniper strategy.  To avoid
+    // confusion we set it to an empty string by default.
     rugDelayBlocks: "",
 
     // Cross‑feed token resolver config
@@ -461,6 +491,169 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       <div className="bg-zinc-800/70 text-zinc-300 text-xs rounded-md p-2 mb-2">
         This strategy hunts early-stage listings, letting you tune price &amp; volume
         windows, token age, and more to precision-snipe brand-new or trending tokens.
+      </div>
+
+      {/* ——— Smart Exit (Turbo Only) ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">Smart Exit</div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span className="flex items-center gap-1">
+              Smart Exit Mode <StrategyTooltip name="smartExitMode" />
+            </span>
+            <select
+              name="smartExitMode"
+              value={merged.smartExitMode ?? ""}
+              onChange={change}
+              disabled={disabled}
+              className={inp}
+            >
+              <option value="">Off</option>
+              <option value="time">Time</option>
+              <option value="volume">Volume</option>
+              <option value="liquidity">Liquidity</option>
+            </select>
+          </label>
+          {merged.smartExitMode === 'time' && (
+            <>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Max Hold (sec)</span>
+                <input
+                  type="number"
+                  name="smartExit.time.maxHoldSec"
+                  min="0"
+                  value={merged.smartExit?.time?.maxHoldSec ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 600"
+                  className={inp}
+                />
+              </label>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Min PnL % before Time Exit</span>
+                <input
+                  type="number"
+                  name="smartExit.time.minPnLBeforeTimeExitPct"
+                  min="0"
+                  value={merged.smartExit?.time?.minPnLBeforeTimeExitPct ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 20"
+                  className={inp}
+                />
+              </label>
+            </>
+          )}
+          {merged.smartExitMode === 'volume' && (
+            <>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Window (sec)</span>
+                <input
+                  type="number"
+                  name="smartExit.volume.volWindowSec"
+                  min="1"
+                  value={merged.smartExit?.volume?.volWindowSec ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 30"
+                  className={inp}
+                />
+              </label>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Burst→Drop Exit if ≥ %</span>
+                <input
+                  type="number"
+                  name="smartExit.volume.volDropPct"
+                  min="0"
+                  max="100"
+                  value={merged.smartExit?.volume?.volDropPct ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 30"
+                  className={inp}
+                />
+              </label>
+            </>
+          )}
+          {merged.smartExitMode === 'liquidity' && (
+            <>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>LP Outflow Exit if ≥ %</span>
+                <input
+                  type="number"
+                  name="smartExit.liquidity.lpOutflowExitPct"
+                  min="0"
+                  max="100"
+                  value={merged.smartExit?.liquidity?.lpOutflowExitPct ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 50"
+                  className={inp}
+                />
+              </label>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* ——— Liquidity Gate ——— */}
+      <div className="border border-zinc-700 rounded-md p-3 mt-6">
+        <div className="font-semibold text-sm mb-2">LP Gate</div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span>Min Pool USD</span>
+            <input
+              type="number"
+              name="liqGate.minPoolUsd"
+              min="0"
+              value={merged.liqGate?.minPoolUsd ?? ""}
+              onChange={change}
+              disabled={disabled}
+              placeholder="e.g. 10000"
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span>Max Impact @ Large %</span>
+            <input
+              type="number"
+              name="liqGate.maxImpactPctAtLarge"
+              min="0"
+              max="100"
+              value={merged.liqGate?.maxImpactPctAtLarge ?? ""}
+              onChange={change}
+              disabled={disabled}
+              placeholder="e.g. 50"
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span>Small Probe (SOL)</span>
+            <input
+              type="number"
+              name="liqGate.liqProbeSmallSol"
+              min="0"
+              value={merged.liqGate?.liqProbeSmallSol ?? ""}
+              onChange={change}
+              disabled={disabled}
+              placeholder="e.g. 0.1"
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span>Large Probe (SOL)</span>
+            <input
+              type="number"
+              name="liqGate.liqProbeLargeSol"
+              min="0"
+              value={merged.liqGate?.liqProbeLargeSol ?? ""}
+              onChange={change}
+              disabled={disabled}
+              placeholder="e.g. 1"
+              className={inp}
+            />
+          </label>
+        </div>
       </div>
       <div className="flex justify-end mb-2">
         <button
@@ -1477,17 +1670,17 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             className={inp}
           />
         </label>
-        {/* Rug delay blocks */}
+        {/* Rug delay blocks (nested under postBuyWatch) */}
         <label className="flex flex-col text-sm font-medium gap-1">
           <span className="flex items-center gap-1">
-            Rug Delay (blocks) <StrategyTooltip name="rugDelayBlocks" />
+            Rug Delay (blocks) <StrategyTooltip name="postBuyWatch.rugDelayBlocks" />
           </span>
           <input
             type="number"
-            name="rugDelayBlocks"
+            name="postBuyWatch.rugDelayBlocks"
             min="0"
             max="20"
-            value={merged.rugDelayBlocks ?? ""}
+            value={merged.postBuyWatch?.rugDelayBlocks ?? ""}
             onChange={change}
             disabled={disabled}
             placeholder="e.g. 2"
