@@ -167,6 +167,25 @@ if (modeFromCLI) {
 
   const app = express();
 
+  // Subscribe to risk engine kill events. When a user breaches a risk limit
+  // the risk engine emits a 'kill' event. We relay this as a notification
+  // so the user sees an alert in their preferred channels. This is set up
+  // early to ensure events emitted during API handling are captured. Note:
+  // requiring here avoids importing riskEngine in CLI mode where it's unused.
+  try {
+    const riskEngine = require('./services/riskEngine');
+    const { sendNotification } = require('./services/notifications');
+    riskEngine.on('kill', ({ userId, reason }) => {
+      try {
+        sendNotification(userId, 'RISK_KILL', { message: `Trading disabled: ${reason}` });
+      } catch (err) {
+        logger.error('Failed to send risk kill notification', { err: err.message });
+      }
+    });
+  } catch (_) {
+    // risk engine or notifications may not be available in some contexts
+  }
+
   // -------------------------------------------------------------------------
   // Server hardening: remove X-Powered-By header and apply security middleware.
   app.disable('x-powered-by');

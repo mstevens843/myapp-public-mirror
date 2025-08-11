@@ -346,19 +346,37 @@ rotationBot: (cfg, selectedWallets, _target, resolvedWallets, activeWallet) => {
    };
 },
 
-paperTrader: (cfg, wallets, target, resolved, activeWallet) => ({
-  ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-  dryRun              : true,
-  outputMint          : cfg.outputMint,
-  maxSpendPerToken    : safeNum(cfg.maxSpendPerToken ?? cfg.positionSize),
-  entryThreshold      : safeNum(cfg.entryThreshold, 3),
-  volumeThreshold     : safeNum(cfg.volumeThreshold, 50000),
-  priceWindow         : cfg.priceWindow,
-  volumeWindow        : cfg.volumeWindow,
-  tokenFeed           : cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
-  minTokenAgeMinutes  : cfg.minTokenAgeMinutes,
-  maxTokenAgeMinutes  : cfg.maxTokenAgeMinutes,
-}),
+  paperTrader: (cfg, wallets, target, resolved, activeWallet) => {
+    const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
+    // Build the core config identical to Sniper but force dryRun
+    const core = {
+      ...base,
+      dryRun: true,
+      outputMint: cfg.outputMint,
+      maxSpendPerToken: safeNum(cfg.maxSpendPerToken ?? cfg.positionSize),
+      entryThreshold: safeNum(cfg.entryThreshold, 3),
+      volumeThreshold: safeNum(cfg.volumeThreshold, 50000),
+      priceWindow: cfg.priceWindow,
+      volumeWindow: cfg.volumeWindow,
+      tokenFeed: cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
+      minTokenAgeMinutes: cfg.minTokenAgeMinutes,
+      maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
+    };
+    // ✨ Added in paper-sim-upgrade
+    // Append optional simulation parameters when provided.  These fields
+    // are stripped by sanitizeConfig if empty or undefined.  They
+    // correspond directly to the backend paper execution adapter.
+    return {
+      ...core,
+      ...(cfg.execModel ? { execModel: cfg.execModel } : {}),
+      ...(cfg.seed ? { seed: cfg.seed } : {}),
+      ...(cfg.slippageBpsCap != null && cfg.slippageBpsCap !== "" ? { slippageBpsCap: cfg.slippageBpsCap } : {}),
+      ...(cfg.latency && Object.keys(cfg.latency).length ? { latency: cfg.latency } : {}),
+      ...(cfg.failureRates && Object.keys(cfg.failureRates).length ? { failureRates: cfg.failureRates } : {}),
+      ...(cfg.partials && Object.keys(cfg.partials).length ? { partials: cfg.partials } : {}),
+      ...(cfg.enableShadowMode != null ? { enableShadowMode: cfg.enableShadowMode } : {}),
+    };
+  },
 stealthBot: (cfg, selectedWallets, activeWallet)  => {
   const p = cfg._prefs || {};
   // Prefer the wallets chosen **inside** the Stealth-Bot modal.

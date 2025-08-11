@@ -3,7 +3,7 @@
    Permanent dry‑run clone of Sniper
 
    • Runs *identical* filters, safety checks, quotes & logs
-   • Forces dryRun → simulateBuy()
+   • Forces dryRun → simulateBuy()
    • Trades logged like real ones (strategy:"Paper Trader")
    • Sell = open‑trades ➜ closed‑trades (handled elsewhere)
 */
@@ -31,6 +31,13 @@ const guards          = require("./core/tradeGuards");
 const createCooldown  = require("./core/cooldown");
 const { getSafeQuote }  = require("./core/quoteHelper");
 const { simulateBuy }   = require("./core/tradeExecutor");   // 💯 always simulate
+// ✨ Added in paper-sim-upgrade
+// We introduce a paper execution adapter that can perform more realistic
+// simulations including slippage, latency and partial fills.  The adapter
+// is only used when execModel !== "ideal" (default) so that existing
+// behavior remains unchanged.  See core/paperExecutionAdapter.js for
+// implementation details.
+const { executePaperTrade } = require("./core/paperTrader/paperExecutionAdapter");
 const { passes, explainFilterFail }  = require("./core/passes");
 const { createSummary, tradeExecuted } = require("./core/alerts");
 const runLoop          = require("./core/loopDriver");
@@ -53,7 +60,46 @@ module.exports = async function paperTrader(cfg = {}) {
 
   /* ── force permanent dry‑run ────────────────────── */
   cfg.dryRun = true;
-  const execBuy = simulateBuy;           // never liveBuy()
+
+  // ✨ Added in paper-sim-upgrade
+  // Determine whether to use the new paper execution adapter.  The
+  // `execModel` config option controls the simulation style.  When
+  // absent or set to "ideal" we fall back to the existing simulateBuy
+  // implementation to preserve legacy behaviour.  Otherwise we
+  // construct a wrapper around the adapter that accepts the quote,
+  // mint and meta values and forwards simulation parameters.
+  const execModel = cfg.execModel || "ideal";
+  const paperParams = {
+    execModel,
+    seed: cfg.seed || null,
+    latency: cfg.latency || null,
+    slippageBpsCap: cfg.slippageBpsCap || cfg.slippageBps || null,
+    failureRates: cfg.failureRates || null,
+    partials: cfg.partials || null,
+    priorityFeeLamports: cfg.priorityFeeLamports || null,
+    enableShadowMode: cfg.enableShadowMode || false,
+  };
+
+  let execBuy;
+  if (execModel && execModel !== "ideal") {
+    execBuy = async ({ quote, mint, meta }) => {
+      // Generate a deterministic paper run identifier for each run
+      const runId = cfg.paperRunId || uuid();
+      const result = await executePaperTrade({ quote, mint, meta, config: paperParams });
+      // Attach the run id to the result for downstream consumers
+      result.paperRunId = runId;
+      // Log the simulation result for debugging.  In a future
+      // enhancement this data could be persisted to the DB.
+      console.log("[paperExecutionAdapter]", JSON.stringify(result));
+      // Mimic the behaviour of simulateBuy() by returning a
+      // synthetic txHash.  Downstream code uses the return value as
+      // the txHash.  We prefix with "paper:" so any viewers can
+      // distinguish it from a real hash.
+      return `paper:${runId}`;
+    };
+  } else {
+    execBuy = simulateBuy;           // never liveBuy()
+  }
 
   /* ── config mirroring Sniper ────────────────────── */
   const BASE_MINT        = cfg.buyWithUSDC ? USDC_MINT : (cfg.inputMint || SOL_MINT);
@@ -92,7 +138,7 @@ module.exports = async function paperTrader(cfg = {}) {
 
   /* ── runtime state ───────────────────────────────── */
   const cd         = createCooldown(COOLDOWN_MS);
-  const summary    = createSummary("Paper Sniper", log, cfg.userId);
+  const summary    = createSummary("Paper Sniper", log, cfg.userId);
   const snipedMint = new Set();
   let   todaySol   = 0;
   let   trades     = 0;

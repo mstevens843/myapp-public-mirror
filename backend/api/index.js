@@ -4,6 +4,8 @@ const router = express.Router();
 // Feature flag middleware must run before authentication to short‑circuit
 // disabled endpoints.  See backend/config/featureFlags.js for details.
 const featureFlagMiddleware = require('../middleware/featureFlag');
+const requestId = require('../middleware/requestId');
+const idempotency = require('../middleware/idempotency');
 
 const modeRouter = require('./modes');
 const tradeRouter = require('./trades');
@@ -33,6 +35,12 @@ router.use((req, res, next) => {
   next();
 });
 
+// 🚨 Attach a request ID to all incoming requests. This must be early in
+// the middleware chain so subsequent logs and idempotency records include
+// the ID. The middleware will also propagate the ID in the response header.
+router.use(requestId);
+
+
 // 📴 Feature flag check before any other middleware
 router.use(featureFlagMiddleware);
 
@@ -48,6 +56,22 @@ router.use((req, res, next) => {
   }
   console.log('🔒 Protected route, applying requireAuth:', req.path);
   requireAuth(req, res, next);
+});
+
+// 🧾 Idempotency middleware: after authentication we inspect POST requests
+// and enforce Idempotency-Key semantics. We place this after requireAuth
+// so that req.user is available to scope records. Feature flag
+// FEATURE_IDEMPOTENCY controls whether this is enabled.
+router.use(async (req, res, next) => {
+  if (req.method !== 'POST') return next();
+  const { isEnabled } = require('../utils/featureFlags');
+  if (!isEnabled('IDEMPOTENCY')) return next();
+  try {
+    await idempotency(req, res, next);
+  } catch (err) {
+    console.error('Idempotency middleware error:', err.message);
+    return next();
+  }
 });
 
 // Attach all API sub‑routes

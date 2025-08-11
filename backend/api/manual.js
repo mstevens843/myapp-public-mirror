@@ -16,6 +16,9 @@ const { v4: uuid } = require("uuid");
 // wrapper ensures the underlying operation is executed at most once
 // within a short window. Duplicate calls return the cached result.
 const { runJob } = require("../services/jobs/jobRunner");
+const riskEngine = require('../services/riskEngine');
+const { checkToken: checkTokenSafety } = require('../services/security/tokenSafetyService');
+const { sendNotification } = require('../services/notifications');
 // Explicitly import safety check helper (was implicitly referenced)
 const { isSafeToBuy } = require("../services/utils/safety/safetyCheckers/botIsSafeToBuy");
 
@@ -440,6 +443,49 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
         const safe = await isSafeToBuy(mint);
         if (!safe) return { status: 403, response: { error: "Token failed honeypot check." } };
       }
+
+      // ---- Global token safety service ----
+      // Before performing a buy verify the token is considered safe. The
+      // tokenSafetyService returns a verdict of allow/warn/block along with
+      // reasons. A verdict of "block" aborts the trade immediately. When
+      // the verdict is "warn" the user must explicitly set `force=true` to
+      // proceed. Warnings are surfaced to the UI via an error response so
+      // the frontend can display reasons.
+      try {
+        const { verdict, reasons } = await checkTokenSafety(mint);
+        if (verdict === 'block') {
+          return { status: 403, response: { error: `Token blocked: ${reasons.join(', ')}` } };
+        }
+        if (verdict === 'warn' && !force) {
+          return { status: 400, response: { error: `Token flagged: ${reasons.join(', ')}` } };
+        }
+      } catch (e) {
+        console.error('token safety check error', e);
+      }
+
+      // ---- Risk engine check ----
+      // Estimate proposed USD exposure. If amountInUSDC is provided we use
+      // that. Otherwise we roughly estimate SOL value using a configured
+      // fallback price (via environment) since manual trade flows require
+      // quoting anyway. For accurate exposures integrators should provide
+      // amountInUSDC.
+      let proposedUsd = 0;
+      try {
+        if (amountInUSDC) proposedUsd = parseFloat(amountInUSDC);
+        else if (amountInSOL) {
+          const solPrice = parseFloat(process.env.SOL_PRICE_USD || '30');
+          proposedUsd = parseFloat(amountInSOL) * solPrice;
+        }
+      } catch (_) {}
+      if (!force) {
+        const rc = riskEngine.checkTrade(req.user.id, mint, proposedUsd);
+        if (!rc.allowed) {
+          return { status: 403, response: { error: `Risk limit exceeded: ${rc.reason}` } };
+        }
+        if (proposedUsd > rc.maxUsd) {
+          return { status: 403, response: { error: `Trade size exceeds risk budget. Max allowed: ${rc.maxUsd.toFixed(2)} USD` } };
+        }
+      }
       const prefsForConfirm = await getUserPreferencesByUserId(req.user.id, context);
       if (prefsForConfirm.confirmBeforeTrade && !force) {
         return { status: 403, response: { error: "🔒 Trade requires confirmation." } };
@@ -495,6 +541,21 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
         });
         console.log(`✅ Created new independent TP/SL rule for ${mint}`);
       }
+
+      // Record exposure after successful buy in the risk engine. If the
+      // transaction did not return a dollar value we estimate using the
+      // same heuristic as above. We ignore any errors here as failures
+      // shouldn’t block the client response.
+      try {
+        let usd = 0;
+        if (amountInUSDC) usd = parseFloat(amountInUSDC);
+        else if (amountInSOL) {
+          const solPrice = parseFloat(process.env.SOL_PRICE_USD || '30');
+          usd = parseFloat(amountInSOL) * solPrice;
+        }
+        riskEngine.recordTrade(req.user.id, mint, usd);
+      } catch (_) {}
+
       return { status: 200, response: { success: true, result } };
     });
     const status = jobResult.status || 200;

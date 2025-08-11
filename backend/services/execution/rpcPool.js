@@ -46,6 +46,11 @@ class RpcPool {
     this._rrIndex = 0;       // round-robin cursor
     this._fanoutIdx = 0;     // start index for pickN
     this.metrics = metrics || { increment(){} };
+    // Initialise health stats and circuit breaker tracking. These maps are keyed by
+    // endpoint and used to compute health scores and temporarily remove
+    // unhealthy endpoints from selection.
+    this._stats = {};
+    this._breaker = {};
     // Eagerly build Connection instances if the library is available.
     this.connections = this.endpoints.map((ep) => {
       if (SolanaConnection) {
@@ -63,6 +68,63 @@ class RpcPool {
       // sendRawTransaction implementation should be attached by tests.
       return { _endpoint: ep };
     });
+    // Populate per-endpoint stats and breaker state
+    for (const conn of this.connections) {
+      const ep = conn._endpoint;
+      this._stats[ep] = { durations: [], errors: 0, total: 0 };
+      this._breaker[ep] = { openUntil: 0 };
+    }
+  }
+
+  /**
+   * Update stats after a send attempt. Records latency and success/failure
+   * counts. If error rate exceeds a threshold the circuit breaker may open.
+   *
+   * @param {string} endpoint
+   * @param {number} durationMs
+   * @param {boolean} error
+   */
+  _updateStats(endpoint, durationMs, error) {
+    const s = this._stats[endpoint];
+    if (!s) return;
+    s.total += 1;
+    if (error) {
+      s.errors += 1;
+      // If error rate exceeds 50% with at least 5 samples, open circuit for 30s
+      if (s.total >= 5 && s.errors / s.total > 0.5) {
+        const breaker = this._breaker[endpoint] || { openUntil: 0 };
+        breaker.openUntil = Date.now() + 30000;
+        this._breaker[endpoint] = breaker;
+      }
+    } else {
+      // Only record durations for successes
+      s.durations.push(durationMs);
+      if (s.durations.length > 50) s.durations.shift();
+    }
+  }
+
+  /**
+   * Compute a health score for an endpoint based on recent latencies and error rate.
+   * 1.0 indicates healthy, lower values indicate degraded performance. Scores may
+   * be negative when the circuit is open.
+   *
+   * @param {string} endpoint
+   */
+  _healthScore(endpoint) {
+    const s = this._stats[endpoint];
+    if (!s) return 1;
+    const total = s.total || 1;
+    const errorRate = s.errors / total;
+    const durations = s.durations.slice().sort((a, b) => a - b);
+    const idx = Math.floor(0.95 * durations.length);
+    const p95 = durations[idx] || 0;
+    const latencyPenalty = Math.min(p95 / 1000, 1); // degrade up to 1 for ≥1s
+    let score = 1 - errorRate - latencyPenalty * 0.5;
+    const breaker = this._breaker[endpoint];
+    if (breaker && breaker.openUntil > Date.now()) {
+      score -= 1;
+    }
+    return score;
   }
 
   /**
@@ -72,10 +134,33 @@ class RpcPool {
    * @returns {Object|null}
    */
   getConnection() {
-    if (!this.connections.length) return null;
-    const conn = this.connections[this._rrIndex % this.connections.length];
-    this._rrIndex = (this._rrIndex + 1) % this.connections.length;
-    return conn;
+    const total = this.connections.length;
+    if (!total) return null;
+    // Filter out connections with open circuit
+    const candidates = this.connections.filter((conn) => {
+      const b = this._breaker[conn._endpoint];
+      return !(b && b.openUntil > Date.now());
+    });
+    let selected;
+    if (candidates.length === 0) {
+      // All circuits open; ignore breakers temporarily
+      selected = this.connections[this._rrIndex % total];
+    } else {
+      // Pick the endpoint with the highest health score
+      selected = candidates[0];
+      let bestScore = this._healthScore(selected._endpoint);
+      for (let i = 1; i < candidates.length; i++) {
+        const c = candidates[i];
+        const score = this._healthScore(c._endpoint);
+        if (score > bestScore) {
+          selected = c;
+          bestScore = score;
+        }
+      }
+    }
+    // Advance round-robin index regardless of selection to avoid starvation
+    this._rrIndex = (this._rrIndex + 1) % total;
+    return selected;
   }
 
   /**
@@ -211,8 +296,12 @@ class RpcPool {
             return;
           }
 
+          let startTime;
           try {
+            startTime = Date.now();
             const res = await sendFn.call(conn, rawTx, sendOpts);
+            // update health stats on success
+            this._updateStats(conn._endpoint || 'unknown', Date.now() - startTime, false);
             if (finished) return;
 
             successCount += 1;
@@ -227,6 +316,10 @@ class RpcPool {
               resolve(firstSig || res);
             }
           } catch (err) {
+            // update health stats on error
+            if (startTime) {
+              this._updateStats(conn._endpoint || 'unknown', Date.now() - startTime, true);
+            }
             // Treat "already processed/known" as an ack
             if (treatAlreadyProcessedAsOk && this._looksLikeAlreadyProcessed(err)) {
               if (finished) return;

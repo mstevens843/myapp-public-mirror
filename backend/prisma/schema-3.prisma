@@ -2,6 +2,100 @@ generator client {
   provider = "prisma-client-js"
 }
 
+/// Stores results for idempotent API calls.  Each record is keyed by user and a
+/// unique idempotency key.  On repeat calls within the TTL window the stored
+/// response body and status are returned immediately.  Expired records should
+/// be purged by a scheduled job.
+model IdempotencyRecord {
+  id           Int       @id @default(autoincrement())
+  userId       String
+  key          String
+  status       Int
+  resultHash   String
+  payload      Bytes
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime
+  @@unique([userId, key])
+}
+
+/// Refresh tokens with rotation and reuse detection.  This table stores each
+/// issued refresh token along with a family identifier.  When a refresh token
+/// is used the old token is revoked and replaced with a new one.  Reuse of a
+/// revoked token will revoke the entire family.
+model RefreshTokenV2 {
+  id           Int      @id @default(autoincrement())
+  userId       String
+  jti          String   // JWT ID
+  familyId     String
+  revokedAt    DateTime?
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  userAgent    String?
+  ip           String?
+  walletId     Int?
+  user         User     @relation(fields: [userId], references: [id])
+  wallet       Wallet?  @relation(fields: [walletId], references: [id])
+  @@unique([userId, jti])
+}
+
+/// Append-only security log with tamper-evident hash chain.  Each row stores
+/// the previous hash and the current hash computed via HMAC over the metadata.
+/// Consumers should never update or delete rows in this table.
+model SecurityAuditLog {
+  id         Int      @id @default(autoincrement())
+  ts         DateTime @default(now())
+  userId     String
+  type       String
+  metaJson   Json?
+  prevHash   String?
+  hash       String
+  @@index([userId, ts])
+}
+
+/// Per-user notification channel preferences.  Each user can enable or disable
+/// specific channels (email, telegram, slack, webhook) per event type.  The
+/// metaJson field stores channel specific metadata such as webhook URLs or
+/// Slack tokens.
+model NotificationPreference {
+  id         Int      @id @default(autoincrement())
+  userId     String
+  event      String    // event name, e.g. "TRADE_EXECUTED"
+  channel    String    // "email", "telegram", "slack", "webhook"
+  enabled    Boolean   @default(true)
+  metaJson   Json?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @default(now()) @updatedAt
+  user       User      @relation(fields: [userId], references: [id])
+  @@unique([userId, event, channel])
+}
+
+/// Token safety verdicts and allow/deny lists.  The `status` field is one of
+/// "allow", "warn" or "deny".  The `reason` provides a human-friendly
+/// explanation and the `metaJson` can store additional context.
+model TokenSafetyList {
+  mint       String   @id
+  status     String
+  reason     String?
+  metaJson   Json?
+  updatedAt  DateTime  @default(now()) @updatedAt
+}
+
+/// Per-user risk state used by the cross‑strategy risk engine.  Tracks daily
+/// losses and current exposures across tokens and sectors.  A kill switch can
+/// be engaged when any limit is breached.  Daily totals are reset by a
+/// scheduled job at midnight UTC.
+model UserRiskState {
+  id             Int       @id @default(autoincrement())
+  userId         String    @unique
+  dailyLossUsd   Float     @default(0)
+  exposureUsd    Float     @default(0)
+  exposuresJson  Json      @default("{}") // JSON map of mint/sector to exposure
+  killSwitch     Boolean   @default(false)
+  killEngagedAt  DateTime?
+  updatedAt      DateTime  @default(now()) @updatedAt
+  user           User      @relation(fields: [userId], references: [id])
+}
+
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -23,16 +117,7 @@ model User {
   limitOrders       LimitOrder[]
   tpSlRules         TpSlRule[]
   scheduledStrategies ScheduledStrategy[]
-
   RefreshToken      RefreshToken[]
-  refreshTokensV2   RefreshTokenV2[]     // NEW: relation to v2 refresh tokens
-
-  // NEW: relations to new tables
-  idempotencyRecords      IdempotencyRecord[]
-  securityAuditLogs       SecurityAuditLog[]
-  notificationPreferences NotificationPreference[]
-  riskState               UserRiskState?
-
   // Payments
   subscriptionStatus String   @default("inactive") // e.g. active, canceled
   stripeCustomerId   String?  @unique              // Stripe customer ID
@@ -59,8 +144,8 @@ model User {
   /// When a user opts to use the same pass-phrase for all current and future
   /// wallets this field stores the Argon2id hash of that pass-phrase. When
   /// creating or migrating wallets the backend will fall back to this hash
-  /// whenever an individual wallet has no `passphraseHash` set. This allows
-  /// per-wallet isolation even when a global pass-phrase exists.
+  /// whenever an individual wallet has no `passphraseHash` set. If null no
+  /// global pass-phrase is defined.
   defaultPassphraseHash String?
   /// Optional short hint shown to the user for the global wallet pass-phrase.
   /// This is never used for authentication and is purely informational.
@@ -105,7 +190,6 @@ model User {
   armSessions ArmSession[] 
 }
 
-
 model Wallet {
   id         Int      @id @default(autoincrement())
   label      String
@@ -137,7 +221,6 @@ model Wallet {
   trades        Trade[]          @relation("WalletTrades")
   closed        ClosedTrade[]
   refreshTokens RefreshToken[]
-  refreshTokensV2 RefreshTokenV2[]   // NEW: relation to v2 refresh tokens linked to this wallet
   tpSlRules     TpSlRule[]
   limitOrders   LimitOrder[]
   dcaOrders     DcaOrder[]
@@ -193,41 +276,6 @@ model Trade {
   briberyAmount  Int?   
   mevShared     Boolean  @default(false)
   source          String? 
-
-  // ✨ Added in paper-sim-upgrade
-  /// Optional identifier grouping fills for a single paper run.  When
-  /// unset this trade is considered a live trade.
-  paperRunId            String?
-  /// The execution model used for the simulation.  Live trades leave
-  /// this null.  See the ExecModel enum above.
-  execModel             ExecModel?
-  /// Seed used to initialise the deterministic random generator.  If
-  /// null the simulator generates a random seed.
-  seed                  String?
-  /// Raw route JSON describing the AMM/orderbook path taken by the
-  /// simulation.  Nullable for backwards compatibility.
-  routeJson             Json?
-  /// Array of fills produced by the simulator.  Each element
-  /// contains per‑fill pricing and amounts.  Live trades leave this
-  /// null.
-  fillsJson             Json?
-  /// Total latency in milliseconds experienced by the simulated
-  /// execution.  Live trades leave this null.
-  latencyMs             Int?
-  /// Total priority fee paid in lamports.  For live trades this is
-  /// stored in the existing priorityFee field.
-  priorityFeeLamports   BigInt?
-  /// Estimated compute units consumed by the simulated transaction.
-  cuEstimate            Int?
-  /// Sum of all fees (priority, CU, rent) in lamports.
-  feesTotalLamports     BigInt?
-  /// Weighted average fill price realised by the simulator.
-  simFillPrice          Decimal?
-  /// Realised slippage in basis points (bps) aggregated across all
-  /// fills.  Null for live trades.
-  slippageBps           Int?
-  /// If the simulation failed this field stores a short reason code.
-  reasonCode            String?
 }
 
 model ClosedTrade {
@@ -351,7 +399,11 @@ model SavedConfigs {
   privateRpcUrl        String?
   /// Catch-all field for any additional strategy-specific settings not yet modelled
   extras      Json?
+  /// Version number for config schema.  When reading configs the loader
+  /// should migrate older versions to the latest shape and write back the updated document.
+  version     Int      @default(1)
   createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
   trades      Trade[]   @relation("TradeConfig")
   User User[]
 
@@ -581,111 +633,4 @@ model ArmSession {
   wallet Wallet @relation(fields: [walletId], references: [id])
   @@index([userId])
   @@index([walletId])
-}
-
-
-// ✨ Added in paper-sim-upgrade
-// Execution model for paper simulations.  When execModel is not set
-// the simulator behaves like the legacy ideal fill.  Additional
-// models introduce depth‑aware pricing and Jito fallback logic.
-enum ExecModel {
-  ideal
-  amm_depth
-  jito_fallback
-}
-
-
-
-/// Stores results for idempotent API calls.  Each record is keyed by user and a
-/// unique idempotency key.  On repeat calls within the TTL window the stored
-/// response body and status are returned immediately.  Expired records should
-/// be purged by a scheduled job.
-model IdempotencyRecord {
-  id           Int       @id @default(autoincrement())
-  userId       String
-  key          String
-  status       Int
-  resultHash   String
-  payload      Bytes
-  createdAt    DateTime  @default(now())
-  expiresAt    DateTime
-  @@unique([userId, key])
-}
-
-/// Refresh tokens with rotation and reuse detection.  This table stores each
-/// issued refresh token along with a family identifier.  When a refresh token
-/// is used the old token is revoked and replaced with a new one.  Reuse of a
-/// revoked token will revoke the entire family.
-model RefreshTokenV2 {
-  id           Int      @id @default(autoincrement())
-  userId       String
-  jti          String   // JWT ID
-  familyId     String
-  revokedAt    DateTime?
-  createdAt    DateTime @default(now())
-  expiresAt    DateTime
-  userAgent    String?
-  ip           String?
-  walletId     Int?
-  user         User     @relation(fields: [userId], references: [id])
-  wallet       Wallet?  @relation(fields: [walletId], references: [id])
-  @@unique([userId, jti])
-}
-
-/// Append-only security log with tamper-evident hash chain.  Each row stores
-/// the previous hash and the current hash computed via HMAC over the metadata.
-/// Consumers should never update or delete rows in this table.
-model SecurityAuditLog {
-  id         Int      @id @default(autoincrement())
-  ts         DateTime @default(now())
-  userId     String
-  type       String
-  metaJson   Json?
-  prevHash   String?
-  hash       String
-  @@index([userId, ts])
-}
-
-/// Per-user notification channel preferences.  Each user can enable or disable
-/// specific channels (email, telegram, slack, webhook) per event type.  The
-/// metaJson field stores channel specific metadata such as webhook URLs or
-/// Slack tokens.
-model NotificationPreference {
-  id         Int      @id @default(autoincrement())
-  userId     String
-  event      String    // event name, e.g. "TRADE_EXECUTED"
-  channel    String    // "email", "telegram", "slack", "webhook"
-  enabled    Boolean   @default(true)
-  metaJson   Json?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @default(now()) @updatedAt
-  user       User      @relation(fields: [userId], references: [id])
-  @@unique([userId, event, channel])
-}
-
-/// Token safety verdicts and allow/deny lists.  The `status` field is one of
-/// "allow", "warn" or "deny".  The `reason` provides a human-friendly
-/// explanation and the `metaJson` can store additional context.
-model TokenSafetyList {
-  mint       String   @id
-  status     String
-  reason     String?
-  metaJson   Json?
-  updatedAt  DateTime  @default(now()) @updatedAt
-}
-
-/// Per-user risk state used by the cross‑strategy risk engine.  Tracks daily
-/// losses and current exposures across tokens and sectors.  A kill switch can
-/// be engaged when any limit is breached.  Daily totals are reset by a
-/// scheduled job at midnight UTC.
-model UserRiskState {
-  id             Int       @id @default(autoincrement())
-  userId         String    @unique
-  dailyLossUsd   Float     @default(0)
-  exposureUsd    Float     @default(0)
-  exposuresJson  Json      @default("{}") // JSON map of mint/sector to exposure
-  killSwitch     Boolean   @default(false)
-  killEngagedAt  DateTime?
-  updatedAt      DateTime  @default(now()) @updatedAt
-  user           User      @relation(fields: [userId], references: [id])
 }

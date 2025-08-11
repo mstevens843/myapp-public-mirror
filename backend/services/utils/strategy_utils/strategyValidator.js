@@ -350,6 +350,89 @@ function validatePaperTrader(cfg = {}) {
       errors.push("PaperTrader: cooldown must be ≥ 0 ms");
   }
 
+  // ✨ Added in paper-sim-upgrade
+  // Simulation specific validations.  These options are entirely
+  // optional and default values are supplied by the backend.  When
+  // present we enforce basic sanity checks to prevent invalid
+  // configurations from reaching the simulator.
+  if (!isUnset(cfg.execModel)) {
+    const allowed = ["ideal", "amm_depth", "jito_fallback"];
+    if (!allowed.includes(cfg.execModel)) {
+      errors.push("PaperTrader: execModel must be 'ideal', 'amm_depth' or 'jito_fallback'");
+    }
+  }
+
+  if (!isUnset(cfg.slippageBpsCap)) {
+    if (!isNumeric(cfg.slippageBpsCap) || toNum(cfg.slippageBpsCap) < 0) {
+      errors.push("PaperTrader: slippageBpsCap must be a number ≥ 0");
+    }
+  }
+
+  if (cfg.latency !== undefined) {
+    if (typeof cfg.latency !== "object") {
+      errors.push("PaperTrader: latency must be an object with quoteMs, buildMs, sendMs and landMs");
+    } else {
+      ["quoteMs", "buildMs", "sendMs", "landMs"].forEach((k) => {
+        const v = cfg.latency[k];
+        if (v !== undefined && (!isNumeric(v) || toNum(v) < 0)) {
+          errors.push(`PaperTrader: latency.${k} must be ≥ 0`);
+        }
+      });
+    }
+  }
+
+  if (cfg.failureRates !== undefined) {
+    if (typeof cfg.failureRates !== "object") {
+      errors.push("PaperTrader: failureRates must be an object");
+    } else {
+      Object.entries(cfg.failureRates).forEach(([k, v]) => {
+        if (!isNumeric(v) || toNum(v) < 0 || toNum(v) > 1) {
+          errors.push(`PaperTrader: failureRates.${k} must be between 0 and 1`);
+        }
+      });
+    }
+  }
+
+  if (cfg.partials !== undefined) {
+    if (typeof cfg.partials !== "object") {
+      errors.push("PaperTrader: partials must be an object");
+    } else {
+      const min = cfg.partials.minParts;
+      const max = cfg.partials.maxParts;
+      if (min !== undefined) {
+        if (!Number.isInteger(toNum(min)) || toNum(min) < 1) {
+          errors.push("PaperTrader: partials.minParts must be an integer ≥ 1");
+        }
+      }
+      if (max !== undefined) {
+        if (!Number.isInteger(toNum(max)) || toNum(max) < 1) {
+          errors.push("PaperTrader: partials.maxParts must be an integer ≥ 1");
+        }
+        if (min !== undefined && toNum(max) < toNum(min)) {
+          errors.push("PaperTrader: partials.maxParts must be ≥ minParts");
+        }
+      }
+    }
+  }
+
+  if (!isUnset(cfg.enableShadowMode)) {
+    if (typeof cfg.enableShadowMode !== "boolean") {
+      errors.push("PaperTrader: enableShadowMode must be a boolean");
+    }
+  }
+
+  if (!isUnset(cfg.seed)) {
+    if (typeof cfg.seed !== "string") {
+      errors.push("PaperTrader: seed must be a string");
+    }
+  }
+
+  if (!isUnset(cfg.paperRunId)) {
+    if (typeof cfg.paperRunId !== "string") {
+      errors.push("PaperTrader: paperRunId must be a string");
+    }
+  }
+
   return errors;
 }
 

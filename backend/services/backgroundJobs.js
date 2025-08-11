@@ -8,6 +8,9 @@ const { monitorDcaWeb } = require("./strategies/MonitorDca.web");
 const { monitorTpSlWeb } = require("./strategies/MonitorTpSl.web");
 const { subscriptionMonitor } = require("../cronjobs/subscriptionMonitor");
 const { monitorScheduler } = require("./utils/strategy_utils/scheduler/monitorScheduler");
+// Import stuck order watchdog; behind feature flag
+const { startWatchdog: startStuckOrderWatchdog } = require('./watchdogs/stuckOrders');
+const { isEnabled } = require('../utils/featureFlags');
 
 /** Start all background workers (called once on server boot). */
 function startBackgroundJobs() {
@@ -24,6 +27,17 @@ function startBackgroundJobs() {
   }, 1000 * 60 * 60 * 24); // 24 hours
 
   console.log("🚀 Background jobs started (Limit, DCA, TP/SL, Scheduler, Daily Reset)");
+
+  // Optionally start the stuck order watchdog. This is disabled by default and
+  // can be enabled by setting FEATURE_STUCK_ORDERS_WATCHDOG=1 in the environment.
+  if (isEnabled('STUCK_ORDERS_WATCHDOG')) {
+    try {
+      startStuckOrderWatchdog();
+      console.log('🐶 Stuck order watchdog activated');
+    } catch (err) {
+      console.error('Failed to start stuck order watchdog:', err.message);
+    }
+  }
 }
 
 module.exports = { startBackgroundJobs };
