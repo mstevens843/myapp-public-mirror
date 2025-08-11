@@ -38,7 +38,11 @@ import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import ChartPanelRoute from "./components/Tables_Charts/ChartPanelRoute";
 import ErrorBoundary from "./components/ErrorBoundary";
-
+import useCsrfBootstrap from "@/hooks/useCsrfBootstrap";
+function AppShell() {
+  useCsrfBootstrap();
+  return <Routes />; // the rest of your app
+}
 function AuthHandler() {
   const navigate = useNavigate();
 
