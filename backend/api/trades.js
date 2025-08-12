@@ -13,7 +13,7 @@ const { getTokenName }  = require("../services/utils/analytics/getTokenName");
 const { getCachedPrice } = require("../utils/priceCache.static");
 const getTokenPrice     = require("../services/strategies/paid_api/getTokenPrice");
 const { closePositionFIFO }  = require("../services/utils/analytics/fifoReducer");
-// Import job runner to enforce idempotency on FIFO sells
+// Import job runner to enforce idempotency on FIFO sells AND POST /open
 const { runJob } = require("../services/jobs/jobRunner");
 const { getCurrentWallet, getWalletBalance } = require("../services/utils/wallet/walletManager");
 const { getTokenAccountsAndInfo, getMintDecimals } = require("../utils/tokenAccounts");
@@ -42,13 +42,11 @@ const STABLES = new Set([
   "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT"  // UXD
 ]);
 
-   const EXCLUDE_MINTS = new Set([
-      "So11111111111111111111111111111111111111112", // wSOL
-      "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-      "Es9vMFrzaCER9SADJdTjaiCviCqiSBamEn3DcSjh3rCt", // USDC (legacy)
-    ]);
-
-
+const EXCLUDE_MINTS = new Set([
+  "So11111111111111111111111111111111111111112", // wSOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCER9SADJdTjaiCviCqiSBamEn3DcSjh3rCt", // USDC (legacy)
+]);
 
 // Daily recap timezone (kept from original)
 const PDT_ZONE = "America/Los_Angeles";
@@ -56,9 +54,8 @@ const MIN_IMPORT_USD = 0.25;
 
 router.use(requireAuth);      // all routes below are now authenticated
 
-
-// Inject any on‑chain tokens that aren’t yet in the trades table
-// (or whose balance grew outside the app, e.g. bought on‑DEX)
+// Inject any on-chain tokens that aren’t yet in the trades table
+// (or whose balance grew outside the app, e.g. bought on-DEX)
 const injectUntracked = async (userId) => {
   let wroteSomething = false;
 
@@ -136,7 +133,6 @@ const injectUntracked = async (userId) => {
   return wroteSomething;
 };
 
-
 /* ───────────────────────────── 1. RECENT CLOSED TRADES ─────────────────────────── */
 router.get("/", async (req, res) => {
   try {
@@ -174,6 +170,28 @@ router.get("/", async (req, res) => {
   } catch (err) {
     console.error("closed / error:", err);
     res.status(500).json({ error: "Failed to fetch trades." });
+  }
+});
+
+/* ───────────────────────────── 1a. SIMPLE LIST (open trade rows) ───────────────── */
+router.get("/list", async (req, res) => {
+  try {
+    const { take, skip } = __getPage(req);
+    const trades = await prisma.trade.findMany({
+      where: { wallet: { userId: req.user.id }, exitedAt: null },
+      select: { id: true, mint: true, inAmount: true, outAmount: true, createdAt: true, exitedAt: true },
+      orderBy: { createdAt: "desc" },
+      take,
+      skip,
+    });
+    const safe = trades.map(t => ({
+      ...t,
+      inAmount: Number(t.inAmount),
+      outAmount: Number(t.outAmount),
+    }));
+    res.json({ trades: safe, take, skip });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -280,12 +298,7 @@ router.get("/recap", async (req,res)=>{
   }
 });
 
-
-
-/*─────────────────────────── 5. STRATEGY-SPECIFIC LOGS (legacy) ───────────
-   If you still write human-readable log files per strategy in /logs, keep
-   this fallback.  If not needed, you can delete this route.
-*/
+/*─────────────────────────── 5. STRATEGY-SPECIFIC LOGS (legacy) ───────────*/
 router.get("/:strategy/logs", (req,res)=>{
   const fs = require("fs"); const path=require("path");
   const file = path.join(__dirname,"..","logs",`${req.params.strategy}.json`);
@@ -293,13 +306,10 @@ router.get("/:strategy/logs", (req,res)=>{
   res.json(JSON.parse(fs.readFileSync(file,"utf8")).slice(-20).reverse());
 });
 
-
-
-
 /* ───────────────────────────── 5. OPEN POSITIONS DASHBOARD ─────────────────────── */
 router.get("/positions", requireInternalOrAuth, async (req, res) => {
   try {
-    /* 0️⃣ Ensure DB has every current on‑chain holding */
+    /* 0️⃣ Ensure DB has every current on-chain holding */
     const didInject = await injectUntracked(req.user.id);
     /* 1️⃣ Which wallet?  activeWalletId unless ?walletLabel provided */
     
@@ -326,15 +336,15 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
     const tokenAccounts = await getTokenAccountsAndInfo(connWallet.publicKey);
 
     /* 3️⃣ Open trades (DB) for this wallet */
-     const allRows = await prisma.trade.findMany({
-       where : { wallet: { userId: req.user.id } },
-       orderBy: { timestamp: "asc" },
-     });
+    const allRows = await prisma.trade.findMany({
+      where : { wallet: { userId: req.user.id } },
+      orderBy: { timestamp: "asc" },
+    });
     
-     // keep only rows that still have tokens left
-     const openRows = allRows.filter(r =>
-       BigInt(r.closedOutAmount ?? 0) < BigInt(r.outAmount ?? 0)
-     );
+    // keep only rows that still have tokens left
+    const openRows = allRows.filter(r =>
+      BigInt(r.closedOutAmount ?? 0) < BigInt(r.outAmount ?? 0)
+    );
 
     /* 4️⃣ Prices */
     const solBalance = await getWalletBalance(connWallet);
@@ -342,76 +352,75 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
 
     // const settings     = loadSettings();
     // const userSettings = settings[wallet.label] || {}; // tp/sl per wallet
-     const tpSlRules = await prisma.tpSlRule.findMany({
-  where: { userId: req.user.id, walletId: wallet.id, status: "active" },
-      });
-      const userSettings = {};
-      tpSlRules.forEach(rule => {
-        userSettings[rule.mint] = {
-          tp: rule.tp,
-          sl: rule.sl,
-          enabled: rule.enabled,
-          entryPrice: rule.entryPrice,
-        };
-      });
+    const tpSlRules = await prisma.tpSlRule.findMany({
+      where: { userId: req.user.id, walletId: wallet.id, status: "active" },
+    });
+    const userSettings = {};
+    tpSlRules.forEach(rule => {
+      userSettings[rule.mint] = {
+        tp: rule.tp,
+        sl: rule.sl,
+        enabled: rule.enabled,
+        entryPrice: rule.entryPrice,
+      };
+    });
     /* 5️⃣ Assemble positions ------------------------------------ */
     const positions = [];
 
     for (const { mint, name, amount } of tokenAccounts) {
       const metadata   = await getTokenMetadata(req.user.id, mint);
-    const tokenName  = metadata?.name || name?.replace(/[^\x20-\x7E]/g, "") || "Unknown";
-    const symbol     = metadata?.symbol || null;
-    const birdeyeUrl = `https://birdeye.so/token/${mint}`;
-let logoUri = null;
+      const tokenName  = metadata?.name || name?.replace(/[^\x20-\x7E]/g, "") || "Unknown";
+      const symbol     = metadata?.symbol || null;
+      const birdeyeUrl = `https://birdeye.so/token/${mint}`;
+      let logoUri = null;
 
-const rawUri = metadata.logo_uri;
+      const rawUri = metadata.logo_uri;
 
-if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
-  logoUri = decodeURIComponent(rawUri.split("url=")[1]);
+      if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
+        logoUri = decodeURIComponent(rawUri.split("url=")[1]);
 
-} else if (rawUri.startsWith("ipfs://")) {
-  const ipfsHash = rawUri.replace("ipfs://", "");
-  logoUri = `https://ipfs.io/ipfs/${ipfsHash}`; // ✅ use ipfs.io
+      } else if (rawUri.startsWith("ipfs://")) {
+        const ipfsHash = rawUri.replace("ipfs://", "");
+        logoUri = `https://ipfs.io/ipfs/${ipfsHash}`; // ✅ use ipfs.io
 
-} else if (rawUri.includes("ipfs.io/ipfs/")) {
-  logoUri = rawUri; // already correct
+      } else if (rawUri.includes("ipfs.io/ipfs/")) {
+        logoUri = rawUri; // already correct
 
-} else if (rawUri.includes("/ipfs/")) {
-  const ipfsHash = rawUri.split("/ipfs/")[1];
-  logoUri = `https://ipfs.io/ipfs/${ipfsHash}`; // ✅ fallback
+      } else if (rawUri.includes("/ipfs/")) {
+        const ipfsHash = rawUri.split("/ipfs/")[1];
+        logoUri = `https://ipfs.io/ipfs/${ipfsHash}`; // ✅ fallback
 
-} else {
-  logoUri = rawUri; // normal https:// URL
-}
+      } else {
+        logoUri = rawUri; // normal https:// URL
+      }
       if (STABLES.has(mint) || amount < 1e-6) continue;
 
       const matches   = openRows.filter(r => r.mint === mint);
-       // --- correct for units -------------------------------
-       const totalCostSOL = matches.reduce(
-         (s,r)=> s + Number(r.inAmount) / 1e9, 0);       // lamports → SOL
+      // --- correct for units -------------------------------
+      const totalCostSOL = matches.reduce(
+        (s,r)=> s + Number(r.inAmount) / 1e9, 0);       // lamports → SOL
       
-       const totalTokReal = matches.reduce(
-         (s,r)=> s + Number(r.outAmount) / 10**r.decimals, 0); // raw → tokens
+      const totalTokReal = matches.reduce(
+        (s,r)=> s + Number(r.outAmount) / 10**r.decimals, 0); // raw → tokens
       
-       const weightedEntry = totalTokReal
-         ? +(totalCostSOL / totalTokReal).toFixed(9)      // SOL per token
-         : null;
+      const weightedEntry = totalTokReal
+        ? +(totalCostSOL / totalTokReal).toFixed(9)      // SOL per token
+        : null;
       
-       const totalCostUSD = matches.reduce(
-         (s,r)=> s + (Number(r.outAmount) / 10**r.decimals) * r.entryPriceUSD, 0);
+      const totalCostUSD = matches.reduce(
+        (s,r)=> s + (Number(r.outAmount) / 10**r.decimals) * r.entryPriceUSD, 0);
       
-       const entryPriceUSD = totalTokReal
-         ? +(totalCostUSD / totalTokReal).toFixed(6)
-         : null;
+      const entryPriceUSD = totalTokReal
+        ? +(totalCostUSD / totalTokReal).toFixed(6)
+        : null;
 
       const price   = await getTokenPrice(req.user.id, mint);
       const valueUSD= +(amount * price).toFixed(2);
       const tpSl    = userSettings[mint] || null;
-        console.log("🖼️ Logo for", tokenName, mint, "→", logoUri);
+      console.log("🖼️ Logo for", tokenName, mint, "→", logoUri);
 
       positions.push({
         mint,
-        // name : name?.replace(/[^\x20-\x7E]/g,"") || "Unknown",
         name: tokenName,
         symbol,
         logo: logoUri,
@@ -426,9 +435,7 @@ if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
         entries         : matches.length,
         timeOpen        : matches[0] ? new Date(matches[0].timestamp).toLocaleString() : null,
         tpSl : tpSl ? { tp:tpSl.tp, sl:tpSl.sl, enabled:tpSl.enabled!==false } : null,
-        // url  : `https://birdeye.so/token/${mint}`,
         url: birdeyeUrl,
-
       });
     }
 
@@ -468,7 +475,6 @@ if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
   }
 });
 
-
 /*─────────────────────────── 5. GET CURRENT OPEN TRADES ──────────────────*/
 router.get("/open", async (req, res) => {
   try {
@@ -504,39 +510,58 @@ router.get("/open", async (req, res) => {
   }
 });
 
+/* ───────────────────────────── 6. LOG NEW OPEN TRADE (IDEMPOTENT) ──────────────── */
+router.post("/open", async (req, res) => {
+  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
 
-/* ───────────────────────────── 6. LOG NEW OPEN TRADE ───────────────────────────── */
-router.post("/open", async (req,res)=>{
-  const {
-    mint, entryPrice, entryPriceUSD, inAmount, outAmount,
-    unit="sol", decimals=9, strategy="manual",
-    slippage=1, walletLabel=""
-  } = req.body;
-  if(!mint||!entryPrice||!inAmount) return res.status(400).json({ error:"Missing data" });
+  const doWork = async () => {
+    const {
+      mint, entryPrice, entryPriceUSD, inAmount, outAmount,
+      unit = "sol", decimals = 9, strategy = "manual",
+      slippage = 1, walletLabel = ""
+    } = req.body || {};
 
-  const wallet = await prisma.wallet.findFirst({
-    where:{ userId:req.user.id, label:walletLabel }
-  });
-  if(!wallet) return res.status(404).json({ error:"Wallet not found." });
-
-  await prisma.trade.create({
-    data:{
-      mint, tokenName:await getTokenName(mint),
-      entryPrice, entryPriceUSD,
-      inAmount: BigInt(inAmount),       // schema uses BigInt
-      outAmount: BigInt(outAmount),
-      closedOutAmount: BigInt(0),
-      unit, decimals, strategy, slippage,
-      walletId: wallet.id, walletLabel,
-      type:"buy", side:"buy", botId:strategy
+    if (!mint || !entryPrice || !inAmount) {
+      return { status: 400, response: { error: "Missing data" } };
     }
-  });
-  res.json({ message:"Open trade logged." });
-});
-/* ───────────────────────────── 7. CLOSE / REDUCE POSITION ──────────────────────── */
-/* (very simplified – closes the *oldest* blocks first, like FIFO) */
-// PATCH /api/trades/open/:mint   – FIFO partial / full close
 
+    const wallet = await prisma.wallet.findFirst({
+      where: { userId: req.user.id, label: walletLabel }
+    });
+    if (!wallet) {
+      return { status: 404, response: { error: "Wallet not found." } };
+    }
+
+    await prisma.trade.create({
+      data: {
+        mint, tokenName: await getTokenName(mint),
+        entryPrice, entryPriceUSD,
+        inAmount: BigInt(inAmount),       // schema uses BigInt
+        outAmount: BigInt(outAmount),
+        closedOutAmount: BigInt(0),
+        unit, decimals, strategy, slippage,
+        walletId: wallet.id, walletLabel,
+        type:"buy", side:"buy", botId:strategy
+      }
+    });
+    return { status: 200, response: { message:"Open trade logged." } };
+  };
+
+  try {
+    if (idKey) {
+      const jobResult = await runJob(idKey, doWork);
+      return res.status(jobResult.status || 200).json(jobResult.response || {});
+    } else {
+      const direct = await doWork();
+      return res.status(direct.status || 200).json(direct.response || {});
+    }
+  } catch (err) {
+    console.error("❌ POST /open error:", err);
+    res.status(500).json({ error: err.message || "Failed to log open trade." });
+  }
+});
+
+/* ───────────────────────────── 7. CLOSE / REDUCE POSITION ──────────────────────── */
 // Legacy FIFO close endpoint. Use the idempotent version defined below.
 router.patch("/open-old/:mint", requireAuth, async (req,res)=>{
   try {
@@ -554,10 +579,7 @@ router.patch("/open-old/:mint", requireAuth, async (req,res)=>{
   }
 });
 
-// -----------------------------------------------------------------------------
-// Idempotent FIFO close endpoint. This wraps the legacy close logic in the
-// job runner so repeated requests with the same Idempotency-Key will not
-// perform duplicate sells. See `/open-old/:mint` for the original behaviour.
+// Idempotent FIFO close endpoint.
 router.patch("/open/:mint", requireAuth, async (req, res) => {
   const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
   try {
@@ -583,9 +605,6 @@ router.patch("/open/:mint", requireAuth, async (req, res) => {
   }
 });
 
-
-
-
 /*─────────────────────────── 9. DELETE ALL OPEN FOR MINT ─────────────────*/
 router.delete("/open/:mint", async (req,res)=>{
   const { mint }=req.params; const { walletLabel="" }=req.body||{};
@@ -603,8 +622,6 @@ router.delete("/open/:mint", async (req,res)=>{
   });
   res.json({ message:`Open rows for ${mint} removed.` });
 });
-
-
 
 // ──────────────────────────────────────────────────────────────
 //  POST /api/trades/clear-dust
@@ -656,7 +673,6 @@ router.post("/clear-dust", requireAuth, async (req, res) => {
   res.json({ message: "Dust trades cleared." });
 });
 
-
 /*─────────────────────────── 9-b. BULK DELETE SELECTED MINTS ─────────────────*/
 router.delete("/open", requireAuth, async (req, res) => {
   const { mints = [], walletId, forceDelete = false } = req.body || {};
@@ -695,8 +711,6 @@ router.delete("/open", requireAuth, async (req, res) => {
 
   res.json({ message: `${mints.length} mint(s) cleared from open trades.` });
 });
-
-
 
 /* ------------------------------------------------------------------------------ */
 module.exports = router;

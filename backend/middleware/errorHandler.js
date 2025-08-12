@@ -1,3 +1,5 @@
+// backend/middleware/errorHandler.js
+
 const logger = require('../utils/logger');
 
 /**
@@ -13,11 +15,15 @@ const logger = require('../utils/logger');
  */
 function errorHandler(err, req, res, next) {
   // Delegate to the logger with request context
-  logger.error('Unhandled error', { err, reqId: req.id });
-  const status = err.status || 500;
+  try {
+    logger.error('Unhandled error', { err, reqId: req.id });
+  } catch (_) {}
+
+  const status = err.status || err.statusCode || 500;
   const exposeDetails = process.env.NODE_ENV !== 'production';
+
   res.status(status).json({
-    error: exposeDetails ? err.message : 'Internal server error',
+    error: exposeDetails ? (err.message || 'Internal server error') : 'Internal server error',
   });
 }
 

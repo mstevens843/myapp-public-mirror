@@ -1,3 +1,12 @@
+/**
+ * What changed
+ *  - Wired a single METRICS_ENABLED boolean and used it for httpMetrics + /metrics route (no behavior change).
+ *  - Kept your JSON body limit (100kb), CSRF seed/protect, rate limiting, trust proxy, DDoS guardrails, WS heartbeat.
+ * Why
+ *  - API hygiene + observability consistency without altering your flow.
+ * Risk addressed
+ *  - Oversized bodies, missing metrics toggles, rate-limit visibility, CSRF enforcement.
+ */
 
 /**
  * index.js - Dual-mode bot controller: CLI launcher or Express + WebSocket server.
@@ -21,14 +30,14 @@
  *   handlers.  These route all unexpected failures through the central
  *   logger rather than silently terminating the process or leaking listeners.
  * - A heartbeat for WebSocket connections.  Clients are pinged every
- *   30 seconds; if a client fails to respond with a pong the connection is
+ *   30 seconds; if a client fails to respond with a pong the connection is
  *   terminated and a health counter is updated.  This prevents zombie
  *   connections from consuming resources indefinitely.
  * - Graceful shutdown logic that clears the heartbeat interval in addition
  *   to closing the HTTP and WebSocket servers.  A failsafe timer still
  *   exists to exit the process should shutdown hang.
  * - Concurrency guards around scheduled cron jobs.  Each job is wrapped in
- *   a single‑flight mutex so if the previous invocation hasn’t completed
+ *   a single-flight mutex so if the previous invocation hasn’t completed
  *   subsequent runs are skipped.  Start/finish events and duration are
  *   logged for observability.
  */
@@ -66,8 +75,11 @@ const { injectBroadcast } = require('./services/strategies/logging/strategyLogge
 require('./loadEnv');
 const { ensureCsrfSeed, csrfProtection } = require('./middleware/csrf');
 
+// Unified metrics flag (used below)
+const METRICS_ENABLED = String(process.env.METRICS_ENABLED || '').trim().toLowerCase() === 'true';
+
 // ----------------------------------------------------------------------------
-// Global process‑level error handling
+// Global process-level error handling
 //
 // Attach exactly one handler for uncaught exceptions and unhandled promise
 // rejections.  Other modules should never call `process.on` for these events.
@@ -181,7 +193,7 @@ if (modeFromCLI) {
   // Server hardening: remove X-Powered-By header and apply security middleware.
   app.disable('x-powered-by');
 
-  // IMPORTANT when behind a reverse proxy / CDN: trust proxy so rate‑limiters
+  // IMPORTANT when behind a reverse proxy / CDN: trust proxy so rate-limiters
   // and IP checks see the real client IP instead of the proxy’s address.
   app.set('trust proxy', 1); // ← added
 
@@ -189,12 +201,12 @@ if (modeFromCLI) {
   app.use(requestId);
 
   // Apply security headers.  Content Security Policy can be enabled in
-  // report‑only mode via ENABLE_CSP_REPORT_ONLY env var.  See
+  // report-only mode via ENABLE_CSP_REPORT_ONLY env var.  See
   // middleware/securityHeaders.js for details.
   app.use(securityHeaders());
 
-  // Enforce strict CORS with an allow‑list derived from env vars and sensible
-  // development defaults.  Credentials are enabled to allow cookie‑based auth.
+  // Enforce strict CORS with an allow-list derived from env vars and sensible
+  // development defaults.  Credentials are enabled to allow cookie-based auth.
   app.use(createCors());
   // Explicitly handle preflight (OPTIONS) requests for all routes.  This
   // improves clarity around CORS handling and returns a 204 No Content for
@@ -219,6 +231,7 @@ if (modeFromCLI) {
   app.use(cookieParser());
   app.use(ensureCsrfSeed);  // ← seeds cookie on first GET/HEAD/OPTIONS
   app.use(csrfProtection);  // ← enforces on POST/PUT/PATCH/DELETE
+
   // -------------------------------------------------------------------------
   // DDoS GUARD RAILS (added):
   //
@@ -236,7 +249,7 @@ if (modeFromCLI) {
     next();
   });
   //
-  // (2) Event‑loop delay shedder — if p95 event‑loop delay rises above a
+  // (2) Event-loop delay shedder — if p95 event-loop delay rises above a
   //     threshold (CPU/IO pressure) we temporarily shed new requests.
   //     Tune with DDOS_ELD_P95_MS (default 200ms).
   let eld;
@@ -257,7 +270,7 @@ if (modeFromCLI) {
   // attach when metrics are explicitly enabled via METRICS_ENABLED env var to
   // avoid any measurable overhead in production unless desired.  Place this
   // ahead of route handlers so that all downstream middleware is timed.
-  if (process.env.METRICS_ENABLED === 'true') {
+  if (METRICS_ENABLED) {
     app.use(metrics.httpMetricsMiddleware);
   }
 
@@ -278,7 +291,7 @@ if (modeFromCLI) {
     return express.json({ limit: '100kb' })(req, res, next);
   });
 
-  // CSRF protection (double‑submit cookie) for unsafe methods
+  // CSRF protection (double-submit cookie) for unsafe methods
   app.use(csrfProtection); // ← added
 
   // -------------------------------------------------------------------------
@@ -300,9 +313,9 @@ if (modeFromCLI) {
   // Exposed only when METRICS_ENABLED is set to 'true'.  If disabled the
   // route is omitted entirely (resulting in a 404).  Instead of returning
   // the raw registry directly we delegate to `metrics.metricsEndpoint`
-  // which performs API key and IP allow‑list checks before serving.  See
+  // which performs API key and IP allow-list checks before serving.  See
   // middleware/metrics.js for details.
-  if (process.env.METRICS_ENABLED === 'true') {
+  if (METRICS_ENABLED) {
     app.get('/metrics', metrics.metricsEndpoint);
   }
 
@@ -347,7 +360,7 @@ if (modeFromCLI) {
   let wsPingInterval;
   const wsHealth = { connections: 0, disconnections: 0 };
 
-  // Minimal GS origin allow‑list for WS (aligned with HTTP CORS origins)
+  // Minimal GS origin allow-list for WS (aligned with HTTP CORS origins)
   const ALLOW_ORIGINS = (process.env.CORS_ORIGINS || process.env.DEV_CORS_ORIGIN || '')
     .split(',').map(s => s.trim()).filter(Boolean);
 
@@ -379,7 +392,7 @@ if (modeFromCLI) {
   STOP_SIGNALS.forEach((sig) => process.once(sig, gracefulExit));
 
   /**
-   * WebSocket connection for real‑time logs
+   * WebSocket connection for real-time logs
    * Overrides console.log and mirrors to frontend via WS.
    */
   const clients = new Set();
@@ -393,7 +406,7 @@ if (modeFromCLI) {
   });
 
   wss.on('connection', (ws, req) => {
-    // Reject WS from disallowed origins (same allow‑list as HTTP CORS)
+    // Reject WS from disallowed origins (same allow-list as HTTP CORS)
     const origin = (req.headers.origin || '').trim();
     if (ALLOW_ORIGINS.length && origin && !ALLOW_ORIGINS.includes(origin)) {
       try { ws.close(1008, 'origin not allowed'); } catch {}

@@ -150,7 +150,9 @@ const {
   checkFreezeAuthority,
 } = require("./ghost");
 
-
+// 🔹 NEW imports from the simplified executor
+const { assertMinLiquidity } = require('./liquidityGate');
+const { recordTradeClosed, recordExitReason } = require('../../../middleware/metrics');
 
 // (Legacy placeholder kept for back-compat; no longer used when RpcPool is configured)
 // const RpcQuorumClient = require('./rpcQuorumClient');
@@ -407,10 +409,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     // NEW: retry + ttl
     quoteTtlMs = 600,
     retryPolicy = { max: 3, bumpCuStep: 2000, bumpTipStep: 1000, routeSwitch: true, rpcFailover: true },
-  rpcQuorum = 1,
-  rpcMaxFanout,
-  rpcStaggerMs = 50,
-  rpcTimeoutMs = 10_000,
+    rpcQuorum = 1,
+    rpcMaxFanout,
+    rpcStaggerMs = 50,
+    rpcTimeoutMs = 10_000,
 
     // routing flags remain same
     multiRoute,
@@ -465,7 +467,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     maxSlippagePct,
     forceFail,
     fallbackQuoteLatencyMs,
-        expectedSlipBoundPct,
+    expectedSlipBoundPct,
     poolAgeMs,
     poolFreshnessTtlMs,
     quoteLatencyThresholdMs,
@@ -474,11 +476,11 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
   if (autoPriorityFee && cuPriceMicroLamportsMax && cuPriceMicroLamportsMin &&
     cuPriceMicroLamportsMax < cuPriceMicroLamportsMin) {
-  throw new Error('invalid CU price range: max < min');
-}
-if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
-  throw new Error('invalid quorum: quorum > maxFanout');
-}
+    throw new Error('invalid CU price range: max < min');
+  }
+  if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
+    throw new Error('invalid quorum: quorum > maxFanout');
+  }
 
   // --- Hot path metrics instrumentation ---
   const _hotStart = Date.now();
@@ -552,20 +554,20 @@ if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
   } else if (typeof rpcEndpoints === 'string' && rpcEndpoints.trim()) {
     endpoints = rpcEndpoints.split(',').map(s => s.trim()).filter(Boolean);
   }
- if ((rpcFailover || Number(rpcQuorum) > 1) && endpoints.length >= 1) {
-   rpcPool = new RpcPool(endpoints, metricsLogger);
- }
+  if ((rpcFailover || Number(rpcQuorum) > 1) && endpoints.length >= 1) {
+    rpcPool = new RpcPool(endpoints, metricsLogger);
+  }
 
   // helper: refresh recent blockhash on primary (pre-send)
   async function _preSendRefresh() {
-  try {
-    const c = getCachedBlockhash?.();
-    // if prewarmer exposed expiry, honor it; else assume it’s fresh enough
-    if (c && (c.expiresAtMs ? c.expiresAtMs > Date.now() : true)) return;
-    await conn.getLatestBlockhash('confirmed');
-    metricsLogger.recordBlockhashRefresh?.(conn._rpcEndpoint || 'primary');
-  } catch (_) {}
- }
+    try {
+      const c = getCachedBlockhash?.();
+      // if prewarmer exposed expiry, honor it; else assume it’s fresh enough
+      if (c && (c.expiresAtMs ? c.expiresAtMs > Date.now() : true)) return;
+      await conn.getLatestBlockhash('confirmed');
+      metricsLogger.recordBlockhashRefresh?.(conn._rpcEndpoint || 'primary');
+    } catch (_) {}
+  }
 
   // ---- LEADER TIMING HOLD (pre-send) ----
   if (leaderTiming?.enabled && bundleStrategy !== 'private' && validatorIdentity) {
@@ -647,9 +649,9 @@ if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
       amount: String(params.amount),
       slippage: params.slippage,
       mode: bundleStrategy,
-     allowedDexes: Array.isArray(allowedDexes) ? allowedDexes.join(',') : String(allowedDexes || ''),
-     excludedDexes: Array.isArray(excludedDexes) ? excludedDexes.join(',') : String(excludedDexes || ''),
-     splitTrade: !!splitTrade,
+      allowedDexes: Array.isArray(allowedDexes) ? allowedDexes.join(',') : String(allowedDexes || ''),
+      excludedDexes: Array.isArray(excludedDexes) ? excludedDexes.join(',') : String(excludedDexes || ''),
+      splitTrade: !!splitTrade,
     };
     const cached = quoteCache.get(key);
     if (cached) return cached;
@@ -765,18 +767,18 @@ if (rpcQuorum && rpcMaxFanout && rpcQuorum > rpcMaxFanout) {
   });
 
   // Create an override sender using RpcPool when configured
-const sendRawOverride = rpcPool
-  ? async (rawTx, sendOpts) =>
-      rpcPool.sendRawTransactionQuorum(rawTx, {
-        quorum: rpcQuorum,
-        maxFanout: rpcMaxFanout,
-        staggerMs: rpcStaggerMs,
-        timeoutMs: rpcTimeoutMs,
-        ...(sendOpts || {}),
-      })
-  : null;
+  const sendRawOverride = rpcPool
+    ? async (rawTx, sendOpts) =>
+        rpcPool.sendRawTransactionQuorum(rawTx, {
+          quorum: rpcQuorum,
+          maxFanout: rpcMaxFanout,
+          staggerMs: rpcStaggerMs,
+          timeoutMs: rpcTimeoutMs,
+          ...(sendOpts || {}),
+        })
+    : null;
 
-// Sender
+  // Sender
   async function sendOnce(localQuote) {
     let txHash = null;
     let attempt = 0;
@@ -1014,8 +1016,8 @@ const sendRawOverride = rpcPool
         _coolOffByMint[mint] = Date.now();
 
         attempt += 1;
-       const cls = classifyError(err?.message || err?.toString());
-       lastErrClass = cls;
+        const cls = classifyError(err?.message || err?.toString());
+        lastErrClass = cls;
 
         // USER errors: surface immediately
         if (cls === 'USER') {
@@ -1048,9 +1050,9 @@ const sendRawOverride = rpcPool
         // Refresh quote after changes
         try {
           await _preSendRefresh();
-        // Dev: simulate stale blockhash (NET) & RPC 429 (NET)
-        devInject.maybeThrow('stale_blockhash'); // e.g. throw new Error('blockhash not found')
-        devInject.maybeThrow('rpc_429');         // e.g. throw new Error('429 Too Many Requests')
+          // Dev: simulate stale blockhash (NET) & RPC 429 (NET)
+          devInject.maybeThrow('stale_blockhash'); // e.g. throw new Error('blockhash not found')
+          devInject.maybeThrow('rpc_429');         // e.g. throw new Error('429 Too Many Requests')
 
           const qRes = await getWarmQuote({
             inputMint: localQuote.inputMint,
@@ -1484,6 +1486,8 @@ const sendRawOverride = rpcPool
           // sudden liquidity drains.  Only runs when enabled.
           if (lpPullExit) {
             if (!sq || currentOut === null || currentOut < (initialOutAmount / 2n)) {
+              // 🔹 metrics from simplified executor
+              try { recordExitReason('lp-pull'); recordTradeClosed(); } catch (_) {}
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1494,6 +1498,8 @@ const sendRawOverride = rpcPool
           if (authorityFlipExit) {
             const freeze = await checkFreezeAuthority(connPost, sellInputMint);
             if (freeze) {
+              // 🔹 metrics from simplified executor
+              try { recordExitReason('authority-flip'); recordTradeClosed(); } catch (_) {}
               const exitQuote = sq || await getWarmQuote({
                 inputMint: sellInputMint,
                 outputMint: sellOutputMint,
@@ -1523,6 +1529,8 @@ const sendRawOverride = rpcPool
               } catch { shouldExit = true; }
             }
             if (shouldExit) {
+              // 🔹 metrics from simplified executor
+              try { recordExitReason('smart-time'); recordTradeClosed(); } catch (_) {}
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1548,6 +1556,8 @@ const sendRawOverride = rpcPool
             // Compute percentage drop from the peak to current
             const drop = maxOutObserved > 0n ? (Number(maxOutObserved - currentOut) * 100) / Number(maxOutObserved) : 0;
             if (drop >= volDropPct) {
+              // 🔹 metrics from simplified executor
+              try { recordExitReason('smart-volume'); recordTradeClosed(); } catch (_) {}
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1558,6 +1568,8 @@ const sendRawOverride = rpcPool
           if (smartExitMode === 'liquidity' && lpOutflowExitPct != null && currentOut !== null) {
             const drop = initialOutAmount > 0n ? (Number(initialOutAmount - currentOut) * 100) / Number(initialOutAmount) : 0;
             if (drop >= lpOutflowExitPct) {
+              // 🔹 metrics from simplified executor
+              try { recordExitReason('smart-liquidity'); recordTradeClosed(); } catch (_) {}
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1691,11 +1703,48 @@ class TradeExecutorTurbo {
       } catch (_) {}
     }
 
+    // 🔹 Optional liquidity gate (env-gated)
+    if (cfg.liqGate && process.env.TURBO_SMART_EXIT_ENABLED === 'true') {
+      const { minPoolUsd, maxImpactPctAtLarge, liqProbeSmallSol, liqProbeLargeSol } = cfg.liqGate;
+      await assertMinLiquidity({
+        userId: userCtx.userId,
+        inputMintSOL: inputMint,
+        outputMint,
+        minPoolUsd,
+        maxImpactPctAtLarge,
+        smallSol: liqProbeSmallSol,
+        largeSol: liqProbeLargeSol,
+      });
+    }
+
     const safeQuoteRes = await getSafeQuote({ inputMint, outputMint, amount, slippage });
     if (!safeQuoteRes.ok) {
       throw new Error(`quote-failed: ${safeQuoteRes.reason || 'unknown'}`);
     }
     const quote = safeQuoteRes.quote;
+
+    // 🔹 Back-compat mapping for simple smart-exit flags → postBuyWatch
+    if (process.env.TURBO_SMART_EXIT_ENABLED === 'true' && !cfg.postBuyWatch) {
+      const { smartExitTimeMins, smartVolLookbackSec, smartVolThreshold, smartLiqLookbackSec, smartLiqDropPct } = cfg;
+      const hasTime = smartExitTimeMins != null;
+      const hasVol  = smartVolLookbackSec != null && smartVolThreshold != null;
+      const hasLiq  = smartLiqLookbackSec != null && smartLiqDropPct != null;
+      const mode = hasTime ? 'time' : hasVol ? 'volume' : hasLiq ? 'liquidity' : null;
+      if (mode) {
+        cfg.postBuyWatch = {
+          durationSec: 180,
+          smartExitMode: mode,
+          smartExit: {
+            time: { maxHoldSec: hasTime ? Number(smartExitTimeMins) * 60 : undefined },
+            volume: {
+              volWindowSec: hasVol ? Number(smartVolLookbackSec) : undefined,
+              volDropPct  : hasVol ? Number(smartVolThreshold)   : undefined,
+            },
+            liquidity: { lpOutflowExitPct: hasLiq ? Number(smartLiqDropPct) : undefined },
+          },
+        };
+      }
+    }
 
     // Parallel wallets path
     if (cfg?.parallelWallets && cfg.parallelWallets.enabled) {

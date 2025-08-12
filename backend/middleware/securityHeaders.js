@@ -1,22 +1,20 @@
-/**
- * Configures a set of HTTP security headers using Helmet.  By default we
- * disable the Content Security Policy to avoid breaking existing frontend
- * scripts.  To experiment with CSP in report‑only mode, set
- * `ENABLE_CSP_REPORT_ONLY=true` in your environment.  When enabled the
- * directives are deliberately permissive but will log violations to the
- * browser console.  Hardening CSP further should be tackled as a follow‑up.
- *
- * @returns {import('express').RequestHandler} Helmet middleware
- */
+// backend/middleware/securityHeaders.js
+
 /**
  * Security headers middleware.
  * Uses Helmet for a strong baseline, with a strict CSP by default.
- * Set ENABLE_CSP_REPORT_ONLY=1 to switch CSP to report-only during rollout.
+ * Set ENABLE_CSP_REPORT_ONLY=1|true|yes to switch CSP to report-only during rollout.
+ * Optionally set CSP_REPORT_URI to include a report-uri directive.
  */
-const helmet = require("helmet");
+
+const helmet = require('helmet');
+
+function truthy(v) {
+  return /^(1|true|yes)$/i.test(String(v || '').trim());
+}
 
 function securityHeaders() {
-  const isReportOnly = String(process.env.ENABLE_CSP_REPORT_ONLY || '').trim() === '1';
+  const isReportOnly = truthy(process.env.ENABLE_CSP_REPORT_ONLY);
 
   const cspDirectives = {
     defaultSrc: ["'self'"],
@@ -30,6 +28,8 @@ function securityHeaders() {
     frameAncestors: ["'none'"],
     formAction: ["'self'"],
     upgradeInsecureRequests: [],
+    // Optional: allow reporting endpoint if configured
+    ...(process.env.CSP_REPORT_URI ? { reportUri: [process.env.CSP_REPORT_URI] } : {}),
   };
 
   const csp = helmet.contentSecurityPolicy({
@@ -45,12 +45,13 @@ function securityHeaders() {
   });
 
   return [
+    helmet.hidePoweredBy(),
     helmet.dnsPrefetchControl({ allow: false }),
-    helmet.frameguard({ action: "deny" }),
+    helmet.frameguard({ action: 'deny' }),
     helmet.noSniff(),
-    helmet.referrerPolicy({ policy: "no-referrer" }),
-    helmet.permittedCrossDomainPolicies({ permittedPolicies: "none" }),
-    helmet.crossOriginResourcePolicy({ policy: "same-site" }),
+    helmet.referrerPolicy({ policy: 'no-referrer' }),
+    helmet.permittedCrossDomainPolicies({ permittedPolicies: 'none' }),
+    helmet.crossOriginResourcePolicy({ policy: 'same-site' }),
     hsts,
     csp,
   ];

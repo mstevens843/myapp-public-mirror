@@ -1,3 +1,5 @@
+// backend/middleware/cors.js
+
 const cors = require('cors');
 
 // Dev origins are always allowed during local development.  These cover the
@@ -11,12 +13,14 @@ const DEV_ORIGINS = [
 ];
 
 /**
- * Builds a CORS middleware instance using an allowâ€‘list.  The list is
+ * Builds a CORS middleware instance using an allow-list.  The list is
  * constructed from the `CORS_ALLOWED_ORIGINS` or `FRONTEND_URL` env vars,
  * combined with sensible development defaults.  Requests without an `Origin`
- * header (e.g. cURL or serverâ€‘toâ€‘server calls) are always allowed.  If the
+ * header (e.g. cURL or server-to-server calls) are always allowed.  If the
  * allow list is empty then all origins are permitted.  Credentials are
  * enabled so that cookies may be sent by the browser.
+ *
+ * Exposes X-Request-Id so clients can read it for log correlation.
  *
  * @returns {import('cors').CorsHandler} Configured CORS middleware
  */
@@ -36,7 +40,7 @@ function createCors() {
 
   return cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. CLI tools, serverâ€‘side calls)
+      // Allow requests with no origin (e.g. CLI tools, server-side calls)
       if (!origin) return callback(null, true);
       // If no allow list is configured, permit all origins
       if (allowedOrigins.length === 0) return callback(null, true);
@@ -52,6 +56,8 @@ function createCors() {
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
     // Return 204 for successful OPTIONS requests instead of default 200.
     optionsSuccessStatus: 204,
+    // Ensure clients can read our correlation header.
+    exposedHeaders: ['X-Request-Id'],
     // Terminate preflight requests at the CORS middleware instead of
     // forwarding them to downstream handlers.
     preflightContinue: false,

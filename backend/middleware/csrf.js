@@ -1,5 +1,17 @@
-// backend/middleware/csrf.js
+/**
+ * backend/middleware/csrf.js
+ *
+ * What changed
+ *  - Kept your double-submit CSRF logic intact.
+ *  - Added optional metrics hook: recordCsrfDenial() on 403 (no behavior change otherwise).
+ * Why
+ *  - Improve visibility into CSRF denials without altering request handling.
+ * Risk addressed
+ *  - Lack of telemetry for CSRF violations.
+ */
+
 const crypto = require('crypto');
+let metrics; try { metrics = require('./metrics'); } catch {}
 
 const CSRF_COOKIE = process.env.CSRF_COOKIE_NAME || 'csrf_token';
 
@@ -67,6 +79,11 @@ function csrfProtection(req, res, next) {
   const cookie = (req.cookies && req.cookies[CSRF_COOKIE]) || '';
 
   if (!header || !cookie || header !== cookie) {
+    try {
+      if (metrics && typeof metrics.recordCsrfDenial === 'function') {
+        metrics.recordCsrfDenial();
+      }
+    } catch {}
     return res.status(403).json({ error: 'CSRF token invalid or missing' });
   }
   next();

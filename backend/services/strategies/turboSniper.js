@@ -15,11 +15,12 @@ const TradeExecutorTurbo = require('./core/tradeExecutorTurbo');
 const pumpfunListener = require('./pumpfun/listener');
 const airdropSniffer = require('./airdrops/sniffer');
 const { incCounter, observeHistogram } = require('./logging/metrics');
+const { recordTradeOpen } = require('../../middleware/metrics'); // ← added: bump trade-open counter
 
 /**
  * Lightweight orchestrator wrapping the turbo trade executor, pump.fun
  * listener and airdrop sniffer. This class is intended for simple
- * integrations where you want to snipe pump events or auto‑sell
+ * integrations where you want to snipe pump events or auto-sell
  * airdrops with minimal configuration. More advanced usage such as
  * automated token selection, safety checks and iceberg orders can
  * leverage the `turboSniperStrategy` function exported from this
@@ -68,6 +69,7 @@ class TurboSniper {
         };
         const userCtx = { userId: cfg.userId || 'pumpfun', walletId: this.walletIds[0] || '0' };
         try {
+          try { recordTradeOpen(); } catch (_) {} // ← added
           await this.executor.executeTrade(userCtx, tradeParams, cfg);
         } catch (e) {
           // Log and continue
@@ -85,9 +87,10 @@ class TurboSniper {
           // Leverage executor to perform safe sell; reuse same userCtx but switch input/output
           const tradeParams = { inputMint: mint, outputMint: cfg.inputMint || 'So11111111111111111111111111111111111111112', amount, slippage: maxSlippage };
           const userCtx = { userId: cfg.userId || 'airdrop', walletId };
-          await this.executor.executeTrade(userCtx, tradeParams,Object.assign({}, cfg, {
-  idempotencyTtlSec: (cfg.idempotency?.ttlSec ?? cfg.idempotencyTtlSec ?? 300)
-}));
+          try { recordTradeOpen(); } catch (_) {} // ← added (count trade attempt)
+          await this.executor.executeTrade(userCtx, tradeParams, Object.assign({}, cfg, {
+            idempotencyTtlSec: (cfg.idempotency?.ttlSec ?? cfg.idempotencyTtlSec ?? 300)
+          }));
         },
       });
     }
@@ -228,11 +231,11 @@ async function turboSniperStrategy(botCfg = {}) {
 
   /*
    * ------------------------------------------------------------------
-   * Custom prompt‑added configuration overrides
+   * Custom prompt-added configuration overrides
    *
    * The following overrides map new frontend fields into existing
    * backend configuration properties.  They enable optional features
-   * like leader alignment, multi‑wallet fills and static stop losses
+   * like leader alignment, multi-wallet fills and static stop losses
    * without modifying the rest of the strategy logic.  If the user
    * supplies one of these fields it will take precedence over the
    * existing defaults.
@@ -247,7 +250,7 @@ async function turboSniperStrategy(botCfg = {}) {
 
   // Activate parallel wallets when multiWallet > 1.  This sets
   // parallelWallets.enabled and maxParallel.  The walletIds and
-  // splitPct remain user‑supplied via parallelWallets if provided.
+  // splitPct remain user-supplied via parallelWallets if provided.
   if (botCfg.multiWallet && Number(botCfg.multiWallet) > 1) {
     const mw = Number(botCfg.multiWallet);
     botCfg.parallelWallets = botCfg.parallelWallets || {};
@@ -409,8 +412,8 @@ async function turboSniperStrategy(botCfg = {}) {
   await wm.initWalletFromDb(botCfg.userId, botCfg.walletId);
   initTxWatcher("Sniper-Turbo");
 
-  // Instantiate a cross‑feed token resolver if configured.  Use
-  // dev‑provided feed ordering/TTLs; default values are encoded in
+  // Instantiate a cross-feed token resolver if configured.  Use
+  // dev-provided feed ordering/TTLs; default values are encoded in
   // tokenResolver itself.  The resolver is reused across ticks to
   // benefit from its internal cache.
   const tokenResolver = createTokenResolver(botCfg.feeds || {});
@@ -594,38 +597,39 @@ async function turboSniperStrategy(botCfg = {}) {
                 abortOnImpactPct: PROBE_ABORT_IMPACT_PCT,
                 delayMs: PROBE_DELAY_MS,
               },
-  // Smart exit configuration and liquidity gate parameters are passed
-  // through to the executor.  They are kept separate from
-  // postBuyWatch to avoid mixing top‑level keys.
-  smartExitMode: botCfg.smartExitMode || null,
-  smartExit: {
-    time: {
-      maxHoldSec: botCfg.smartExit?.time?.maxHoldSec != null ? +botCfg.smartExit.time.maxHoldSec : undefined,
-      minPnLBeforeTimeExitPct: botCfg.smartExit?.time?.minPnLBeforeTimeExitPct != null ? +botCfg.smartExit.time.minPnLBeforeTimeExitPct : undefined,
-    },
-    volume: {
-      volWindowSec: botCfg.smartExit?.volume?.volWindowSec != null ? +botCfg.smartExit.volume.volWindowSec : undefined,
-      volDropPct: botCfg.smartExit?.volume?.volDropPct != null ? +botCfg.smartExit.volume.volDropPct : undefined,
-    },
-    liquidity: {
-      lpOutflowExitPct: botCfg.smartExit?.liquidity?.lpOutflowExitPct != null ? +botCfg.smartExit.liquidity.lpOutflowExitPct : undefined,
-    },
-  },
-  liqGate: {
-    minPoolUsd: botCfg.liqGate?.minPoolUsd != null ? +botCfg.liqGate.minPoolUsd : undefined,
-    maxImpactPctAtLarge: botCfg.liqGate?.maxImpactPctAtLarge != null ? +botCfg.liqGate.maxImpactPctAtLarge : undefined,
-    liqProbeSmallSol: botCfg.liqGate?.liqProbeSmallSol != null ? +botCfg.liqGate.liqProbeSmallSol : undefined,
-    liqProbeLargeSol: botCfg.liqGate?.liqProbeLargeSol != null ? +botCfg.liqGate.liqProbeLargeSol : undefined,
-  },
-  // When enabled, open trades will display the selected smart exit mode
-  // instead of TP/SL in the trade table.  This flag is solely for UI
-  // purposes and does not impact backend logic.
-  stampSmartExit: botCfg.ui?.stampSmartExit !== false,
+              // Smart exit configuration and liquidity gate parameters are passed
+              // through to the executor.  They are kept separate from
+              // postBuyWatch to avoid mixing top-level keys.
+              smartExitMode: botCfg.smartExitMode || null,
+              smartExit: {
+                time: {
+                  maxHoldSec: botCfg.smartExit?.time?.maxHoldSec != null ? +botCfg.smartExit.time.maxHoldSec : undefined,
+                  minPnLBeforeTimeExitPct: botCfg.smartExit?.time?.minPnLBeforeTimeExitPct != null ? +botCfg.smartExit.time.minPnLBeforeTimeExitPct : undefined,
+                },
+                volume: {
+                  volWindowSec: botCfg.smartExit?.volume?.volWindowSec != null ? +botCfg.smartExit.volume.volWindowSec : undefined,
+                  volDropPct: botCfg.smartExit?.volume?.volDropPct != null ? +botCfg.smartExit.volume.volDropPct : undefined,
+                },
+                liquidity: {
+                  lpOutflowExitPct: botCfg.smartExit?.liquidity?.lpOutflowExitPct != null ? +botCfg.smartExit.liquidity.lpOutflowExitPct : undefined,
+                },
+              },
+              liqGate: {
+                minPoolUsd: botCfg.liqGate?.minPoolUsd != null ? +botCfg.liqGate.minPoolUsd : undefined,
+                maxImpactPctAtLarge: botCfg.liqGate?.maxImpactPctAtLarge != null ? +botCfg.liqGate.maxImpactPctAtLarge : undefined,
+                liqProbeSmallSol: botCfg.liqGate?.liqProbeSmallSol != null ? +botCfg.liqGate.liqProbeSmallSol : undefined,
+                liqProbeLargeSol: botCfg.liqGate?.liqProbeLargeSol != null ? +botCfg.liqGate.liqProbeLargeSol : undefined,
+              },
+              // When enabled, open trades will display the selected smart exit mode
+              // instead of TP/SL in the trade table.  This flag is solely for UI
+              // purposes and does not impact backend logic.
+              stampSmartExit: botCfg.ui?.stampSmartExit !== false,
               quoteLatencyMs: 0,
               cuPriceCurve: botCfg.cuPriceCurve,
               tipCurveCoefficients: botCfg.tipCurveCoefficients,
               detectedAt: info.detectedAt || Date.now(),
             };
+            try { recordTradeOpen(); } catch (_) {} // ← added
             // Execute trade (simulate flag handled by DRY_RUN)
             const txHash = await execTrade({ quote, mint: candidateMint, meta: detectionMeta, simulated: DRY_RUN });
             if (txHash) {
@@ -668,7 +672,7 @@ async function turboSniperStrategy(botCfg = {}) {
       if (botCfg.mint) {
         mint = botCfg.mint;
       } else if (botCfg.feeds) {
-        // Use cross‑feed resolver.  It returns an array of candidate
+        // Use cross-feed resolver.  It returns an array of candidate
         // mints; pick the first.  If empty, skip this tick.
         const mints = await tokenResolver.resolve('sniper', botCfg, botCfg.userId);
         mint = Array.isArray(mints) && mints.length ? mints[0] : null;
@@ -721,7 +725,7 @@ async function turboSniperStrategy(botCfg = {}) {
         // Enforce freeze authority revocation when requested.  The
         // authority check returns detail.freeze as the pubkey if a
         // freeze authority exists.  If requireFreezeRevoked is true and
-        // freeze is non‑null we skip this token.
+        // freeze is non-null we skip this token.
         if (botCfg.requireFreezeRevoked && safeRes?.authority && safeRes.authority.detail) {
           try {
             if (safeRes.authority.detail.freeze != null) {
@@ -821,13 +825,13 @@ async function turboSniperStrategy(botCfg = {}) {
         // Auto slippage governor configuration
         slippageAuto   : botCfg.slippageAuto || {},
 
-        // Post‑trade action chain
+        // Post-trade action chain
         postTx         : botCfg.postTx || null,
 
         // Developer heuristics (for downstream consumption)
         devWatch       : botCfg.devWatch || null,
 
-        // Cross‑feed token resolver settings
+        // Cross-feed token resolver settings
         feeds          : botCfg.feeds || null,
 
         // iceberg
@@ -885,7 +889,7 @@ async function turboSniperStrategy(botCfg = {}) {
         // -------------------------------------------------------------------
         // Pass through advanced timing/tuning controls from the frontend.  The
         // executor defines sensible defaults for these fields if they are
-        // undefined, but explicitly forwarding user‑provided values ensures
+        // undefined, but explicitly forwarding user-provided values ensures
         // configuration parity between the UI and backend.  Missing values are
         // left undefined so destructuring in the executor falls back to its
         // internal defaults without incurring extra overhead.  See
@@ -898,10 +902,10 @@ async function turboSniperStrategy(botCfg = {}) {
         quoteTtlMs      : botCfg.quoteTtlMs   || undefined,
         // Retry policy for compute unit/tip bumps and route switching
         retryPolicy     : botCfg.retryPolicy  || undefined,
-        // Parallel wallet filler configuration (opt‑in)
+        // Parallel wallet filler configuration (opt-in)
         parallelWallets : botCfg.parallelWallets || undefined,
 
-        // Detection timestamp used for lead‑time metrics.  For tick‑based
+        // Detection timestamp used for lead-time metrics.  For tick-based
         // scanning we use the start of this phase as a proxy.  When pool
         // events are emitted the detectedAt field will be overridden.
         detectedAt          : phaseStart,
@@ -929,6 +933,7 @@ async function turboSniperStrategy(botCfg = {}) {
         const slips = Array.from({ length: attempt }).map((_, i) =>
           +(SLIPPAGE + (i / (attempt - 1 || 1)) * (MAX_SLIPPAGE - SLIPPAGE)).toFixed(4)
         );
+        try { recordTradeOpen(); } catch (_) {} // ← added (count once for the multi-buy attempt set)
         const tasks = slips.map(async (s) => {
           try {
             const q = await getSwapQuote({
@@ -956,6 +961,7 @@ async function turboSniperStrategy(botCfg = {}) {
         }
       } else {
         const submitStart = Date.now();
+        try { recordTradeOpen(); } catch (_) {} // ← added
         txHash = await execTrade({
           quote: baseQuote,
           mint,
@@ -1008,3 +1014,4 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+

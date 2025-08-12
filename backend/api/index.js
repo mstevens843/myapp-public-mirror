@@ -1,7 +1,22 @@
+/**
+ * backend/api/index.js
+ *
+ * What changed
+ *  - Kept your full router and sub-route wiring intact.
+ *  - Ensured requestId stays first for downstream logging/correlation.
+ *  - RLS pilot: made userId resolution slightly more forgiving (id | userId | user_id),
+ *    still gated by FEATURE_RLS_PILOT and asyncLocalStorage presence.
+ *  - Idempotency stays feature-flag driven via utils/featureFlags and only for POST.
+ * Why
+ *  - Preserve your behavior while plugging in the idempotency/RLS bits consistently.
+ * Risk addressed
+ *  - Duplicate POST effects; missing per-user DB scoping context when RLS pilot is enabled.
+ */
+
 const express = require('express');
 const router = express.Router();
 
-// Feature flag middleware must run before authentication to short‑circuit
+// Feature flag middleware must run before authentication to short-circuit
 // disabled endpoints.  See backend/config/featureFlags.js for details.
 const featureFlagMiddleware = require('../middleware/featureFlag');
 const requestId = require('../middleware/requestId');
@@ -28,7 +43,7 @@ const healthRouter = require('./health');
 const requireAuth = require('../middleware/requireAuth');
 
 // Pull the AsyncLocalStorage instance from the Prisma client.  When the
-// RLS pilot flag is enabled this will be a non‑null object.  See
+// RLS pilot flag is enabled this will be a non-null object.  See
 // backend/prisma/prisma.js for details.
 const { asyncLocalStorage } = require('../prisma/prisma');
 const armEncryptionRouter = require('./armSessions');
@@ -44,7 +59,6 @@ router.use((req, res, next) => {
 // the middleware chain so subsequent logs and idempotency records include
 // the ID. The middleware will also propagate the ID in the response header.
 router.use(requestId);
-
 
 // 📴 Feature flag check before any other middleware
 router.use(featureFlagMiddleware);
@@ -79,9 +93,12 @@ router.use((req, res, next) => {
     if (!asyncLocalStorage) return next();
     const flag = process.env.FEATURE_RLS_PILOT;
     if (!flag || !/^(1|true|yes)$/i.test(flag.trim())) return next();
-    // Only run when a user has been authenticated and an ID is present
-    const userId = req.user && req.user.id;
+
+    // Resolve a user id in a tolerant way; prefer req.user.id
+    const userId =
+      (req.user && (req.user.id || req.user.userId || req.user.user_id)) || null;
     if (!userId) return next();
+
     // Use run() to establish a context for downstream async tasks
     asyncLocalStorage.run(userId, () => next());
   } catch (err) {
@@ -94,7 +111,7 @@ router.use((req, res, next) => {
 // 🧾 Idempotency middleware: after authentication we inspect POST requests
 // and enforce Idempotency-Key semantics. We place this after requireAuth
 // so that req.user is available to scope records. Feature flag
-// FEATURE_IDEMPOTENCY controls whether this is enabled.
+// FEATURE_IDEMPOTENCY controls whether this is enabled (via utils/featureFlags).
 router.use(async (req, res, next) => {
   if (req.method !== 'POST') return next();
   const { isEnabled } = require('../utils/featureFlags');
@@ -107,14 +124,18 @@ router.use(async (req, res, next) => {
   }
 });
 
-// Attach all API sub‑routes
-router.use('/mode', (req, res, next) => {
-  console.log('⚙️ /mode router hit');
-  req.setModeProcess = (proc) => {
-    req.currentModeProcess = proc;
-  };
-  next();
-}, modeRouter);
+// Attach all API sub-routes
+router.use(
+  '/mode',
+  (req, res, next) => {
+    console.log('⚙️ /mode router hit');
+    req.setModeProcess = (proc) => {
+      req.currentModeProcess = proc;
+    };
+    next();
+  },
+  modeRouter
+);
 
 router.use('/trades', tradeRouter);
 console.log('✅ /trades router loaded');

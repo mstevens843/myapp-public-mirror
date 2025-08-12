@@ -1038,8 +1038,133 @@ function validateScheduleLauncher(cfg = {}) {
 
 // backend/services/strategies/validators/turboSniperValidator.js
 
+export function validateTurboConfig(cfg) {
+  const errors = [];
+
+  const mode = cfg.smartExitMode || SmartExitMode.NONE;
+  const push = (m) => errors.push(String(m));
+
+  // LP Gate
+  if (cfg.minPoolUsd != null && (isNaN(cfg.minPoolUsd) || cfg.minPoolUsd < 0)) {
+    push("minPoolUsd must be ≥ 0");
+  }
+  if (
+    cfg.maxPriceImpactPct != null &&
+    (isNaN(cfg.maxPriceImpactPct) || cfg.maxPriceImpactPct < 0 || cfg.maxPriceImpactPct > 100)
+  ) {
+    push("maxPriceImpactPct must be between 0 and 100");
+  }
+
+  // Smart Exit
+  if (mode === SmartExitMode.TIME) {
+    const v = cfg.smartExitTimeMins;
+    if (v == null || isNaN(v) || v < 1 || v > 1440) push("smartExitTimeMins must be 1–1440 minutes");
+  } else if (mode === SmartExitMode.VOLUME) {
+    const lb = cfg.smartVolLookbackSec;
+    const th = cfg.smartVolThreshold;
+    if (lb == null || isNaN(lb) || lb < 5 || lb > 600) push("smartVolLookbackSec must be 5–600 seconds");
+    if (th == null || isNaN(th) || th < 0) push("smartVolThreshold must be ≥ 0 (quote units)");
+  } else if (mode === SmartExitMode.LIQUIDITY) {
+    const lb = cfg.smartLiqLookbackSec;
+    const dp = cfg.smartLiqDropPct;
+    if (lb == null || isNaN(lb) || lb < 5 || lb > 600) push("smartLiqLookbackSec must be 5–600 seconds");
+    if (dp == null || isNaN(dp) || dp < 0 || dp > 100) push("smartLiqDropPct must be between 0 and 100");
+  }
+
+  if (errors.length) {
+    const e = new Error("Invalid Turbo config");
+    e.details = errors;
+    throw e;
+  }
+  return true;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Smart Exit enum + helpers (from "your file")                       */
+/* ------------------------------------------------------------------ */
+export const SmartExitMode = {
+  NONE: "none",
+  TIME: "time",
+  VOLUME: "volume",
+  LIQUIDITY: "liquidity",
+};
+
+
+/**
+ * Normalizer for the new flat fields so downstream code receives numbers.
+ */
+export function normalizeTurboConfig(cfg = {}) {
+  const out = { ...cfg };
+  // Coerce numbers safely
+  const keys = [
+    "smartExitTimeMins",
+    "smartVolLookbackSec",
+    "smartVolThreshold",
+    "smartLiqLookbackSec",
+    "smartLiqDropPct",
+    "minPoolUsd",
+    "maxPriceImpactPct",
+  ];
+  for (const k of keys) {
+    if (out[k] != null) out[k] = Number(out[k]);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* Main project validator (your existing function), now with          */
+/* Smart Exit + LP Gate checks merged in (non-destructive).           */
+/* ------------------------------------------------------------------ */
 function validateTurboSniper(cfg = {}) {
   const errors = validateSniper(cfg);
+
+  // ---------------------------
+  // NEW: Smart Exit + LP Gate (flat fields)
+  // ---------------------------
+  const modeRaw = cfg.smartExitMode || "";
+  const mode =
+    modeRaw === "" || modeRaw === SmartExitMode.NONE
+      ? SmartExitMode.NONE
+      : String(modeRaw).toLowerCase();
+
+  // LP Gate
+  if (!isUnset(cfg.minPoolUsd)) {
+    const v = toNum(cfg.minPoolUsd);
+    if (!isNumeric(v) || v < 0) errors.push("TurboSniper: minPoolUsd must be ≥ 0");
+  }
+  if (!isUnset(cfg.maxPriceImpactPct)) {
+    const v = toNum(cfg.maxPriceImpactPct);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("TurboSniper: maxPriceImpactPct must be between 0 and 100");
+    }
+  }
+
+  // Smart Exit
+  if (mode === SmartExitMode.TIME) {
+    const v = toNum(cfg.smartExitTimeMins);
+    if (!isNumeric(v) || v < 1 || v > 1440) {
+      errors.push("TurboSniper: smartExitTimeMins must be 1–1440 minutes");
+    }
+  } else if (mode === SmartExitMode.VOLUME) {
+    const lb = toNum(cfg.smartVolLookbackSec);
+    const th = toNum(cfg.smartVolThreshold);
+    if (!isNumeric(lb) || lb < 5 || lb > 600) {
+      errors.push("TurboSniper: smartVolLookbackSec must be 5–600 seconds");
+    }
+    if (!isNumeric(th) || th < 0) {
+      errors.push("TurboSniper: smartVolThreshold must be ≥ 0 (quote units)");
+    }
+  } else if (mode === SmartExitMode.LIQUIDITY) {
+    const lb = toNum(cfg.smartLiqLookbackSec);
+    const dp = toNum(cfg.smartLiqDropPct);
+    if (!isNumeric(lb) || lb < 5 || lb > 600) {
+      errors.push("TurboSniper: smartLiqLookbackSec must be 5–600 seconds");
+    }
+    if (!isNumeric(dp) || dp < 0 || dp > 100) {
+      errors.push("TurboSniper: smartLiqDropPct must be between 0 and 100");
+    }
+  }
 
   // ---------------------------
   // Simple boolean toggles (existing)
@@ -1070,8 +1195,8 @@ function validateTurboSniper(cfg = {}) {
   // ADDED: Support nested flags booleans (from frontend)
   // ---------------------------
   if (cfg.flags) {
-    ['directAmm', 'bundles', 'leaderTiming', 'relay', 'probe'].forEach((k) => {
-      if (cfg.flags[k] !== undefined && typeof cfg.flags[k] !== 'boolean') {
+    ["directAmm", "bundles", "leaderTiming", "relay", "probe"].forEach((k) => {
+      if (cfg.flags[k] !== undefined && typeof cfg.flags[k] !== "boolean") {
         errors.push(`TurboSniper: flags.${k} must be boolean`);
       }
     });
@@ -1135,17 +1260,17 @@ function validateTurboSniper(cfg = {}) {
   // ---------------------------
   if (cfg.leaderTiming && cfg.leaderTiming.enabled) {
     if (!(toNum(cfg.leaderTiming.preflightMs) > 0)) {
-      errors.push('TurboSniper: leaderTiming.preflightMs must be > 0 when enabled');
+      errors.push("TurboSniper: leaderTiming.preflightMs must be > 0 when enabled");
     }
     if (!(toNum(cfg.leaderTiming.windowSlots) >= 1)) {
-      errors.push('TurboSniper: leaderTiming.windowSlots must be ≥ 1 when enabled');
+      errors.push("TurboSniper: leaderTiming.windowSlots must be ≥ 1 when enabled");
     }
   }
 
   // Quote TTL (ms) > 0
   if (!isUnset(cfg.quoteTtlMs)) {
     if (!Number.isInteger(toNum(cfg.quoteTtlMs)) || toNum(cfg.quoteTtlMs) <= 0) {
-      errors.push('TurboSniper: quoteTtlMs must be a positive integer (ms)');
+      errors.push("TurboSniper: quoteTtlMs must be a positive integer (ms)");
     }
   }
 
@@ -1153,10 +1278,10 @@ function validateTurboSniper(cfg = {}) {
   // ADDED: Entry/Volume thresholds (from frontend)
   // ---------------------------
   if (!isUnset(cfg.entryThreshold) && !(toNum(cfg.entryThreshold) >= 0)) {
-    errors.push('TurboSniper: entryThreshold must be ≥ 0');
+    errors.push("TurboSniper: entryThreshold must be ≥ 0");
   }
   if (!isUnset(cfg.volumeThreshold) && !(toNum(cfg.volumeThreshold) >= 0)) {
-    errors.push('TurboSniper: volumeThreshold must be ≥ 0');
+    errors.push("TurboSniper: volumeThreshold must be ≥ 0");
   }
 
   // ---------------------------
@@ -1164,18 +1289,18 @@ function validateTurboSniper(cfg = {}) {
   // ---------------------------
   if (cfg.idempotency) {
     const v = cfg.idempotency;
-    if (!(toNum(v.ttlSec) > 0)) errors.push('TurboSniper: idempotency.ttlSec must be > 0');
-    if (typeof v.salt !== 'string' || !v.salt.length) {
-      errors.push('TurboSniper: idempotency.salt must be a non-empty string');
+    if (!(toNum(v.ttlSec) > 0)) errors.push("TurboSniper: idempotency.ttlSec must be > 0");
+    if (typeof v.salt !== "string" || !v.salt.length) {
+      errors.push("TurboSniper: idempotency.salt must be a non-empty string");
     }
-    if (typeof v.resumeFromLast !== 'boolean') {
-      errors.push('TurboSniper: idempotency.resumeFromLast must be boolean');
+    if (typeof v.resumeFromLast !== "boolean") {
+      errors.push("TurboSniper: idempotency.resumeFromLast must be boolean");
     }
   }
   // Legacy alias support (optional): idempotencyTtlSec
   if (!isUnset(cfg.idempotencyTtlSec)) {
     if (!Number.isInteger(toNum(cfg.idempotencyTtlSec)) || toNum(cfg.idempotencyTtlSec) <= 0) {
-      errors.push('TurboSniper: idempotencyTtlSec must be a positive integer (seconds)');
+      errors.push("TurboSniper: idempotencyTtlSec must be a positive integer (seconds)");
     }
   }
 
@@ -1184,14 +1309,14 @@ function validateTurboSniper(cfg = {}) {
   // ---------------------------
   if (cfg.retryPolicy) {
     const rp = cfg.retryPolicy;
-    if (!(toNum(rp.max) >= 1)) errors.push('TurboSniper: retryPolicy.max must be ≥ 1');
-    if (!(toNum(rp.bumpCuStep) >= 0)) errors.push('TurboSniper: retryPolicy.bumpCuStep must be ≥ 0');
-    if (!(toNum(rp.bumpTipStep) >= 0)) errors.push('TurboSniper: retryPolicy.bumpTipStep must be ≥ 0');
-    if (!isUnset(rp.routeSwitch) && typeof rp.routeSwitch !== 'boolean') {
-      errors.push('TurboSniper: retryPolicy.routeSwitch must be boolean');
+    if (!(toNum(rp.max) >= 1)) errors.push("TurboSniper: retryPolicy.max must be ≥ 1");
+    if (!(toNum(rp.bumpCuStep) >= 0)) errors.push("TurboSniper: retryPolicy.bumpCuStep must be ≥ 0");
+    if (!(toNum(rp.bumpTipStep) >= 0)) errors.push("TurboSniper: retryPolicy.bumpTipStep must be ≥ 0");
+    if (!isUnset(rp.routeSwitch) && typeof rp.routeSwitch !== "boolean") {
+      errors.push("TurboSniper: retryPolicy.routeSwitch must be boolean");
     }
-    if (!isUnset(rp.rpcFailover) && typeof rp.rpcFailover !== 'boolean') {
-      errors.push('TurboSniper: retryPolicy.rpcFailover must be boolean');
+    if (!isUnset(rp.rpcFailover) && typeof rp.rpcFailover !== "boolean") {
+      errors.push("TurboSniper: retryPolicy.rpcFailover must be boolean");
     }
   }
 
@@ -1201,14 +1326,14 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.parallelWallets && cfg.parallelWallets.enabled) {
     const { walletIds = [], splitPct = [], maxParallel } = cfg.parallelWallets;
     if (!Array.isArray(walletIds) || walletIds.length === 0) {
-      errors.push('TurboSniper: parallelWallets.walletIds must be a non-empty array when enabled');
+      errors.push("TurboSniper: parallelWallets.walletIds must be a non-empty array when enabled");
     }
     if (!Array.isArray(splitPct) || splitPct.length !== walletIds.length) {
-      errors.push('TurboSniper: parallelWallets.splitPct length must match walletIds length');
+      errors.push("TurboSniper: parallelWallets.splitPct length must match walletIds length");
     } else {
       const sum = splitPct.reduce((a, b) => a + (Number(b) || 0), 0);
       if (Math.abs(sum - 1) > 0.05) {
-        errors.push('TurboSniper: parallelWallets.splitPct values must sum to ~1.0');
+        errors.push("TurboSniper: parallelWallets.splitPct values must sum to ~1.0");
       }
       splitPct.forEach((pct, i) => {
         if (!(toNum(pct) > 0)) {
@@ -1217,7 +1342,7 @@ function validateTurboSniper(cfg = {}) {
       });
     }
     if (!(toNum(maxParallel) >= 1 && toNum(maxParallel) <= walletIds.length)) {
-      errors.push('TurboSniper: parallelWallets.maxParallel must be between 1 and walletIds.length');
+      errors.push("TurboSniper: parallelWallets.maxParallel must be between 1 and walletIds.length");
     }
   }
 
@@ -1227,23 +1352,23 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.pumpfun && cfg.pumpfun.enabled) {
     const pf = cfg.pumpfun;
     const tp = toNum(pf.thresholdPct);
-    if (!(tp >= 0 && tp <= 1)) errors.push('TurboSniper: pumpfun.thresholdPct must be between 0 and 1');
-    if (!(toNum(pf.minSolLiquidity) >= 0)) errors.push('TurboSniper: pumpfun.minSolLiquidity must be ≥ 0');
-    if (!(toNum(pf.cooldownSec) >= 0)) errors.push('TurboSniper: pumpfun.cooldownSec must be ≥ 0');
+    if (!(tp >= 0 && tp <= 1)) errors.push("TurboSniper: pumpfun.thresholdPct must be between 0 and 1");
+    if (!(toNum(pf.minSolLiquidity) >= 0)) errors.push("TurboSniper: pumpfun.minSolLiquidity must be ≥ 0");
+    if (!(toNum(pf.cooldownSec) >= 0)) errors.push("TurboSniper: pumpfun.cooldownSec must be ≥ 0");
   }
 
   if (cfg.airdrops && cfg.airdrops.enabled) {
     const ad = cfg.airdrops;
-    if (!(toNum(ad.minUsdValue) >= 0)) errors.push('TurboSniper: airdrops.minUsdValue must be ≥ 0');
+    if (!(toNum(ad.minUsdValue) >= 0)) errors.push("TurboSniper: airdrops.minUsdValue must be ≥ 0");
     if (!(toNum(ad.maxSellSlippagePct) >= 0 && toNum(ad.maxSellSlippagePct) <= 100)) {
-      errors.push('TurboSniper: airdrops.maxSellSlippagePct must be between 0 and 100');
+      errors.push("TurboSniper: airdrops.maxSellSlippagePct must be between 0 and 100");
     }
     if (!isUnset(ad.whitelistMints)) {
       if (!Array.isArray(ad.whitelistMints)) {
-        errors.push('TurboSniper: airdrops.whitelistMints must be an array');
+        errors.push("TurboSniper: airdrops.whitelistMints must be an array");
       } else {
         ad.whitelistMints.forEach((m, i) => {
-          if (typeof m !== 'string' || !m.trim()) {
+          if (typeof m !== "string" || !m.trim()) {
             errors.push(`TurboSniper: airdrops.whitelistMints[${i}] must be a non-empty string`);
           }
         });
@@ -1257,15 +1382,15 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.privateRelay && cfg.privateRelay.enabled) {
     const pr = cfg.privateRelay;
     if (!Array.isArray(pr.urls) || pr.urls.length === 0) {
-      errors.push('TurboSniper: privateRelay.urls must contain at least one URL when enabled');
+      errors.push("TurboSniper: privateRelay.urls must contain at least one URL when enabled");
     } else {
       pr.urls.forEach((u, i) => {
-        if (typeof u !== 'string' || !u.trim()) {
+        if (typeof u !== "string" || !u.trim()) {
           errors.push(`TurboSniper: privateRelay.urls[${i}] must be a non-empty string`);
         }
       });
     }
-    if (!isUnset(pr.mode) && !['bundle', 'tx'].includes(pr.mode)) {
+    if (!isUnset(pr.mode) && !["bundle", "tx"].includes(pr.mode)) {
       errors.push('TurboSniper: privateRelay.mode must be either "bundle" or "tx"');
     }
   }
@@ -1276,60 +1401,60 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.sizing) {
     const s = cfg.sizing;
     if (!isUnset(s.maxImpactPct) && !(toNum(s.maxImpactPct) > 0)) {
-      errors.push('TurboSniper: sizing.maxImpactPct must be > 0');
+      errors.push("TurboSniper: sizing.maxImpactPct must be > 0");
     }
     if (!isUnset(s.maxPoolPct)) {
       const v = toNum(s.maxPoolPct);
-      if (!(v > 0 && v <= 1)) errors.push('TurboSniper: sizing.maxPoolPct must be between 0 and 1');
+      if (!(v > 0 && v <= 1)) errors.push("TurboSniper: sizing.maxPoolPct must be between 0 and 1");
     }
     if (!isUnset(s.minUsd) && !(toNum(s.minUsd) >= 0)) {
-      errors.push('TurboSniper: sizing.minUsd must be ≥ 0');
+      errors.push("TurboSniper: sizing.minUsd must be ≥ 0");
     }
   }
 
   if (cfg.probe && cfg.probe.enabled) {
     const p = cfg.probe;
-    if (!(toNum(p.usd) > 0)) errors.push('TurboSniper: probe.usd must be > 0');
-    if (!(toNum(p.scaleFactor) > 1)) errors.push('TurboSniper: probe.scaleFactor must be > 1');
-    if (!(toNum(p.abortOnImpactPct) > 0)) errors.push('TurboSniper: probe.abortOnImpactPct must be > 0');
-    if (!(toNum(p.delayMs) >= 0)) errors.push('TurboSniper: probe.delayMs must be ≥ 0');
+    if (!(toNum(p.usd) > 0)) errors.push("TurboSniper: probe.usd must be > 0");
+    if (!(toNum(p.scaleFactor) > 1)) errors.push("TurboSniper: probe.scaleFactor must be > 1");
+    if (!(toNum(p.abortOnImpactPct) > 0)) errors.push("TurboSniper: probe.abortOnImpactPct must be > 0");
+    if (!(toNum(p.delayMs) >= 0)) errors.push("TurboSniper: probe.delayMs must be ≥ 0");
   }
 
   // ---------------------------
   // CU/tip tuning & routing prefs
   // ---------------------------
   if (!isUnset(cfg.cuPriceMicroLamportsMin) && !(toNum(cfg.cuPriceMicroLamportsMin) >= 0)) {
-    errors.push('TurboSniper: cuPriceMicroLamportsMin must be ≥ 0');
+    errors.push("TurboSniper: cuPriceMicroLamportsMin must be ≥ 0");
   }
   if (!isUnset(cfg.cuPriceMicroLamportsMax) && !(toNum(cfg.cuPriceMicroLamportsMax) >= 0)) {
-    errors.push('TurboSniper: cuPriceMicroLamportsMax must be ≥ 0');
+    errors.push("TurboSniper: cuPriceMicroLamportsMax must be ≥ 0");
   }
   if (!isUnset(cfg.cuPriceMicroLamportsMin) && !isUnset(cfg.cuPriceMicroLamportsMax)) {
     if (toNum(cfg.cuPriceMicroLamportsMax) < toNum(cfg.cuPriceMicroLamportsMin)) {
-      errors.push('TurboSniper: cuPriceMicroLamportsMax must be ≥ cuPriceMicroLamportsMin');
+      errors.push("TurboSniper: cuPriceMicroLamportsMax must be ≥ cuPriceMicroLamportsMin");
     }
   }
 
-  if (!isUnset(cfg.bundleStrategy) && !['topOfBlock', 'mid', 'nearEnd'].includes(cfg.bundleStrategy)) {
-    errors.push('TurboSniper: bundleStrategy must be one of topOfBlock|mid|nearEnd');
+  if (!isUnset(cfg.bundleStrategy) && !["topOfBlock", "mid", "nearEnd"].includes(cfg.bundleStrategy)) {
+    errors.push("TurboSniper: bundleStrategy must be one of topOfBlock|mid|nearEnd");
   }
-  if (!isUnset(cfg.tipCurve) && !['flat', 'linear', 'expo'].includes(cfg.tipCurve)) {
-    errors.push('TurboSniper: tipCurve must be one of flat|linear|expo');
+  if (!isUnset(cfg.tipCurve) && !["flat", "linear", "expo"].includes(cfg.tipCurve)) {
+    errors.push("TurboSniper: tipCurve must be one of flat|linear|expo");
   }
 
   // cuPriceCurve / tipCurveCoefficients
   if (cfg.cuPriceCurve !== undefined && cfg.cuPriceCurve !== null) {
     const curve = cfg.cuPriceCurve;
-    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
+    const coeffs = Array.isArray(curve) ? curve : curve && curve.coeffs;
     if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
-      errors.push('TurboSniper: cuPriceCurve must be an array of numbers or an object with a coeffs array');
+      errors.push("TurboSniper: cuPriceCurve must be an array of numbers or an object with a coeffs array");
     }
   }
   if (cfg.tipCurveCoefficients !== undefined && cfg.tipCurveCoefficients !== null) {
     const curve = cfg.tipCurveCoefficients;
-    const coeffs = Array.isArray(curve) ? curve : (curve && curve.coeffs);
+    const coeffs = Array.isArray(curve) ? curve : curve && curve.coeffs;
     if (!Array.isArray(coeffs) || !coeffs.every((c) => isNumeric(c))) {
-      errors.push('TurboSniper: tipCurveCoefficients must be an array of numbers or an object with a coeffs array');
+      errors.push("TurboSniper: tipCurveCoefficients must be an array of numbers or an object with a coeffs array");
     }
   }
 
@@ -1344,7 +1469,7 @@ function validateTurboSniper(cfg = {}) {
   if (!isUnset(cfg.directAmmFirstPct)) {
     const v = toNum(cfg.directAmmFirstPct);
     if (!(v >= 0 && v <= 1)) {
-      errors.push('TurboSniper: directAmmFirstPct must be between 0 and 1');
+      errors.push("TurboSniper: directAmmFirstPct must be between 0 and 1");
     }
   }
 
@@ -1354,34 +1479,34 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.postBuyWatch) {
     const w = cfg.postBuyWatch;
     if (!isUnset(w.durationSec) && !(toNum(w.durationSec) >= 0)) {
-      errors.push('TurboSniper: postBuyWatch.durationSec must be ≥ 0');
+      errors.push("TurboSniper: postBuyWatch.durationSec must be ≥ 0");
     }
-    if (!isUnset(w.lpPullExit) && typeof w.lpPullExit !== 'boolean') {
-      errors.push('TurboSniper: postBuyWatch.lpPullExit must be boolean');
+    if (!isUnset(w.lpPullExit) && typeof w.lpPullExit !== "boolean") {
+      errors.push("TurboSniper: postBuyWatch.lpPullExit must be boolean");
     }
-    if (!isUnset(w.authorityFlipExit) && typeof w.authorityFlipExit !== 'boolean') {
-      errors.push('TurboSniper: postBuyWatch.authorityFlipExit must be boolean');
+    if (!isUnset(w.authorityFlipExit) && typeof w.authorityFlipExit !== "boolean") {
+      errors.push("TurboSniper: postBuyWatch.authorityFlipExit must be boolean");
     }
   }
 
   if (cfg.iceberg) {
     const ic = cfg.iceberg;
-    if (!isUnset(ic.enabled) && typeof ic.enabled !== 'boolean') {
-      errors.push('TurboSniper: iceberg.enabled must be boolean');
+    if (!isUnset(ic.enabled) && typeof ic.enabled !== "boolean") {
+      errors.push("TurboSniper: iceberg.enabled must be boolean");
     }
     if (!isUnset(ic.tranches) && (!Number.isInteger(toNum(ic.tranches)) || toNum(ic.tranches) < 1)) {
-      errors.push('TurboSniper: iceberg.tranches must be an integer ≥ 1');
+      errors.push("TurboSniper: iceberg.tranches must be an integer ≥ 1");
     }
     if (!isUnset(ic.trancheDelayMs) && !(toNum(ic.trancheDelayMs) >= 0)) {
-      errors.push('TurboSniper: iceberg.trancheDelayMs must be ≥ 0');
+      errors.push("TurboSniper: iceberg.trancheDelayMs must be ≥ 0");
     }
   }
 
   if (!isUnset(cfg.impactAbortPct) && !(toNum(cfg.impactAbortPct) >= 0)) {
-    errors.push('TurboSniper: impactAbortPct must be ≥ 0');
+    errors.push("TurboSniper: impactAbortPct must be ≥ 0");
   }
   if (!isUnset(cfg.dynamicSlippageMaxPct) && !(toNum(cfg.dynamicSlippageMaxPct) >= 0)) {
-    errors.push('TurboSniper: dynamicSlippageMaxPct must be ≥ 0');
+    errors.push("TurboSniper: dynamicSlippageMaxPct must be ≥ 0");
   }
 
   // ---------------------------
@@ -1389,15 +1514,15 @@ function validateTurboSniper(cfg = {}) {
   // ---------------------------
   if (!isUnset(cfg.devWatch)) {
     const dw = cfg.devWatch;
-    if (dw === null || typeof dw !== 'object' || Array.isArray(dw)) {
-      errors.push('TurboSniper: devWatch must be an object');
+    if (dw === null || typeof dw !== "object" || Array.isArray(dw)) {
+      errors.push("TurboSniper: devWatch must be an object");
     } else {
       if (!isUnset(dw.whitelist)) {
         if (!Array.isArray(dw.whitelist)) {
-          errors.push('TurboSniper: devWatch.whitelist must be an array');
+          errors.push("TurboSniper: devWatch.whitelist must be an array");
         } else {
           dw.whitelist.forEach((m, i) => {
-            if (typeof m !== 'string' || !m.trim()) {
+            if (typeof m !== "string" || !m.trim()) {
               errors.push(`TurboSniper: devWatch.whitelist[${i}] must be a non-empty string`);
             }
           });
@@ -1405,10 +1530,10 @@ function validateTurboSniper(cfg = {}) {
       }
       if (!isUnset(dw.blacklist)) {
         if (!Array.isArray(dw.blacklist)) {
-          errors.push('TurboSniper: devWatch.blacklist must be an array');
+          errors.push("TurboSniper: devWatch.blacklist must be an array");
         } else {
           dw.blacklist.forEach((m, i) => {
-            if (typeof m !== 'string' || !m.trim()) {
+            if (typeof m !== "string" || !m.trim()) {
               errors.push(`TurboSniper: devWatch.blacklist[${i}] must be a non-empty string`);
             }
           });
@@ -1417,85 +1542,85 @@ function validateTurboSniper(cfg = {}) {
       if (!isUnset(dw.holderTop5MaxPct)) {
         const v = toNum(dw.holderTop5MaxPct);
         if (!isNumeric(v) || v < 0 || v > 100) {
-          errors.push('TurboSniper: devWatch.holderTop5MaxPct must be between 0 and 100');
+          errors.push("TurboSniper: devWatch.holderTop5MaxPct must be between 0 and 100");
         }
       }
       if (!isUnset(dw.maxHolderPercent)) {
         const v = toNum(dw.maxHolderPercent);
         if (!isNumeric(v) || v < 0 || v > 100) {
-          errors.push('TurboSniper: devWatch.maxHolderPercent must be between 0 and 100');
+          errors.push("TurboSniper: devWatch.maxHolderPercent must be between 0 and 100");
         }
       }
       if (!isUnset(dw.lpBurnMinPct)) {
         const v = toNum(dw.lpBurnMinPct);
         if (!isNumeric(v) || v < 0 || v > 100) {
-          errors.push('TurboSniper: devWatch.lpBurnMinPct must be between 0 and 100');
+          errors.push("TurboSniper: devWatch.lpBurnMinPct must be between 0 and 100");
         }
       }
       if (!isUnset(dw.minLpBurnPercent)) {
         const v = toNum(dw.minLpBurnPercent);
         if (!isNumeric(v) || v < 0 || v > 100) {
-          errors.push('TurboSniper: devWatch.minLpBurnPercent must be between 0 and 100');
+          errors.push("TurboSniper: devWatch.minLpBurnPercent must be between 0 and 100");
         }
       }
-      if (!isUnset(dw.enableInsiderHeuristics) && typeof dw.enableInsiderHeuristics !== 'boolean') {
-        errors.push('TurboSniper: devWatch.enableInsiderHeuristics must be boolean');
+      if (!isUnset(dw.enableInsiderHeuristics) && typeof dw.enableInsiderHeuristics !== "boolean") {
+        errors.push("TurboSniper: devWatch.enableInsiderHeuristics must be boolean");
       }
     }
   }
 
   // Back-compat top-level toggles/thresholds (still accepted)
-  if (!isUnset(cfg.enableInsiderHeuristics) && typeof cfg.enableInsiderHeuristics !== 'boolean') {
-    errors.push('TurboSniper: enableInsiderHeuristics must be boolean');
+  if (!isUnset(cfg.enableInsiderHeuristics) && typeof cfg.enableInsiderHeuristics !== "boolean") {
+    errors.push("TurboSniper: enableInsiderHeuristics must be boolean");
   }
   if (!isUnset(cfg.maxHolderPercent)) {
     const v = toNum(cfg.maxHolderPercent);
-    if (!isNumeric(v) || v < 0 || v > 100) errors.push('TurboSniper: maxHolderPercent must be between 0 and 100');
+    if (!isNumeric(v) || v < 0 || v > 100) errors.push("TurboSniper: maxHolderPercent must be between 0 and 100");
   }
-  if (!isUnset(cfg.requireFreezeRevoked) && typeof cfg.requireFreezeRevoked !== 'boolean') {
-    errors.push('TurboSniper: requireFreezeRevoked must be boolean');
+  if (!isUnset(cfg.requireFreezeRevoked) && typeof cfg.requireFreezeRevoked !== "boolean") {
+    errors.push("TurboSniper: requireFreezeRevoked must be boolean");
   }
 
   // ---------------------------
   // Feeds (advanced)
   // ---------------------------
-  if (!isUnset(cfg.enableLaserStream) && typeof cfg.enableLaserStream !== 'boolean') {
-    errors.push('TurboSniper: enableLaserStream must be boolean');
+  if (!isUnset(cfg.enableLaserStream) && typeof cfg.enableLaserStream !== "boolean") {
+    errors.push("TurboSniper: enableLaserStream must be boolean");
   }
   if (!isUnset(cfg.multiWallet)) {
     if (!Number.isInteger(toNum(cfg.multiWallet)) || toNum(cfg.multiWallet) < 1) {
-      errors.push('TurboSniper: multiWallet must be a positive integer');
+      errors.push("TurboSniper: multiWallet must be a positive integer");
     }
   }
-  if (!isUnset(cfg.alignToLeader) && typeof cfg.alignToLeader !== 'boolean') {
-    errors.push('TurboSniper: alignToLeader must be boolean');
+  if (!isUnset(cfg.alignToLeader) && typeof cfg.alignToLeader !== "boolean") {
+    errors.push("TurboSniper: alignToLeader must be boolean");
   }
-  if (!isUnset(cfg.riskLevels) && (typeof cfg.riskLevels !== 'object' || Array.isArray(cfg.riskLevels))) {
-    errors.push('TurboSniper: riskLevels must be an object if provided');
+  if (!isUnset(cfg.riskLevels) && (typeof cfg.riskLevels !== "object" || Array.isArray(cfg.riskLevels))) {
+    errors.push("TurboSniper: riskLevels must be an object if provided");
   }
   if (!isUnset(cfg.stopLossPercent)) {
     const v = toNum(cfg.stopLossPercent);
-    if (!isNumeric(v) || v < 0 || v > 100) errors.push('TurboSniper: stopLossPercent must be between 0 and 100');
+    if (!isNumeric(v) || v < 0 || v > 100) errors.push("TurboSniper: stopLossPercent must be between 0 and 100");
   }
   if (!isUnset(cfg.rugDelayBlocks)) {
     const v = toNum(cfg.rugDelayBlocks);
-    if (!Number.isInteger(v) || v < 0) errors.push('TurboSniper: rugDelayBlocks must be an integer ≥ 0');
+    if (!Number.isInteger(v) || v < 0) errors.push("TurboSniper: rugDelayBlocks must be an integer ≥ 0");
   }
 
   if (cfg.feeds) {
     const feeds = cfg.feeds;
     if (!isUnset(feeds.order)) {
       if (!Array.isArray(feeds.order) || feeds.order.length === 0) {
-        errors.push('TurboSniper: feeds.order must be a non-empty array');
+        errors.push("TurboSniper: feeds.order must be a non-empty array");
       } else {
-        const allowed = ['ws', 'birdeye', 'onchain'];
+        const allowed = ["ws", "birdeye", "onchain"];
         feeds.order.forEach((s, i) => {
-          if (!allowed.includes(s)) errors.push(`TurboSniper: feeds.order[${i}] must be one of ${allowed.join(', ')}`);
+          if (!allowed.includes(s)) errors.push(`TurboSniper: feeds.order[${i}] must be one of ${allowed.join(", ")}`);
         });
       }
     }
     if (!isUnset(feeds.ttlMs) && !(toNum(feeds.ttlMs) > 0)) {
-      errors.push('TurboSniper: feeds.ttlMs must be positive');
+      errors.push("TurboSniper: feeds.ttlMs must be positive");
     }
   }
 
@@ -1504,21 +1629,21 @@ function validateTurboSniper(cfg = {}) {
   // ---------------------------
   if (!isUnset(cfg.rpcEndpoints)) {
     if (Array.isArray(cfg.rpcEndpoints)) {
-      if (!cfg.rpcEndpoints.every((ep) => typeof ep === 'string' && ep.trim())) {
-        errors.push('TurboSniper: rpcEndpoints (array) must contain non-empty strings');
+      if (!cfg.rpcEndpoints.every((ep) => typeof ep === "string" && ep.trim())) {
+        errors.push("TurboSniper: rpcEndpoints (array) must contain non-empty strings");
       }
-    } else if (typeof cfg.rpcEndpoints !== 'string') {
-      errors.push('TurboSniper: rpcEndpoints must be a comma-separated string or array of URLs');
+    } else if (typeof cfg.rpcEndpoints !== "string") {
+      errors.push("TurboSniper: rpcEndpoints must be a comma-separated string or array of URLs");
     }
   }
-  if (!isUnset(cfg.privateRpcUrl) && typeof cfg.privateRpcUrl !== 'string') {
-    errors.push('TurboSniper: privateRpcUrl must be a string (URL)');
+  if (!isUnset(cfg.privateRpcUrl) && typeof cfg.privateRpcUrl !== "string") {
+    errors.push("TurboSniper: privateRpcUrl must be a string (URL)");
   }
-  if (!isUnset(cfg.jitoRelayUrl) && typeof cfg.jitoRelayUrl !== 'string') {
-    errors.push('TurboSniper: jitoRelayUrl must be a string (URL)');
+  if (!isUnset(cfg.jitoRelayUrl) && typeof cfg.jitoRelayUrl !== "string") {
+    errors.push("TurboSniper: jitoRelayUrl must be a string (URL)");
   }
-  if (!isUnset(cfg.rpcFailover) && typeof cfg.rpcFailover !== 'boolean') {
-    errors.push('TurboSniper: rpcFailover must be boolean');
+  if (!isUnset(cfg.rpcFailover) && typeof cfg.rpcFailover !== "boolean") {
+    errors.push("TurboSniper: rpcFailover must be boolean");
   }
 
   // ---------------------------
@@ -1527,28 +1652,28 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.rpc) {
     const q = cfg.rpc.quorum || {};
     if (!(toNum(q.size) >= 1)) {
-      errors.push('TurboSniper: rpc.quorum.size must be ≥ 1');
+      errors.push("TurboSniper: rpc.quorum.size must be ≥ 1");
     }
     if (!(toNum(q.require) >= 1 && toNum(q.require) <= toNum(q.size))) {
-      errors.push('TurboSniper: rpc.quorum.require must be between 1 and quorum.size');
+      errors.push("TurboSniper: rpc.quorum.require must be between 1 and quorum.size");
     }
     if (!(toNum(cfg.rpc.blockhashTtlMs) > 0)) {
-      errors.push('TurboSniper: rpc.blockhashTtlMs must be > 0');
+      errors.push("TurboSniper: rpc.blockhashTtlMs must be > 0");
     }
   }
 
   // ---------------------------
   // ADDED: DEX watch flags + pool freshness window
   // ---------------------------
-  ['watchRaydium','watchOrca','watchMeteora','watchStep','watchCrema'].forEach((flag) => {
-    if (!isUnset(cfg[flag]) && typeof cfg[flag] !== 'boolean') {
+  ["watchRaydium", "watchOrca", "watchMeteora", "watchStep", "watchCrema"].forEach((flag) => {
+    if (!isUnset(cfg[flag]) && typeof cfg[flag] !== "boolean") {
       errors.push(`TurboSniper: ${flag} must be boolean`);
     }
   });
   if (!isUnset(cfg.poolFreshnessWindowSlots)) {
     const v = toNum(cfg.poolFreshnessWindowSlots);
     if (!Number.isInteger(v) || v <= 0) {
-      errors.push('TurboSniper: poolFreshnessWindowSlots must be a positive integer');
+      errors.push("TurboSniper: poolFreshnessWindowSlots must be a positive integer");
     }
   }
 
@@ -1558,7 +1683,10 @@ function validateTurboSniper(cfg = {}) {
   if (cfg.tpLadder !== undefined && cfg.tpLadder !== null && cfg.tpLadder !== "") {
     const parts = Array.isArray(cfg.tpLadder)
       ? cfg.tpLadder
-      : String(cfg.tpLadder).split(",").map((s) => s.trim()).filter(Boolean);
+      : String(cfg.tpLadder)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
     parts.forEach((p) => {
       if (!isNumeric(p) || toNum(p) < 0 || toNum(p) > 100) {
         errors.push("TurboSniper: tpLadder percentages must be numbers between 0 and 100");
@@ -1568,6 +1696,7 @@ function validateTurboSniper(cfg = {}) {
 
   return errors;
 }
+
 
 
 

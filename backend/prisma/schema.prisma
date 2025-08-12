@@ -102,7 +102,9 @@ model User {
   autoReturnUsdcMints           String[]
   /// When the destination pubkey was verified (null if not).
   autoReturnDestVerifiedAt      DateTime?
-  armSessions ArmSession[] 
+  armSessions ArmSession[]
+
+  trades Trade[] @relation("UserTrades") 
 }
 
 
@@ -182,51 +184,35 @@ model Trade {
   timestamp       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt @default(now())
   inputMint       String?  
-  outputMint      String? 
-  // userId          String?
-  // user   User? @relation("UserTrades", fields: [userId], references: [id])
-  walletId Int
-  wallet   Wallet           @relation("WalletTrades", fields: [walletId], references: [id])
-  config   SavedConfigs[] @relation("TradeConfig")
-  mevMode        String?
-  priorityFee   Int?  
-  briberyAmount  Int?   
-  mevShared     Boolean  @default(false)
+  outputMint      String?
+
+  // ADD ↓↓↓
+  userId          String
+  createdAt       DateTime  @default(now())
+  user            User      @relation("UserTrades", fields: [userId], references: [id])
+  // ADD ↑↑↑
+
+  walletId        Int
+  wallet          Wallet    @relation("WalletTrades", fields: [walletId], references: [id])
+  config          SavedConfigs[] @relation("TradeConfig")
+  mevMode         String?
+  priorityFee     Int?  
+  briberyAmount   Int?   
+  mevShared       Boolean  @default(false)
   source          String? 
 
-  // ✨ Added in paper-sim-upgrade
-  /// Optional identifier grouping fills for a single paper run.  When
-  /// unset this trade is considered a live trade.
+  // paper-sim fields (unchanged)
   paperRunId            String?
-  /// The execution model used for the simulation.  Live trades leave
-  /// this null.  See the ExecModel enum above.
   execModel             ExecModel?
-  /// Seed used to initialise the deterministic random generator.  If
-  /// null the simulator generates a random seed.
   seed                  String?
-  /// Raw route JSON describing the AMM/orderbook path taken by the
-  /// simulation.  Nullable for backwards compatibility.
   routeJson             Json?
-  /// Array of fills produced by the simulator.  Each element
-  /// contains per‑fill pricing and amounts.  Live trades leave this
-  /// null.
   fillsJson             Json?
-  /// Total latency in milliseconds experienced by the simulated
-  /// execution.  Live trades leave this null.
   latencyMs             Int?
-  /// Total priority fee paid in lamports.  For live trades this is
-  /// stored in the existing priorityFee field.
   priorityFeeLamports   BigInt?
-  /// Estimated compute units consumed by the simulated transaction.
   cuEstimate            Int?
-  /// Sum of all fees (priority, CU, rent) in lamports.
   feesTotalLamports     BigInt?
-  /// Weighted average fill price realised by the simulator.
   simFillPrice          Decimal?
-  /// Realised slippage in basis points (bps) aggregated across all
-  /// fills.  Null for live trades.
   slippageBps           Int?
-  /// If the simulation failed this field stores a short reason code.
   reasonCode            String?
 }
 
@@ -603,6 +589,9 @@ enum ExecModel {
 model IdempotencyRecord {
   id           Int       @id @default(autoincrement())
   userId       String
+  // ADD ↓↓↓
+  user         User      @relation(fields: [userId], references: [id])
+  // ADD ↑↑↑
   key          String
   status       Int
   resultHash   String
@@ -639,6 +628,7 @@ model SecurityAuditLog {
   id         Int      @id @default(autoincrement())
   ts         DateTime @default(now())
   userId     String
+  user       User     @relation(fields: [userId], references: [id]) // ← ADD THIS
   type       String
   metaJson   Json?
   prevHash   String?
