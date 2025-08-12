@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { authFetch } from "@/utils/apiClient";
+import { authFetch } from "@/utils/authFetch";
 
 export default function useIdleLock({ minutes = 15, onLock }) {
   useEffect(() => {

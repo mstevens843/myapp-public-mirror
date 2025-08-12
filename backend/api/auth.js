@@ -83,6 +83,9 @@ function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
 
 
 router.post("/phantom", async (req, res) => {
+  console.log("↘️  /api/auth/phantom ct:", req.headers["content-type"]);
+  console.log("↘️  /api/auth/phantom cookies:", Object.keys(req.cookies || {}));
+  console.log("↘️  /api/auth/phantom body keys:", Object.keys(req.body || {}));
   try {
     const { phantomPublicKey, signature, message } = req.body;
 
@@ -90,6 +93,7 @@ router.post("/phantom", async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    // 1) Verify message signature from Phantom
     let verified = false;
     try {
       verified = nacl.sign.detached.verify(
@@ -101,15 +105,53 @@ router.post("/phantom", async (req, res) => {
       console.error("🛑 Signature verification failed:", err);
       return res.status(400).json({ error: "Invalid signature format" });
     }
-
     if (!verified) {
       return res.status(401).json({ error: "Invalid signature" });
     }
 
-    // ✅ Just check if user exists, but don't create
+    // 2) Lookup existing user by phantomPublicKey (no creation here)
     const user = await prisma.user.findUnique({ where: { phantomPublicKey } });
 
-    res.json({ success: true, userExists: !!user });
+    // 2a) New wallet → FE should go to /generate
+    if (!user) {
+      return res.json({ success: true, userExists: false });
+    }
+
+    // 2b) 2FA login gate: ask FE to route to /verify-2fa (do NOT set cookies yet)
+    if (user.is2FAEnabled && user.require2faLogin) {
+      return res.json({
+        success: true,
+        userExists: true,
+        twoFARequired: true,
+        userId: user.userId,
+      });
+    }
+
+    // 3) Existing user (no 2FA gate) → issue cookies + return flags
+    // Align expirations with your standard login route (15m/30d).
+    const accessToken  = jwt.sign({ id: user.id, type: user.type }, JWT_SECRET, { expiresIn: "15m" });
+    const refreshToken = jwt.sign({ id: user.id },                            JWT_SECRET, { expiresIn: "30d" });
+
+    await prisma.refreshToken.create({ data: { token: refreshToken, userId: user.id } });
+
+    // Set HttpOnly cookies + CSRF token (double submit)
+    setAccessCookie(res, accessToken);
+    setRefreshCookie(res, refreshToken);
+    {
+      const csrfToken = generateCsrfToken();
+      setCsrfCookie(res, csrfToken);
+    }
+
+    return res.json({
+      success: true,
+      userExists: true,
+      twoFARequired: false,
+      userId: user.userId,
+      type: user.type,
+      // tokens included for non-browser clients; browsers rely on cookies
+      accessToken,
+      refreshToken,
+    });
   } catch (err) {
     console.error("🔥 Auth error (phantom):", err.stack || err);
     res.status(500).json({ error: "Server error" });

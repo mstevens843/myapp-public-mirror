@@ -119,7 +119,6 @@ ReactDOM.createRoot(document.getElementById("root")).render(
 
                         {/* App shell + tabs */}
                         <Route element={<Layout />}>
-                          <Route index element={<App />} />
                           <Route path="app" element={<App />} />
                           <Route path="wallets" element={<WalletsTab />} />
                           <Route path="payments" element={<PaymentsTab />} />

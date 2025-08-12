@@ -4,51 +4,105 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { phantomLogin } from "../../utils/authWallet";
 import { toast } from "sonner";
 import { useNavigate } from "react-router-dom";
-import { checkUserExists } from "../../utils/authWallet";
-
 
 export default function ConnectWalletStep({ onNext, setPhantomPubkey }) {
-  const { signMessage } = useWallet(); // ✅ Keep adapter
+  const { signMessage } = useWallet(); // keep adapter handy (not strictly needed with window.solana)
   const [loading, setLoading] = useState(false);
   const [connectedKey, setConnectedKey] = useState(null);
-  // const base64Signature = btoa(String.fromCharCode(...signature));
-
-
   const navigate = useNavigate();
 
-  // ✅ Handle wallet switching
+// ConnectWalletStep.jsx
+
+// helper: Uint8Array → base64
+function u8ToB64(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+
+const signAndLogin = async (pubkeyStr) => {
+  const msg = "Sign to authenticate with SolPulse";
+  const encoded = new TextEncoder().encode(msg);
+
+  if (!window.solana?.signMessage) {
+    console.error("🛑 window.solana.signMessage not available");
+    toast.error("Your wallet doesn’t support message signing.");
+    return;
+  }
+
+  let signed;
+  // ✅ Try legacy Phantom signature first, then the new options style
+  try {
+    signed = await window.solana.signMessage(encoded, "utf8");
+  } catch (e1) {
+    try {
+      signed = await window.solana.signMessage(encoded, { display: "utf8" });
+    } catch (e2) {
+      console.error("🛑 signMessage failed (both styles):", { e1, e2 });
+      toast.error("Wallet refused to sign the message.");
+      return;
+    }
+  }
+
+  if (!signed || !(signed.signature instanceof Uint8Array)) {
+    console.error("🛑 signMessage returned unexpected payload:", signed);
+    toast.error("Wallet didn’t return a valid signature.");
+    return;
+  }
+
+  const payload = {
+    phantomPublicKey: pubkeyStr,
+    signature: u8ToB64(signed.signature),
+    message: msg,
+  };
+
+  console.log("🔐 /auth/phantom payload keys:", Object.keys(payload));
+
+  const loginResponse = await phantomLogin(payload);
+
+  if (!loginResponse) {
+    toast.error("Phantom login failed.");
+    return;
+  }
+
+  if (loginResponse.userExists) {
+    if (loginResponse.twoFARequired) {
+      toast.success("2FA required. Check your authenticator.");
+      navigate(`/verify-2fa?userId=${loginResponse.userId}`);
+      return;
+    }
+    toast.success("🔓 Welcome back!");
+    navigate("/app");
+    return;
+  }
+
+  setPhantomPubkey(pubkeyStr);
+  toast.success("Connected! Let’s create your vault.");
+  onNext(pubkeyStr);
+}
+
+
+
+
+  // Handle wallet switching
   useEffect(() => {
     const handleAccountChange = async (newPubkey) => {
       const pubkeyStr = newPubkey?.toString?.();
       if (!pubkeyStr) return;
 
-      console.log("🔁 Switched to new wallet:", pubkeyStr);
-
       try {
-        const msg = "Sign to authenticate with SolPulse";
-        const encoded = new TextEncoder().encode(msg);
-        const { signature } = await window.solana.signMessage(encoded, "utf8");
-
-        const loginResponse = await phantomLogin({
-          phantomPublicKey: pubkeyStr,
-          signature: btoa(String.fromCharCode(...signature)), 
-          message: msg,
-        });
-
-        setPhantomPubkey(pubkeyStr);
         setConnectedKey(pubkeyStr);
-        toast.success("Switched wallet and re-authenticated.");
-        onNext(pubkeyStr);
+        await signAndLogin(pubkeyStr);
       } catch (err) {
-        toast.error("Wallet switch login failed.");
+        const rejected = err?.message?.toLowerCase?.().includes("reject");
+        toast[rejected ? "warning" : "error"](rejected ? "Signature rejected." : "Wallet switch login failed.");
         console.error("🔁 Wallet switch error:", err);
       }
     };
 
-    if (window.solana) {
+    if (window.solana?.on) {
       window.solana.on("accountChanged", handleAccountChange);
     }
-
     return () => {
       if (window.solana?.removeListener) {
         window.solana.removeListener("accountChanged", handleAccountChange);
@@ -56,80 +110,31 @@ export default function ConnectWalletStep({ onNext, setPhantomPubkey }) {
     };
   }, []);
 
-  // ✅ Initial connect logic
-// ✅ Initial connect logic
-const handlePhantomConnect = async () => {
-  if (!window.solana || !window.solana.isPhantom) {
-    toast.error("Phantom not detected. Install Phantom Wallet.");
-    return;
-  }
-
-
-
-  try {
-    setLoading(true);
-
-    // 1️⃣  Connect Phantom
-    const response       = await window.solana.connect({ onlyIfTrusted: false });
-    const freshPublicKey = response.publicKey.toString();
-
-    // 2️⃣  Same key?  Nothing to do.
-    if (freshPublicKey === connectedKey) {
-      toast.success("Wallet connected!");
-      onNext();
-      return;                       // ← you were missing this
-    }
-
-    // 3️⃣  Sign   (re‑auth every key change)
-    const msg      = "Sign to authenticate with SolPulse";
-    const encoded  = new TextEncoder().encode(msg);
-    const { signature } = await window.solana.signMessage(encoded, "utf8");
-
-    await phantomLogin({
-      phantomPublicKey : freshPublicKey,
-      signature        : btoa(String.fromCharCode(...signature)), 
-      message          : msg,
-    });
-
-    // 4️⃣  Does user already exist?
-    // 🔐  4️⃣  Does this wallet already have an account?
-    const userCheck = await checkUserExists({ phantomPublicKey: freshPublicKey });
-
-    if (userCheck.exists) {
-      const { twoFARequired } = userCheck;
-      if (twoFARequired) {
-        navigate(`/verify-2fa?userId=${freshPublicKey}`);
-        return;
-      }
-
-      // The backend will set HttpOnly cookies on successful login.
-      // Do not persist access/refresh tokens on the client. Remove any
-      // leftover tokens to prevent Authorization headers being attached.
-      localStorage.removeItem("accessToken");
-      localStorage.removeItem("refreshToken");
-
-      toast.success("🔓 Welcome back!");
-      navigate("/app");
+  // Initial connect
+  const handlePhantomConnect = async () => {
+    if (!window.solana || !window.solana.isPhantom) {
+      toast.error("Phantom not detected. Install Phantom Wallet.");
       return;
     }
 
-    // 5️⃣  New wallet → move to next onboarding step
-    toast.success("Connected!");
-    setPhantomPubkey(freshPublicKey);
-    setConnectedKey(freshPublicKey);
-    onNext();
-  } catch (err) {
-    if (err?.message?.includes("User rejected")) {
-      toast.warning("User rejected wallet connection.");
-    } else {
-      toast.error("Phantom login failed.");
-      console.error("❌ Wallet connect error:", err);
-    }
-  } finally {
-    setLoading(false);
-  }
-};
+    try {
+      setLoading(true);
 
+      // Connect
+      const response = await window.solana.connect({ onlyIfTrusted: false });
+      const freshPublicKey = response.publicKey.toString();
+      setConnectedKey(freshPublicKey);
+
+      // Always sign + login so the server decides routing (don’t early-return)
+      await signAndLogin(freshPublicKey);
+    } catch (err) {
+      const rejected = err?.message?.toLowerCase?.().includes("reject");
+      toast[rejected ? "warning" : "error"](rejected ? "User rejected wallet connection." : "Phantom login failed.");
+      console.error("❌ Wallet connect error:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <motion.div

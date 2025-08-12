@@ -105,24 +105,22 @@ export async function smartVaultBalance({ phantomPublicKey, vaultPubkey }) {
  */
 export async function phantomLogin(payload) {
   try {
-    const res = await authFetch(`/api/auth/phantom`, {
+    console.log("🔐 sending /api/auth/phantom with keys:", Object.keys(payload || {}));
+    const res = await authFetch("/api/auth/phantom", {
       method: "POST",
       body: JSON.stringify(payload),
     });
+
     const text = await res.text();
     let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      console.error("❌ Invalid JSON in response:", text);
+    try { data = JSON.parse(text); }
+    catch {
+      console.error("❌ /auth/phantom → non-JSON:", text);
       return null;
     }
+
     if (!res.ok) {
-      console.error(
-        "❌ Phantom login failed:",
-        res.status,
-        data?.error || text
-      );
+      console.error("❌ Phantom login failed:", res.status, data?.error || text);
       return null;
     }
     return data;
@@ -131,7 +129,6 @@ export async function phantomLogin(payload) {
     return null;
   }
 }
-
 
 /**
  * generateVault({ phantomPublicKey })

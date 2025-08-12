@@ -1,7 +1,7 @@
 // Ensure CSRF token is present before first state-changing request
 // Drop at: frontend/src/hooks/useCsrfBootstrap.js
 import { useEffect, useRef } from "react";
-import { apiFetch, setCsrfToken } from "@/utils/apiClient";
+import { authFetch, setCsrfToken } from "../utils/authFetch";
 
 export default function useCsrfBootstrap() {
   const ran = useRef(false);
@@ -16,7 +16,7 @@ export default function useCsrfBootstrap() {
     // Attempt to fetch CSRF from backend; expected to set cookie and/or return token
     (async () => {
       try {
-        const res = await apiFetch("/api/auth/csrf", { method: "GET", retry: 1 });
+        const res = await authFetch("/api/auth/csrf", { method: "GET", retry: 1 });
         if (res?.csrfToken) setCsrfToken(res.csrfToken);
       } catch {
         // non-fatal; backend may set readable cookie instead

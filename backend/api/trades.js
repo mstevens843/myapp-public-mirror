@@ -469,7 +469,7 @@ if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
 });
 
 
-/*─────────────────────────── 7. GET CURRENT OPEN TRADES ──────────────────*/
+/*─────────────────────────── 5. GET CURRENT OPEN TRADES ──────────────────*/
 router.get("/open", async (req, res) => {
   try {
     console.log(`➡️ API HIT: GET /trades/open for user ${req.user.id}`);
@@ -496,38 +496,14 @@ router.get("/open", async (req, res) => {
       closedOutAmount: Number(trade.closedOutAmount),
     }));
 
+    console.log(`🎯 Found ${safeTrades.length} open trades for user ${req.user.id}`);
     res.json(safeTrades);
   } catch (err) {
     console.error("🚨 GET /open error:", err);
     res.status(500).json({ error: "Failed to fetch open trades." });
   }
 });
-const rows = await prisma.trade.findMany({
-      where: { wallet: { userId: req.user.id } },
-      orderBy: { timestamp: "asc" }
-    });
 
-// keep rows that still hold *tokens*
-const openTrades = rows.filter(trade =>
-  BigInt(trade.outAmount || 0) > 0n
-);
-
-    console.log(`🎯 Found ${openTrades.length} open trades for user ${req.user.id}`);
-
-    // Convert BigInt to Number so JSON.stringify doesn't fail
-    const safeTrades = openTrades.map(trade => ({
-      ...trade,
-      inAmount: Number(trade.inAmount),
-      outAmount: Number(trade.outAmount),
-      closedOutAmount: Number(trade.closedOutAmount),
-    }));
-
-    res.json(safeTrades);
-  } catch (err) {
-    console.error("🚨 GET /open error:", err);
-    res.status(500).json({ error: "Failed to fetch open trades." });
-  }
-});
 
 /* ───────────────────────────── 6. LOG NEW OPEN TRADE ───────────────────────────── */
 router.post("/open", async (req,res)=>{

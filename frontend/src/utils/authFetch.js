@@ -1,39 +1,50 @@
 /**
- * Unified Secure API Client
- * - Compatible with your existing authFetch (keeps needsArm flow, base URL, Bearer header)
- * - Adds CSRF header, timeout, optional dedupe (JSON mode), normalized errors
- * - 429 exponential backoff + one network retry
- *
- * Place at: frontend/src/utils/apiClient.js
- *
- * Exports:
- *   - authFetch(path, options) -> Promise<Response>   // drop-in for your current code
- *   - apiFetch(urlOrPath, opts) -> Promise<any>       // JSON helper with dedupe + normalized errors
- *   - setOnNeedsArm(fn)                                // keeps your needsArm handler
- *   - setTokenGetter(fn)                               // avoid reading tokens from storage directly
- *   - setBaseUrl(url)                                  // override VITE_API_BASE_URL at runtime
- *   - setGlobal401Handler(fn)                          // generic 401 hook
- *   - setDefaultTimeout(ms)
+ * frontend/src/utils/authFetch.js
+ * ------------------------------------------------------------------
+ * - BASE + path resolution (no new URL surprises)
+ * - credentials:'include', JSON CT normalization
+ * - 429 backoff + one network retry
+ * - 401 auto-refresh then retry once
+ * - 401 {needsArm:true} → onNeedsArm handler (with fallback toast)
+ * - Optional Bearer from storage (setTokenGetter(() => null) to disable)
+ * - Options: { retry, retryNetwork, needsArmEnabled, timeoutMs }
+ * - Debug: window.__AUTHFETCH_DEBUG__ = true (or setAuthFetchDebug(true))
  */
+
+import { toast } from "sonner";
 
 // ----- Global knobs -----
 let onNeedsArmHandler = null;
 let tokenGetter = () => {
-  // Back-compat with your current implementation (you can replace this via setTokenGetter)
   try {
     return (
       localStorage.getItem("accessToken") ||
       sessionStorage.getItem("accessToken") ||
       null
     );
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 };
 let runtimeBaseUrl = null;
 let on401 = null;
 let defaultTimeoutMs = 15000;
 
+// Debug toggle
+let DEBUG = typeof window !== "undefined" && !!window.__AUTHFETCH_DEBUG__;
+export function setAuthFetchDebug(v) {
+  DEBUG = !!v;
+  try { window.__AUTHFETCH_DEBUG__ = DEBUG; } catch {}
+}
+
 // ----- Public setters -----
-export function setOnNeedsArm(fn) { onNeedsArmHandler = typeof fn === "function" ? fn : null; }
+/**
+ * Register a handler for 401 JSON body { needsArm:true, walletId }
+ * Handler receives: { walletId, path, options, retry }
+ */
+export function setOnNeedsArm(handler) {
+  onNeedsArmHandler = typeof handler === "function" ? handler : null;
+}
 export function setTokenGetter(fn) { tokenGetter = typeof fn === "function" ? fn : tokenGetter; }
 export function setBaseUrl(url) { runtimeBaseUrl = typeof url === "string" ? url : runtimeBaseUrl; }
 export function setGlobal401Handler(fn) { on401 = typeof fn === "function" ? fn : null; }
@@ -49,11 +60,19 @@ function ensureMetaCsrfTag() {
   }
   return meta;
 }
+function getCookie(name) {
+  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
 export function getCsrfToken() {
+  // Support common names and server __Host- cookies
+  const names = ["__Host-csrf", "csrf_token", "csrf", "XSRF-TOKEN", "xsrfToken", "csrfToken"];
+  for (const n of names) {
+    const v = getCookie(n);
+    if (v) return v;
+  }
   const meta = document.querySelector('meta[name="csrf-token"]');
-  if (meta?.content) return meta.content;
-  const m = document.cookie.match(/(?:^|;\s*)csrfToken=([^;]+)/);
-  return m ? decodeURIComponent(m[1]) : null;
+  return meta?.content || null;
 }
 export function setCsrfToken(token) {
   const meta = ensureMetaCsrfTag();
@@ -63,17 +82,28 @@ export function setCsrfToken(token) {
 // ----- Utilities -----
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function jitter(base) { return base + Math.floor(Math.random() * 150); }
+
 function normalizeBody(body, headers) {
-  if (!body) return null;
-  if (typeof body === "string" || body instanceof FormData || body instanceof Blob) return body;
+  if (body == null) return null;
+
+  // NEW: if caller passed a string, still ensure JSON header
+  if (typeof body === "string") {
+    if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+    return body;
+  }
+
+  if (body instanceof FormData || body instanceof Blob) return body;
+
   if (headers.get("Content-Type")?.includes("application/x-www-form-urlencoded")) {
     const params = new URLSearchParams();
-    for (const [k,v] of Object.entries(body)) params.append(k, String(v));
+    for (const [k, v] of Object.entries(body)) params.append(k, String(v));
     return params;
   }
-  headers.set("Content-Type", "application/json");
+
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   return JSON.stringify(body);
 }
+
 async function parseResponseBody(res) {
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("application/json")) {
@@ -82,90 +112,186 @@ async function parseResponseBody(res) {
   const text = await res.text().catch(() => "");
   try { return JSON.parse(text); } catch { return { message: text }; }
 }
-function absoluteOrPrefixed(path) {
+
+// ----- BASE + path resolver (exactly like your old code) -----
+function baseString() {
+  // If env is undefined, return "" so requests are relative to current origin (Vite proxy etc.)
+  const envBase = import.meta.env.VITE_API_BASE_URL || "";
+  return (runtimeBaseUrl ?? envBase) || "";
+}
+function joinUrl(base, path) {
+  if (!base) return path; // same-origin (use dev proxy)
+  return `${base.replace(/\/+$/, "")}${path}`;
+}
+function resolveUrl(path) {
+  // Absolute http(s) passed in? Use as-is.
+  if (/^https?:\/\//i.test(path)) return path;
+  // Otherwise stick to BASE + path (or same-origin when BASE is "")
+  return joinUrl(baseString(), path);
+}
+
+async function refreshSession(baseUrlOrigin) {
   try {
-    // If path is already absolute, return as-is
-    const u = new URL(path);
-    return u.toString();
-  } catch {
-    const base = (runtimeBaseUrl ?? import.meta.env.VITE_API_BASE_URL ?? "") || "";
-    return `${base}${path}`;
+    const url = joinUrl(baseUrlOrigin, "/api/auth/refresh");
+    if (DEBUG) console.debug("[authFetch] POST refresh →", url);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({}),
+    });
+    if (DEBUG) console.debug("[authFetch] refresh status:", res.status);
+    return res.ok;
+  } catch (e) {
+    if (DEBUG) console.error("[authFetch] refresh failed:", e?.message || e);
+    return false;
   }
 }
 
-// ----- Core request with retries -----
-async function doRequest(url, init, { retry429 = 3, retryNetwork = 1, needsArmEnabled = true } = {}) {
+// ----- Core request with retries + 401 refresh + needsArm -----
+async function doRequest(url, init, {
+  retry429 = 3,
+  retryNetwork = 1,
+  needsArmEnabled = true,
+} = {}) {
   const controller = new AbortController();
   const timeoutMs = Number(init.timeoutMs || defaultTimeoutMs);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  const res = await (async () => {
-    let attempts429 = 0;
-    let networkAttempts = 0;
-    while (true) {
-      try {
-        const r = await fetch(url, { ...init, signal: controller.signal });
-        if (r.status === 429 && attempts429 < retry429) {
-          const backoffs = [1000, 2000, 4000];
-          const waitMs = (backoffs[attempts429] || 4000) + jitter(50);
-          attempts429++;
-          await sleep(waitMs);
-          continue;
+  const baseForRefresh = baseString(); // use configured/same-origin base
+
+  let attempts429 = 0;
+  let networkAttempts = 0;
+  let triedRefresh = false;
+
+  while (true) {
+    try {
+      if (DEBUG) {
+        const safeHeaders = {};
+        new Headers(init.headers || {}).forEach((v, k) => safeHeaders[k] = k.toLowerCase() === "authorization" ? "[redacted]" : v);
+        console.debug("[authFetch] →", init.method, url, {
+          headers: safeHeaders, hasBody: !!init.body,
+          retry429Left: retry429 - attempts429, retryNetworkLeft: retryNetwork - networkAttempts, timeoutMs,
+        });
+      }
+
+      const res = await fetch(url, { ...init, signal: controller.signal });
+      if (DEBUG) console.debug("[authFetch] ←", init.method, url, res.status);
+
+      // 401 → needsArm OR refresh-once
+      if (res.status === 401) {
+        let body = null;
+        try { body = await res.clone().json(); } catch {}
+        if (DEBUG) console.debug("[authFetch] 401 body:", body);
+
+        // needsArm flow
+        if (needsArmEnabled && body?.needsArm) {
+          const retry = () => doRequest(url, init, { retry429, retryNetwork, needsArmEnabled });
+          if (onNeedsArmHandler) {
+            try {
+              onNeedsArmHandler({ walletId: body.walletId, path: url, options: init, retry });
+            } catch (e) {
+              console.error("[authFetch] onNeedsArm handler error:", e);
+            }
+          } else {
+            // Fallback UX like your original file
+            try {
+              toast.error(
+                "Protected Mode is enabled. Please arm your automation in Account settings before trading."
+              );
+            } catch {}
+          }
+          clearTimeout(timeout);
+          return res; // let caller decide next UI action
         }
-        return r;
-      } catch (err) {
-        if (err?.name === "AbortError") throw err; // bubble up timeout
-        if (networkAttempts < retryNetwork) {
-          networkAttempts++;
-          await sleep(1500);
-          continue;
+
+        // Try one refresh → then retry original once
+        if (!triedRefresh) {
+          triedRefresh = true;
+          const ok = await refreshSession(baseForRefresh);
+          if (ok) {
+            // CSRF might rotate
+            const headers = new Headers(init.headers || {});
+            const csrf = getCsrfToken();
+            if (csrf && !headers.has("X-CSRF-Token") && init.method && !["GET","HEAD","OPTIONS"].includes(init.method)) {
+              headers.set("X-CSRF-Token", csrf);
+              init = { ...init, headers };
+            }
+            if (DEBUG) console.debug("[authFetch] retrying after refresh:", init.method, url);
+            continue;
+          }
+          if (on401) { try { on401(res); } catch {} }
         }
+      }
+
+      // 429 backoff
+      if (res.status === 429 && attempts429 < retry429) {
+        const backoffs = [1000, 2000, 4000];
+        const waitMs = (backoffs[attempts429] || 4000) + jitter(50);
+        attempts429++;
+        try { toast.info("Rate limited; retrying…"); } catch {}
+        if (DEBUG) console.warn("[authFetch] 429, backing off", waitMs, "ms");
+        await sleep(waitMs);
+        continue;
+      }
+
+      clearTimeout(timeout);
+      return res;
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        clearTimeout(timeout);
+        if (DEBUG) console.error("[authFetch] timeout/abort:", url, timeoutMs, "ms");
         throw err;
       }
-    }
-  })().finally(() => clearTimeout(timeout));
-
-  // Handle needsArm on 401 JSON bodies, keep original semantics
-  if (res.status === 401 && needsArmEnabled) {
-    let data = null;
-    try { data = await res.clone().json(); } catch {}
-    if (data?.needsArm && onNeedsArmHandler) {
-      const originalInit = { ...init };
-      const originalUrl = url;
-      const retry = () => doRequest(originalUrl, originalInit, { retry429, retryNetwork, needsArmEnabled });
-      try {
-        onNeedsArmHandler({ walletId: data.walletId, path: originalUrl, options: originalInit, retry });
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error("[apiClient] onNeedsArm handler error:", e);
+      if (networkAttempts < retryNetwork) {
+        networkAttempts++;
+        try {
+          toast.error("Network error; retrying…", {
+            action: {
+              label: "Retry now",
+              onClick: () => {
+                doRequest(url, init, { retry429, retryNetwork, needsArmEnabled }).catch(() => {});
+              },
+            },
+          });
+        } catch {
+          // toast may not be mounted; ignore
+        }
+        if (DEBUG) console.warn("[authFetch] network error, retrying:", err?.message || err);
+        await sleep(1500);
+        continue;
       }
-    } else if (on401) {
-      try { on401(res); } catch {}
+      clearTimeout(timeout);
+      if (DEBUG) console.error("[authFetch] network error (final):", url, err?.message || err);
+      throw new Error(err?.message || "Network error while contacting backend");
     }
   }
-
-  return res;
 }
 
 // ----- Public API -----
 
 /**
- * Drop-in replacement for your authFetch (returns Response).
- * - Adds CSRF header and sane defaults (cookies, cache, referrerPolicy)
- * - Preserves needsArm flow and Bearer Authorization from tokenGetter()
+ * authFetch(path, options) -> Response
+ * - Cookie auth with credentials: 'include'
+ * - Adds Content-Type + Accept when appropriate
+ * - Adds X-CSRF-Token if present (non-blocking if missing)
+ * - Keeps Bearer via tokenGetter() (disable via setTokenGetter(() => null))
+ * - Supports options.retry (number) to control 429 backoff attempts
  */
 export async function authFetch(path, options = {}) {
   const token = tokenGetter();
   const headers = new Headers(options.headers || {});
-  headers.set("Accept", headers.get("Accept") || "application/json");
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
 
-  // Inject Authorization like your original (can remove once you migrate to cookie-only)
+  // Back-compat Authorization (remove later if cookie-only)
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
   const csrf = getCsrfToken();
-  if (csrf) headers.set("X-CSRF-Token", csrf);
+  if (csrf && (options.method || "GET").toUpperCase() !== "GET") {
+    headers.set("X-CSRF-Token", csrf);
+  }
 
   const init = {
     credentials: "include",
@@ -177,13 +303,27 @@ export async function authFetch(path, options = {}) {
   };
   init.body = normalizeBody(options.body, headers);
 
-  const url = absoluteOrPrefixed(path);
-  return doRequest(url, init, { retry429: 3, retryNetwork: 1, needsArmEnabled: true });
+  const url = resolveUrl(path);
+  if (DEBUG) {
+    console.info("[authFetch] BASE:", baseString() || "(same-origin)");
+    console.info("[authFetch] REQUEST:", init.method, url);
+  }
+
+  return doRequest(
+    url,
+    init,
+    {
+      retry429: typeof options.retry === "number" ? options.retry : 3,
+      retryNetwork: typeof options.retryNetwork === "number" ? options.retryNetwork : 1,
+      needsArmEnabled: options.needsArmEnabled !== undefined ? !!options.needsArmEnabled : true,
+    }
+  );
 }
 
 /**
- * JSON helper that parses the body and throws normalized errors.
- * - Optional request de-dupe for identical calls (default: true)
+ * apiFetch(urlOrPath, opts) -> parsed JSON (throws on !ok)
+ * - Same defaults as authFetch
+ * - Dedupe identical in-flight requests by default
  */
 const inflight = new Map(); // key -> Promise<any>
 function keyFor(method, url, body) {
@@ -191,19 +331,22 @@ function keyFor(method, url, body) {
   return `${method}:${url}:${b.length > 128 ? b.slice(0,128) : b}`;
 }
 
-export async function authFetch(urlOrPath, opts = {}) {
+export async function apiFetch(urlOrPath, opts = {}) {
   const method = (opts.method || "GET").toUpperCase();
 
-  // Build init the same way as authFetch but we won't attach Authorization by default here
   const token = tokenGetter();
   const headers = new Headers(opts.headers || {});
-  headers.set("Accept", headers.get("Accept") || "application/json");
-  // Keep Authorization for back-compat if present or if you still rely on it:
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
+
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
+
   const csrf = getCsrfToken();
-  if (csrf) headers.set("X-CSRF-Token", csrf);
+  if (csrf && !["GET","HEAD","OPTIONS"].includes(method)) {
+    headers.set("X-CSRF-Token", csrf);
+  }
+
   const init = {
     credentials: "include",
     cache: "no-store",
@@ -214,27 +357,27 @@ export async function authFetch(urlOrPath, opts = {}) {
   };
   init.body = normalizeBody(opts.body, headers);
 
-  const url = absoluteOrPrefixed(urlOrPath);
-
+  const url = resolveUrl(urlOrPath);
   const dedupe = opts.dedupe === false ? false : true;
   const k = dedupe ? keyFor(method, url, init.body) : undefined;
 
   const run = async () => {
-    const res = await doRequest(url, init, { retry429: typeof opts.retry === "number" ? opts.retry : 2, retryNetwork: 1, needsArmEnabled: true });
+    const res = await doRequest(url, init, {
+      retry429: typeof opts.retry === "number" ? opts.retry : 2,
+      retryNetwork: 1,
+      needsArmEnabled: true
+    });
     if (!res.ok) {
       const body = await parseResponseBody(res).catch(() => ({}));
       const err = new Error(body?.error || res.statusText || "request_failed");
       err.status = res.status || 0;
       throw err;
     }
-    // Parse JSON (or text → JSON fallback)
     return parseResponseBody(res);
   };
 
   if (!k) return run();
-
   if (inflight.has(k)) return inflight.get(k);
-
   const p = run().finally(() => inflight.delete(k));
   inflight.set(k, p);
   return p;

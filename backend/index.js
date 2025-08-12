@@ -64,8 +64,7 @@ const { runDaily, runMonthly } = require('./services/utils/analytics/tradeRetent
 const { startWatchdog } = require('./services/utils/strategy_utils/strategyWatchdog');
 const { injectBroadcast } = require('./services/strategies/logging/strategyLogger');
 require('./loadEnv');
-const { startBackgroundJobs } = require('./services/backgroundJobs');
-const { csrfProtection } = require('./middleware/csrf'); // ← added: CSRF middleware (double-submit)
+const { ensureCsrfSeed, csrfProtection } = require('./middleware/csrf');
 
 // ----------------------------------------------------------------------------
 // Global process‑level error handling
@@ -75,21 +74,13 @@ const { csrfProtection } = require('./middleware/csrf'); // ← added: CSRF midd
 // If a fatal error occurs the logger will record it and the process will
 // continue running – developers can decide whether to exit based on severity.
 process.on('uncaughtException', (err) => {
-  try {
-    logger.error('Uncaught Exception:', err);
-  } catch (e) {
-    // If the logger itself blows up fall back to stderr
-    console.error('Uncaught Exception (logger failure):', err);
-  }
+  try { logger.error('Uncaught Exception:', err); } catch {}
+  console.error('[fatal] uncaughtException:', err?.stack || err);
 });
 process.on('unhandledRejection', (reason) => {
-  try {
-    logger.error('Unhandled Rejection:', reason);
-  } catch (e) {
-    console.error('Unhandled Rejection (logger failure):', reason);
-  }
+  try { logger.error('Unhandled Rejection:', reason); } catch {}
+  console.error('[fatal] unhandledRejection:', reason);
 });
-
 // Ensure critical environment variables are present before proceeding.  This
 // throws early if misconfigured, preventing undefined behaviour at runtime.
 validateEnv();
@@ -226,7 +217,8 @@ if (modeFromCLI) {
 
   // Required to read cookies like access_token from incoming requests
   app.use(cookieParser());
-
+  app.use(ensureCsrfSeed);  // ← seeds cookie on first GET/HEAD/OPTIONS
+  app.use(csrfProtection);  // ← enforces on POST/PUT/PATCH/DELETE
   // -------------------------------------------------------------------------
   // DDoS GUARD RAILS (added):
   //
@@ -318,18 +310,29 @@ if (modeFromCLI) {
    * API Router Injection
    * Injects current mode process and setter for use in route files
    */
-  const apiRouter = require('./api');
-  app.use(
-    '/api',
-    (req, res, next) => {
-      req.currentModeProcess = currentModeProcess;
-      req.setModeProcess = (proc) => {
-        currentModeProcess = proc;
-      };
-      next();
-    },
-    apiRouter
-  );
+  // --- Load API router with hard logging so we see failures early ---
+  let apiRouter = null;
+  try {
+    console.log('[boot] loading API router…');
+    apiRouter = require('./api');
+    console.log('[boot] API router loaded ✅');
+  } catch (e) {
+    console.error('[boot] Failed to load API router:', e?.stack || e);
+  }
+  if (apiRouter) {
+    app.use(
+      '/api',
+      (req, res, next) => {
+        req.currentModeProcess = currentModeProcess;
+        req.setModeProcess = (proc) => { currentModeProcess = proc; };
+        next();
+      },
+      apiRouter
+    );
+  } else {
+    // keep server up so you can hit /health and see logs
+    app.use('/api', (_req, res) => res.status(503).json({ error: 'API_BOOT_FAILED' }));
+  }
 
   // Centralised error handler.  Logs the error and returns a sanitized
   // response.  Must be registered after all other middleware and routes.
@@ -467,7 +470,15 @@ if (modeFromCLI) {
   // Launch server
   server.listen(PORT, () => {
     console.log(`🧠 Bot controller API + WS running @ http://localhost:${PORT}`);
-    startBackgroundJobs();
+    // Defer background jobs so top-level side effects can't block boot
+    try {
+      console.log('[boot] loading background jobs…');
+      const { startBackgroundJobs } = require('./services/backgroundJobs');
+      startBackgroundJobs();
+      console.log('[boot] background jobs started ✅');
+    } catch (e) {
+      console.error('[boot] Failed to start background jobs:', e?.stack || e);
+    }
     // Restore scheduled jobs and arm limit-price watchers
     require('./services/utils/strategy_utils/scheduler/strategyScheduler');
   });

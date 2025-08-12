@@ -11,53 +11,50 @@ export default function GenerateVaultStep({ phantomPubkey, onNext, setVaultPubke
   const [copied, setCopied] = useState(false);
   const [confirmChecked, setConfirmChecked] = useState(false);
   const [agreed, setAgreed] = useState(true);
+
   useEffect(() => {
     console.log("🧠 phantomPubkey prop:", phantomPubkey);
   }, [phantomPubkey]);
 
-const handleGenerate = async () => {
-  if (!phantomPubkey) {
-    toast.error("Phantom wallet not connected.");
-    return;
-  }
-
-  if (!agreed) {
-    toast.error("You must agree to the Terms and Privacy to continue.");
-    return;
-  }
-
-  try {
-    console.log("🧪 generating vault with pubkey:", phantomPubkey);
-
-    const payload = {
-      phantomPublicKey: phantomPubkey,
-      agreedToTerms: agreed,
-    };
-
-    const res = await generateVault(payload);
-
-    if (!res?.vaultPublicKey || !res?.vaultPrivateKey) {
-      toast.error(res?.error || "Vault generation failed.");
+  const handleGenerate = async () => {
+    if (!phantomPubkey) {
+      toast.error("Phantom wallet not connected.");
       return;
     }
 
-    // Cookies are set by the backend.  Do not persist tokens in storage.
-    // Remove any legacy tokens that might still exist to prevent
-    // accidentally sending Authorization headers from the frontend.
-    localStorage.removeItem("accessToken");
-    localStorage.removeItem("refreshToken");
+    if (!agreed) {
+      toast.error("You must agree to the Terms and Privacy to continue.");
+      return;
+    }
 
-    setVault(res.vaultPublicKey);
-    setPrivateKey(res.vaultPrivateKey);
-    setVaultPubkey(res.vaultPublicKey);
+    try {
+      console.log("🧪 generating vault with pubkey:", phantomPubkey);
 
-    toast.success("✅ Vault wallet generated.");
+      const payload = {
+        phantomPublicKey: phantomPubkey,
+        agreedToTerms: agreed,
+      };
 
-  } catch (err) {
-    console.error("🔥 Vault gen error:", err);
-    toast.error("Vault generation error.");
-  }
-};
+      const res = await generateVault(payload);
+
+      if (!res?.vaultPublicKey || !res?.vaultPrivateKey) {
+        toast.error(res?.error || "Vault generation failed.");
+        return;
+      }
+
+      // Cookies are set by the backend. Do not persist tokens in storage.
+      // If you still had legacy tokens, you can clear them here (optional).
+
+      setVault(res.vaultPublicKey);
+      setPrivateKey(res.vaultPrivateKey);
+      setVaultPubkey?.(res.vaultPublicKey);
+
+      toast.success("✅ Vault wallet generated.");
+    } catch (err) {
+      console.error("🔥 Vault gen error:", err);
+      toast.error("Vault generation error.");
+    }
+  };
 
   const handleCopy = async () => {
     try {
@@ -70,9 +67,10 @@ const handleGenerate = async () => {
     }
   };
 
+  // ✅ Pass vault data back to parent when continuing
   const handleContinue = () => {
     if (!confirmChecked) return;
-    onNext();
+    onNext?.({ pubkey: vault, privateKey });
   };
 
   return (
@@ -153,10 +151,10 @@ const handleGenerate = async () => {
 
           {/* Continue Button */}
           <button
-            disabled={!confirmChecked}
+            disabled={!confirmChecked || !vault}
             onClick={handleContinue}
             className={`mt-6 px-6 py-3 rounded-xl transition-all w-full max-w-xs ${
-              confirmChecked
+              confirmChecked && vault
                 ? "bg-yellow-600 hover:bg-yellow-700 text-white"
                 : "bg-zinc-700 text-zinc-400 cursor-not-allowed"
             }`}
@@ -165,7 +163,8 @@ const handleGenerate = async () => {
           </button>
         </>
       )}
-            <label className="text-sm flex items-center gap-2 text-zinc-400">
+
+      <label className="text-sm flex items-center gap-2 text-zinc-400">
         <input
           type="checkbox"
           checked={agreed}
