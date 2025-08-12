@@ -1,5 +1,6 @@
 // frontend/src/components/Strategy_Configs/TurboSniperConfig.jsx
 // TurboSniperConfig.jsx — Turbo + Full Sniper Additions + Strategy Summary (+ Safe Turbo preset)
+// Includes missing "Smart Exit (flat)" + "LP Gate (flat)" fields to match validator
 import React, { useMemo } from "react";
 import StrategyTooltip     from "./StrategyTooltip";
 import TokenSourceSelector from "./TokenSourceSelector";
@@ -44,9 +45,6 @@ export const OPTIONAL_FIELDS = [
 
   // -------------------------------------------
   // Custom heuristics and risk controls
-  // These fields expose advanced tuning knobs for
-  // experimental sniping features added by the user.
-  // See ARCHITECTURE.MD for details on each key.
   "enableInsiderHeuristics",
   "maxHolderPercent",
   "requireFreezeRevoked",
@@ -57,9 +55,18 @@ export const OPTIONAL_FIELDS = [
   "tipCurveCoefficients",
   "riskLevels",
   "stopLossPercent",
-  // post-buy watch options are nested under postBuyWatch to keep
-  // related fields together.  RugDelayBlocks is nested accordingly.
   "postBuyWatch.rugDelayBlocks",
+
+  // -------------------------------------------
+  // NEW: Flat Smart Exit + LP Gate fields (required by current validator)
+  "smartExitMode",
+  "smartExitTimeMins",
+  "smartVolLookbackSec",
+  "smartVolThreshold",
+  "smartLiqLookbackSec",
+  "smartLiqDropPct",
+  "minPoolUsd",
+  "maxPriceImpactPct",
 ];
 
 /* fields required by validator ----------------------------------------
@@ -195,10 +202,9 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       rugDelayBlocks: 0,
     },
 
-    // Smart exit configuration.  When smartExitMode is set to one of
-    // "time", "volume" or "liquidity" the corresponding nested
-    // configuration is used.  An empty string disables smart exits.
-    smartExitMode       : "",
+    // Smart exit configuration (legacy nested – kept for back-compat)
+    smartExitMode       : "", // Off | "time" | "volume" | "liquidity"
+
     smartExit           : {
       time: {
         maxHoldSec: "",
@@ -213,15 +219,24 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       },
     },
 
-    // LP Gate configuration used to guard entries.  All fields are
-    // optional; leave blank to disable.  The large/small probes are
-    // expressed in whole SOL units.
+    // NEW: Flat Smart Exit fields (validator expects these)
+    smartExitTimeMins     : "",
+    smartVolLookbackSec   : "",
+    smartVolThreshold     : "",
+    smartLiqLookbackSec   : "",
+    smartLiqDropPct       : "",
+
+    // LP Gate (legacy nested – kept)
     liqGate             : {
       minPoolUsd: "",
       maxImpactPctAtLarge: "",
       liqProbeSmallSol: "",
       liqProbeLargeSol: "",
     },
+
+    // NEW: Flat LP Gate fields (validator expects these)
+    minPoolUsd          : "",
+    maxPriceImpactPct   : "",
 
     // Iceberg & impact guard
     iceberg              : {
@@ -240,112 +255,25 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       lpBurnMinPct: 50,
     },
 
-    /*
-     * ---------------------------------------------------------------------
-     * Experimental heuristics and risk controls
-     *
-     * The following fields allow advanced users to fine‑tune how the Turbo
-     * Sniper filters tokens and manages positions.  They are optional and
-     * disabled by default.  When enabled, these knobs will be passed down
-     * to the backend strategy where they are consumed by additional
-     * heuristics (see turboSniper.js for implementation details).  The
-     * defaults here are intentionally conservative – adjust at your own
-     * risk.
-     */
-
-    /**
-     * Enable insider/deployer heuristics.  When true the strategy will
-     * apply extra filtering based on the relationships between the token
-     * deployer, early funders and related wallets.  Disabled by default.
-     */
+    // Experimental controls...
     enableInsiderHeuristics: false,
-
-    /**
-     * Maximum percentage of total supply allowed to be held by the top
-     * wallets (top 5 holders).  Applies only when insider heuristics are
-     * enabled.  A value of 65 means the top five wallets may collectively
-     * own up to 65% of the supply.  Set to null to disable this check.
-     */
     maxHolderPercent: 65,
-
-    /**
-     * Require the freeze authority on new mints to be revoked before
-     * purchasing.  When true any mint with a non‑null freeze authority
-     * will be skipped, even if other safety checks pass.  Disabled by
-     * default.
-     */
     requireFreezeRevoked: false,
-
-    /**
-     * Use the lowest‑latency pool detection stream available (LaserStream/
-     * ShredStream or Geyser).  When false the strategy falls back to
-     * standard WebSocket log subscriptions.  Implementation support for
-     * LaserStream is stubbed out but the flag is exposed for future use.
-     */
     enableLaserStream: false,
-
-    /**
-     * Number of wallets to use in parallel when filling.  When greater
-     * than 1 the backend will enable the parallel filler and split the
-     * notional amount across the specified number of wallets.  If 1 (the
-     * default) a single wallet will be used.
-     */
     multiWallet: 1,
-
-    /**
-     * Align transaction submission to the current leader’s auction tick.
-     * When enabled the leaderTiming scheduler will be automatically
-     * activated regardless of other settings.  Disabled by default.
-     */
     alignToLeader: false,
-
-    /**
-     * Define a custom compute unit price curve.  Provide either a comma
-     * separated list of micro‑lamport prices or a JSON object describing
-     * the curve.  The backend interprets this string at runtime.  Leave
-     * empty to use the default adaptive range (cuPriceMicroLamportsMin /
-     * cuPriceMicroLamportsMax).
-     */
     cuPriceCurve: "",
-
-    /**
-     * Define a custom tip curve.  Accepts the same formats as
-     * cuPriceCurve.  This field is distinct from the existing
-     * `tipCurve` dropdown, which toggles between predefined flat and
-     * ramp curves.  Use this field to supply explicit coefficients.
-     */
     tipCurveCoefficients: "",
-
-    /**
-     * Risk level thresholds expressed as a comma separated list (e.g.
-     * "0.2,0.5,0.8").  The backend may interpret these values to
-     * dynamically size positions based on detected risk.  Leave blank to
-     * disable dynamic sizing.
-     */
     riskLevels: "",
-
-    /**
-     * Static stop loss expressed as a percentage.  When set the
-     * strategy will exit a position if price falls below this
-     * percentage relative to the entry.  Note: trailing stops are
-     * configured separately via `trailingStopPct`.
-     */
     stopLossPercent: "",
-
-    // NOTE: rugDelayBlocks has been moved under postBuyWatch.rugDelayBlocks.
-    // The top-level property is retained for backward compatibility but
-    // is not used by the updated turbo sniper strategy.  To avoid
-    // confusion we set it to an empty string by default.
     rugDelayBlocks: "",
 
-    // Cross‑feed token resolver config
     feeds: {
       order: ["ws", "birdeye", "onchain"],
       ttlMs: 800,
       timeoutMs: 400,
     },
 
-    // Auto slippage governor
     slippageAuto: {
       enabled: true,
       floorPct: 0.5,
@@ -353,12 +281,12 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       sensitivity: 0.6,
     },
 
-    // Post‑trade chain defaults
     postTx: {
       chain: ["tp", "trail", "alerts"],
       ensureQueued: true,
     },
-      // Extra sections
+
+    // Extra sections
     privateRelay: {
       enabled: false,
       urls: [],
@@ -382,7 +310,6 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       delayMs: 250,
     },
   };
-  
 
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
@@ -436,6 +363,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               "privateRpcUrl",
               "tipCurve",
               "bundleStrategy",
+              "smartExitMode", // NEW: keep as string
               // New custom string fields
               "cuPriceCurve",
               "tipCurveCoefficients",
@@ -514,10 +442,96 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               <option value="liquidity">Liquidity</option>
             </select>
           </label>
+
+          {/* NEW: Flat Smart Exit fields to satisfy validator */}
+          {merged.smartExitMode === 'time' && (
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span>Time (minutes)</span>
+              <input
+                type="number"
+                name="smartExitTimeMins"
+                min={1}
+                max={1440}
+                value={merged.smartExitTimeMins ?? ""}
+                onChange={change}
+                disabled={disabled}
+                placeholder="e.g. 30"
+                className={inp}
+              />
+            </label>
+          )}
+
+          {merged.smartExitMode === 'volume' && (
+            <>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Vol Lookback (sec)</span>
+                <input
+                  type="number"
+                  name="smartVolLookbackSec"
+                  min={5}
+                  max={600}
+                  value={merged.smartVolLookbackSec ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 30"
+                  className={inp}
+                />
+              </label>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Volume Threshold (quote units)</span>
+                <input
+                  type="number"
+                  name="smartVolThreshold"
+                  min={0}
+                  value={merged.smartVolThreshold ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 5000"
+                  className={inp}
+                />
+              </label>
+            </>
+          )}
+
+          {merged.smartExitMode === 'liquidity' && (
+            <>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Liq Lookback (sec)</span>
+                <input
+                  type="number"
+                  name="smartLiqLookbackSec"
+                  min={5}
+                  max={600}
+                  value={merged.smartLiqLookbackSec ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 60"
+                  className={inp}
+                />
+              </label>
+              <label className="flex flex-col text-sm font-medium gap-1">
+                <span>Liq Drop (%)</span>
+                <input
+                  type="number"
+                  name="smartLiqDropPct"
+                  min={0}
+                  max={100}
+                  step={0.1}
+                  value={merged.smartLiqDropPct ?? ""}
+                  onChange={change}
+                  disabled={disabled}
+                  placeholder="e.g. 25"
+                  className={inp}
+                />
+              </label>
+            </>
+          )}
+
+          {/* Legacy nested smartExit controls (kept for back-compat / advanced) */}
           {merged.smartExitMode === 'time' && (
             <>
               <label className="flex flex-col text-sm font-medium gap-1">
-                <span>Max Hold (sec)</span>
+                <span>Max Hold (sec) — advanced</span>
                 <input
                   type="number"
                   name="smartExit.time.maxHoldSec"
@@ -530,7 +544,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
                 />
               </label>
               <label className="flex flex-col text-sm font-medium gap-1">
-                <span>Min PnL % before Time Exit</span>
+                <span>Min PnL % before Time Exit — advanced</span>
                 <input
                   type="number"
                   name="smartExit.time.minPnLBeforeTimeExitPct"
@@ -547,7 +561,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           {merged.smartExitMode === 'volume' && (
             <>
               <label className="flex flex-col text-sm font-medium gap-1">
-                <span>Window (sec)</span>
+                <span>Window (sec) — advanced</span>
                 <input
                   type="number"
                   name="smartExit.volume.volWindowSec"
@@ -560,7 +574,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
                 />
               </label>
               <label className="flex flex-col text-sm font-medium gap-1">
-                <span>Burst→Drop Exit if ≥ %</span>
+                <span>Burst→Drop Exit if ≥ % — advanced</span>
                 <input
                   type="number"
                   name="smartExit.volume.volDropPct"
@@ -576,22 +590,20 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </>
           )}
           {merged.smartExitMode === 'liquidity' && (
-            <>
-              <label className="flex flex-col text-sm font-medium gap-1">
-                <span>LP Outflow Exit if ≥ %</span>
-                <input
-                  type="number"
-                  name="smartExit.liquidity.lpOutflowExitPct"
-                  min="0"
-                  max="100"
-                  value={merged.smartExit?.liquidity?.lpOutflowExitPct ?? ""}
-                  onChange={change}
-                  disabled={disabled}
-                  placeholder="e.g. 50"
-                  className={inp}
-                />
-              </label>
-            </>
+            <label className="flex flex-col text-sm font-medium gap-1">
+              <span>LP Outflow Exit if ≥ % — advanced</span>
+              <input
+                type="number"
+                name="smartExit.liquidity.lpOutflowExitPct"
+                min="0"
+                max="100"
+                value={merged.smartExit?.liquidity?.lpOutflowExitPct ?? ""}
+                onChange={change}
+                disabled={disabled}
+                placeholder="e.g. 50"
+                className={inp}
+              />
+            </label>
           )}
         </div>
       </div>
@@ -600,8 +612,40 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       <div className="border border-zinc-700 rounded-md p-3 mt-6">
         <div className="font-semibold text-sm mb-2">LP Gate</div>
         <div className="grid sm:grid-cols-2 gap-4">
+          {/* NEW: Flat LP Gate fields to satisfy validator */}
           <label className="flex flex-col text-sm font-medium gap-1">
             <span>Min Pool USD</span>
+            <input
+              type="number"
+              name="minPoolUsd"
+              min="0"
+              step="1"
+              value={merged.minPoolUsd ?? ""}
+              onChange={change}
+              disabled={disabled}
+              placeholder="e.g. 2500"
+              className={inp}
+            />
+          </label>
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span>Max Price Impact (%)</span>
+            <input
+              type="number"
+              name="maxPriceImpactPct"
+              min="0"
+              max="100"
+              step="0.1"
+              value={merged.maxPriceImpactPct ?? ""}
+              onChange={change}
+              disabled={disabled}
+              placeholder="e.g. 5"
+              className={inp}
+            />
+          </label>
+
+          {/* Legacy nested liqGate fields (kept for back-compat / advanced) */}
+          <label className="flex flex-col text-sm font-medium gap-1">
+            <span>Min Pool USD — advanced</span>
             <input
               type="number"
               name="liqGate.minPoolUsd"
@@ -614,7 +658,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             />
           </label>
           <label className="flex flex-col text-sm font-medium gap-1">
-            <span>Max Impact @ Large %</span>
+            <span>Max Impact @ Large % — advanced</span>
             <input
               type="number"
               name="liqGate.maxImpactPctAtLarge"
@@ -628,7 +672,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             />
           </label>
           <label className="flex flex-col text-sm font-medium gap-1">
-            <span>Small Probe (SOL)</span>
+            <span>Small Probe (SOL) — advanced</span>
             <input
               type="number"
               name="liqGate.liqProbeSmallSol"
@@ -641,7 +685,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
             />
           </label>
           <label className="flex flex-col text-sm font-medium gap-1">
-            <span>Large Probe (SOL)</span>
+            <span>Large Probe (SOL) — advanced</span>
             <input
               type="number"
               name="liqGate.liqProbeLargeSol"
@@ -655,6 +699,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           </label>
         </div>
       </div>
+
       <div className="flex justify-end mb-2">
         <button
           type="button"
@@ -700,7 +745,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               className={`${inp} appearance-none pr-10`}
             >
               <option value="">None</option>
-              {priceWins.slice(1).map((w) => <option key={w}>{w}</option>)}
+              {["1m","5m","15m","30m","1h","2h","4h","6h"].map((w) => <option key={w}>{w}</option>)}
             </select>
             <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none"/>
           </div>
@@ -737,7 +782,7 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
               className={`${inp} appearance-none pr-10`}
             >
               <option value="">None</option>
-              {volumeWins.slice(1).map((w) => <option key={w}>{w}</option>)}
+              {["1m","5m","30m","1h","4h","8h","24h"].map((w) => <option key={w}>{w}</option>)}
             </select>
             <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none"/>
           </div>
@@ -902,7 +947,8 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
         </label>
       </div>
-        {/* ——— Private Relay ——— */}
+
+      {/* ——— Private Relay ——— */}
       <section>
         <h3 className="font-semibold">Private Relay</h3>
         <label className="flex items-center space-x-2">
@@ -1133,7 +1179,6 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           </div>
         )}
       </section>
-
 
       {/* ——— Advanced Sniper Flags ——— */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
@@ -1563,13 +1608,6 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
       </div>
 
       {/* ——— Experimental Detection & Risk ——— */}
-      {/*
-        These fields expose newly added heuristics and risk controls.  They are
-        grouped together to avoid overwhelming the user.  Only enable
-        features you understand – improper use may cause the bot to skip
-        profitable trades or sell early.  See the strategy docs for
-        guidance on tuning these parameters.
-      */}
       <div className="grid sm:grid-cols-2 gap-4 mt-6">
         {/* Insider heuristics toggle */}
         <label className="flex items-center gap-2 text-sm">
@@ -1624,10 +1662,10 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
           />
           Laser Stream <StrategyTooltip name="enableLaserStream" />
         </label>
-        {/* Multi‑wallet */}
+        {/* Multi-wallet */}
         <label className="flex flex-col text-sm font-medium gap-1">
           <span className="flex items-center gap-1">
-            Multi‑Wallet <StrategyTooltip name="multiWallet" />
+            Multi-Wallet <StrategyTooltip name="multiWallet" />
           </span>
           <input
             type="number"
@@ -2120,3 +2158,4 @@ const turboSniperConfig = ({ config = {}, setConfig, disabled, children }) => {
 };
 
 export default turboSniperConfig;
+

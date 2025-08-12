@@ -1,14 +1,22 @@
-/* ------------------------------------------------------------------
- * Application Entry & App Shell (hardened)
+/**
+ * frontend/src/main.jsx
+ * ------------------------------------------------------------------
+ * App shell moved out of utils/authFetch.js
  * - Ensures CSRF bootstrap runs once at startup
- * - Mounts Supabase auth handler for email link redirect
+ * - Mounts Supabase auth handler for email-link redirect
  * - Wraps the app in ErrorBoundary and global providers
  * - Keeps your existing routes and tabs
- * ------------------------------------------------------------------ */
+ */
 
 import React, { StrictMode, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { Toaster } from "sonner";
+
+/* 🔐 CSRF bootstrap */
+import useCsrfBootstrap from "@/hooks/useCsrfBootstrap";
+
+/* Supabase */
 import { supabase } from "./lib/supabase";
 
 /* Dashboard / Pages */
@@ -42,21 +50,17 @@ import { SupabaseSessionProvider } from "./contexts/SupbaseSessionContext";
 import { PrefsProvider } from "./contexts/prefsContext";
 import { UserProvider } from "./contexts/UserProvider";
 import { UserPrefsProvider } from "@/contexts/UserPrefsContext";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 /* UI / Styles */
 import "./styles/dashboard.css";
 import "./styles/tailwind.css";
-import { Toaster } from "sonner";
-import ErrorBoundary from "./components/ErrorBoundary";
 
 /* Solana Wallet */
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
 import { PhantomWalletAdapter } from "@solana/wallet-adapter-wallets";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import "@solana/wallet-adapter-react-ui/styles.css";
-
-/* 🔐 CSRF bootstrap */
-import useCsrfBootstrap from "@/hooks/useCsrfBootstrap";
 
 /** Runs CSRF bootstrap once. Renders nothing. */
 function BootstrapGuards() {
@@ -148,13 +152,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
   </StrictMode>
 );
 
-
-// Configure authFetch to never attach Authorization headers from the browser.
-// This ensures all authentication uses HttpOnly cookies and CSRF tokens instead of Bearer tokens.
-setTokenGetter(() => null);
-
-/* NOTE:
- * - We replaced the unused AppShell with BootstrapGuards (runs CSRF bootstrap once).
- * - AuthHandler is mounted globally so the email-link redirect always works.
- * - StrictMode is enabled for dev hygiene; remove if it interferes with effects.
+/* Notes:
+ * - No need to call setTokenGetter(() => null) here because authFetch defaults to cookie-only.
+ * - If you want verbose network logs at runtime: window.__AUTHFETCH_DEBUG__ = true
  */

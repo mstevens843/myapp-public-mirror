@@ -146,35 +146,37 @@ export async function logoutUser() {
  * Refreshes the access token using a refresh token.
  * @param {string} refreshToken - The refresh token to use for getting a new access token.
  */
-export async function refreshToken(refreshToken) {
+/**
+ * refreshToken()  (DEPRECATED – cookie-only)
+ * --------------------------------------------------------------------------------
+ * FE no longer passes/handles refresh tokens. The server reads the HttpOnly
+ * refresh cookie and returns a fresh session. authFetch already auto-refreshes
+ * on 401, so you rarely need to call this manually.
+ *
+ * Keep as a thin shim for legacy code paths; ignores any argument.
+ * Returns: { ok: boolean, data?: any, status: number }
+ */
+export async function refreshToken(/* unused */) {
   try {
-    // Use authFetch for CSRF and cookie-based auth
-    const res = await authFetch(`/api/auth/refresh`, {
-      method: "POST",
-      body: JSON.stringify({ refreshToken }),
-    });
-
-    const text = await res.text();
-    let data;
-
+    const res = await authFetch("/api/auth/refresh", { method: "POST" });
+    let data = null;
     try {
-      data = JSON.parse(text);
+      // server may return JSON or empty body
+      const txt = await res.text();
+      data = txt ? JSON.parse(txt) : null;
     } catch {
-      console.error("❌ Invalid JSON in response:", text);
-      return null;
+      data = null;
     }
-
-    if (!res.ok) {
-      console.error("❌ Token refresh error:", res.status, data?.error || text);
-      return null;
-    }
-
-    return data; // Return the new access token
+    return { ok: res.ok, data, status: res.status };
   } catch (err) {
-    console.error("❌ Token refresh failed:", err.message);
-    return null;
+    console.error("❌ Token refresh failed:", err?.message || err);
+    return { ok: false, data: null, status: 0 };
   }
 }
+
+/**
+ * Optional: clearer alias. Prefer this in new code.
+ */
 
 /**
  * logoutUser()

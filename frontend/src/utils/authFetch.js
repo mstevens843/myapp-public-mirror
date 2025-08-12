@@ -1,12 +1,13 @@
 /**
  * frontend/src/utils/authFetch.js
  * ------------------------------------------------------------------
+ * - Cookie-only by default (no Authorization header unless opted in)
  * - BASE + path resolution (no new URL surprises)
  * - credentials:'include', JSON CT normalization
- * - 429 backoff + one network retry
+ * - 419 CSRF bootstrap + retry once
  * - 401 auto-refresh then retry once
  * - 401 {needsArm:true} → onNeedsArm handler (with fallback toast)
- * - Optional Bearer from storage (setTokenGetter(() => null) to disable)
+ * - 429 backoff + one network retry
  * - Options: { retry, retryNetwork, needsArmEnabled, timeoutMs }
  * - Debug: window.__AUTHFETCH_DEBUG__ = true (or setAuthFetchDebug(true))
  */
@@ -15,17 +16,9 @@ import { toast } from "sonner";
 
 // ----- Global knobs -----
 let onNeedsArmHandler = null;
-let tokenGetter = () => {
-  try {
-    return (
-      localStorage.getItem("accessToken") ||
-      sessionStorage.getItem("accessToken") ||
-      null
-    );
-  } catch {
-    return null;
-  }
-};
+// Cookie-only by default. Opt-in to Bearer with setTokenGetter(fn) if you truly need it.
+let tokenGetter = () => null;
+
 let runtimeBaseUrl = null;
 let on401 = null;
 let defaultTimeoutMs = 15000;
@@ -78,6 +71,19 @@ export function setCsrfToken(token) {
   const meta = ensureMetaCsrfTag();
   meta.setAttribute("content", token || "");
 }
+async function bootstrapCsrf(baseUrlOrigin) {
+  try {
+    const res = await fetch(joinUrl(baseUrlOrigin, "/api/auth/csrf"), {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data?.csrfToken) setCsrfToken(data.csrfToken);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 // ----- Utilities -----
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -86,7 +92,7 @@ function jitter(base) { return base + Math.floor(Math.random() * 150); }
 function normalizeBody(body, headers) {
   if (body == null) return null;
 
-  // NEW: if caller passed a string, still ensure JSON header
+  // If caller passed a string, still ensure JSON header
   if (typeof body === "string") {
     if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     return body;
@@ -113,7 +119,7 @@ async function parseResponseBody(res) {
   try { return JSON.parse(text); } catch { return { message: text }; }
 }
 
-// ----- BASE + path resolver (exactly like your old code) -----
+// ----- BASE + path resolver -----
 function baseString() {
   // If env is undefined, return "" so requests are relative to current origin (Vite proxy etc.)
   const envBase = import.meta.env.VITE_API_BASE_URL || "";
@@ -148,7 +154,7 @@ async function refreshSession(baseUrlOrigin) {
   }
 }
 
-// ----- Core request with retries + 401 refresh + needsArm -----
+// ----- Core request with retries + 401 refresh + 419 CSRF + 429 backoff -----
 async function doRequest(url, init, {
   retry429 = 3,
   retryNetwork = 1,
@@ -163,6 +169,7 @@ async function doRequest(url, init, {
   let attempts429 = 0;
   let networkAttempts = 0;
   let triedRefresh = false;
+  let triedCsrf = false;
 
   while (true) {
     try {
@@ -194,11 +201,8 @@ async function doRequest(url, init, {
               console.error("[authFetch] onNeedsArm handler error:", e);
             }
           } else {
-            // Fallback UX like your original file
             try {
-              toast.error(
-                "Protected Mode is enabled. Please arm your automation in Account settings before trading."
-              );
+              toast.error("Protected Mode is enabled. Please arm your automation in Account settings before trading.");
             } catch {}
           }
           clearTimeout(timeout);
@@ -221,6 +225,22 @@ async function doRequest(url, init, {
             continue;
           }
           if (on401) { try { on401(res); } catch {} }
+        }
+      }
+
+      // 419 → CSRF missing/invalid → bootstrap once then retry
+      if (res.status === 419 && !triedCsrf) {
+        triedCsrf = await bootstrapCsrf(baseForRefresh);
+        if (triedCsrf) {
+          // ensure header is present for non-GET after bootstrap
+          const headers = new Headers(init.headers || {});
+          const csrf = getCsrfToken();
+          if (csrf && !["GET","HEAD","OPTIONS"].includes(init.method)) {
+            headers.set("X-CSRF-Token", csrf);
+            init = { ...init, headers };
+          }
+          if (DEBUG) console.debug("[authFetch] retried after CSRF bootstrap");
+          continue;
         }
       }
 
@@ -254,9 +274,7 @@ async function doRequest(url, init, {
               },
             },
           });
-        } catch {
-          // toast may not be mounted; ignore
-        }
+        } catch {}
         if (DEBUG) console.warn("[authFetch] network error, retrying:", err?.message || err);
         await sleep(1500);
         continue;
@@ -275,7 +293,7 @@ async function doRequest(url, init, {
  * - Cookie auth with credentials: 'include'
  * - Adds Content-Type + Accept when appropriate
  * - Adds X-CSRF-Token if present (non-blocking if missing)
- * - Keeps Bearer via tokenGetter() (disable via setTokenGetter(() => null))
+ * - Keeps Bearer via tokenGetter() (disable by default here)
  * - Supports options.retry (number) to control 429 backoff attempts
  */
 export async function authFetch(path, options = {}) {
@@ -283,7 +301,7 @@ export async function authFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
 
-  // Back-compat Authorization (remove later if cookie-only)
+  // Optional Authorization (opt-in via setTokenGetter)
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
@@ -382,3 +400,5 @@ export async function apiFetch(urlOrPath, opts = {}) {
   inflight.set(k, p);
   return p;
 }
+
+export default authFetch;
