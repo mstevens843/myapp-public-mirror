@@ -1037,64 +1037,19 @@ function validateScheduleLauncher(cfg = {}) {
 // - toNum(v)
 
 // backend/services/strategies/validators/turboSniperValidator.js
-
-export function validateTurboConfig(cfg) {
-  const errors = [];
-
-  const mode = cfg.smartExitMode || SmartExitMode.NONE;
-  const push = (m) => errors.push(String(m));
-
-  // LP Gate
-  if (cfg.minPoolUsd != null && (isNaN(cfg.minPoolUsd) || cfg.minPoolUsd < 0)) {
-    push("minPoolUsd must be ≥ 0");
-  }
-  if (
-    cfg.maxPriceImpactPct != null &&
-    (isNaN(cfg.maxPriceImpactPct) || cfg.maxPriceImpactPct < 0 || cfg.maxPriceImpactPct > 100)
-  ) {
-    push("maxPriceImpactPct must be between 0 and 100");
-  }
-
-  // Smart Exit
-  if (mode === SmartExitMode.TIME) {
-    const v = cfg.smartExitTimeMins;
-    if (v == null || isNaN(v) || v < 1 || v > 1440) push("smartExitTimeMins must be 1–1440 minutes");
-  } else if (mode === SmartExitMode.VOLUME) {
-    const lb = cfg.smartVolLookbackSec;
-    const th = cfg.smartVolThreshold;
-    if (lb == null || isNaN(lb) || lb < 5 || lb > 600) push("smartVolLookbackSec must be 5–600 seconds");
-    if (th == null || isNaN(th) || th < 0) push("smartVolThreshold must be ≥ 0 (quote units)");
-  } else if (mode === SmartExitMode.LIQUIDITY) {
-    const lb = cfg.smartLiqLookbackSec;
-    const dp = cfg.smartLiqDropPct;
-    if (lb == null || isNaN(lb) || lb < 5 || lb > 600) push("smartLiqLookbackSec must be 5–600 seconds");
-    if (dp == null || isNaN(dp) || dp < 0 || dp > 100) push("smartLiqDropPct must be between 0 and 100");
-  }
-
-  if (errors.length) {
-    const e = new Error("Invalid Turbo config");
-    e.details = errors;
-    throw e;
-  }
-  return true;
-}
-
-
+/* Smart Exit enum + helpers                                           */
 /* ------------------------------------------------------------------ */
-/* Smart Exit enum + helpers (from "your file")                       */
-/* ------------------------------------------------------------------ */
-export const SmartExitMode = {
+const SmartExitMode = {
   NONE: "none",
   TIME: "time",
   VOLUME: "volume",
   LIQUIDITY: "liquidity",
 };
 
-
 /**
  * Normalizer for the new flat fields so downstream code receives numbers.
  */
-export function normalizeTurboConfig(cfg = {}) {
+function normalizeTurboConfig(cfg = {}) {
   const out = { ...cfg };
   // Coerce numbers safely
   const keys = [
@@ -1113,11 +1068,14 @@ export function normalizeTurboConfig(cfg = {}) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Main project validator (your existing function), now with          */
-/* Smart Exit + LP Gate checks merged in (non-destructive).           */
+/* Main project validator (existing pattern): returns string[] errors. */
+/* Includes Smart Exit + LP Gate (non-destructive).                    */
 /* ------------------------------------------------------------------ */
 function validateTurboSniper(cfg = {}) {
-  const errors = validateSniper(cfg);
+  // Seed with base sniper errors if available; be defensive about return type.
+  const base =
+    typeof validateSniper === "function" ? validateSniper(cfg) : [];
+  const errors = Array.isArray(base) ? base.slice() : [];
 
   // ---------------------------
   // NEW: Smart Exit + LP Gate (flat fields)
@@ -1164,6 +1122,9 @@ function validateTurboSniper(cfg = {}) {
     if (!isNumeric(dp) || dp < 0 || dp > 100) {
       errors.push("TurboSniper: smartLiqDropPct must be between 0 and 100");
     }
+  } else if (mode !== SmartExitMode.NONE) {
+    // Unknown mode specified
+    errors.push(`TurboSniper: smartExitMode must be one of ${Object.values(SmartExitMode).join("|")}`);
   }
 
   // ---------------------------
@@ -1697,41 +1658,28 @@ function validateTurboSniper(cfg = {}) {
   return errors;
 }
 
-
-
-
-
-
-/* ---------- map of strategy → validator ------------------------------ */
+/* ---------- map of strategy → validator (guarded) -------------------- */
 const VALIDATORS = {
-  sniper: validateSniper,
-  scalper: validateScalper,
-  breakout: validateBreakout,
-  dipbuyer: validateDipBuyer,
-  chadmode: validateChadMode,
-  delayedsniper: validateDelayedSniper,
-  trendfollower: validateTrendFollower,
-  rotationbot: validateRotationBot,
-  rebalancer: validateRebalancer,
-  papertrader: validatePaperTrader,
-  stealthBot: validateStealthBot, 
-  stealthbot: validateStealthBot,
-  schedulelauncher : validateScheduleLauncher,
+  sniper: (typeof validateSniper !== "undefined" ? validateSniper : undefined),
+  scalper: (typeof validateScalper !== "undefined" ? validateScalper : undefined),
+  breakout: (typeof validateBreakout !== "undefined" ? validateBreakout : undefined),
+  dipbuyer: (typeof validateDipBuyer !== "undefined" ? validateDipBuyer : undefined),
+  chadmode: (typeof validateChadMode !== "undefined" ? validateChadMode : undefined),
+  delayedsniper: (typeof validateDelayedSniper !== "undefined" ? validateDelayedSniper : undefined),
+  trendfollower: (typeof validateTrendFollower !== "undefined" ? validateTrendFollower : undefined),
+  rotationbot: (typeof validateRotationBot !== "undefined" ? validateRotationBot : undefined),
+  rebalancer: (typeof validateRebalancer !== "undefined" ? validateRebalancer : undefined),
+  papertrader: (typeof validatePaperTrader !== "undefined" ? validatePaperTrader : undefined),
+  stealthBot: (typeof validateStealthBot !== "undefined" ? validateStealthBot : undefined),
+  stealthbot: (typeof validateStealthBot !== "undefined" ? validateStealthBot : undefined),
+  schedulelauncher: (typeof validateScheduleLauncher !== "undefined" ? validateScheduleLauncher : undefined),
   turboSniper: validateTurboSniper,
   turbosniper: validateTurboSniper,
 };
 
-/* ---------- main entry point ----------------------------------------- */
-function validateStrategyConfig(mode = "", cfg = {}) {
-  const fn = VALIDATORS[mode.toLowerCase()];
-  return fn ? fn(cfg) : validateSharedConfig(cfg);
-}
-
-module.exports.default = validateTurboSniper
-
 module.exports = {
-  validateStrategyConfig,
-  validateSharedConfig,
-  validateScheduleLauncher, 
-   validateTurboSniper,
+  validateTurboSniper,
+  SmartExitMode,
+  normalizeTurboConfig,
+  VALIDATORS,
 };

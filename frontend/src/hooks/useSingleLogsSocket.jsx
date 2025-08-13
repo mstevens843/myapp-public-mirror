@@ -1,60 +1,168 @@
+/**
+ * useSingleLogsSocket.jsx
+ * ------------------------------------------------------------------
+ * What changed
+ *  - Added robust WS URL resolution with path support and fallbacks.
+ *  - Tries VITE_WS_BASE_URL (fully-qualified), then VITE_WS_PATH
+ *    (default "/ws/logs"), then "/logs", then "/ws".
+ *  - Better diagnostics: logs attempted URL, onclose code/reason.
+ *  - Safe singleton with stale-check + exponential backoff preserved.
+ *  - Runtime override: window.__SET_LOGS_WS__(url) to force a URL.
+ *
+ * Why
+ *  - Connecting to the WS origin "/" commonly fails (handshake refused)
+ *    because most servers only upgrade at a specific path.
+ *
+ * Risk addressed
+ *  - Silent WS failures on "/", hard-to-debug 1006 closes.
+ * ------------------------------------------------------------------ */
+
 import { useEffect, useRef } from "react";
 import { useLogsStore } from "@/state/LogsStore";
 import { toast } from "react-toastify";
 import { triggerBuyAnimation } from "@/utils/tradeFlash";
 import { useFeatureFlags } from "@/contexts/FeatureFlagContext";
 
-// Convert base URL to WebSocket URL (ws://...).  Derive a WebSocket
-// origin from the configured API base or fallback to the current
-// location.  If VITE_API_BASE_URL is undefined the replace() call on
-// undefined would throw, so we guard against that and compute a
-// sensible default.  When a specific WS base is provided via
-// VITE_WS_BASE_URL you can still override this in ws.js.
-let WS_URL;
-{
+// --------------------------- URL resolution ---------------------------
+
+function getOriginFromApiBase() {
   const apiBase = import.meta.env.VITE_API_BASE_URL;
+  // If API base is provided, take its origin; else use current origin.
   if (apiBase) {
     try {
       const url = new URL(apiBase, window.location.origin);
-      WS_URL = url.origin.replace(/^http/, "ws");
+      return url.origin; // e.g. http://localhost:5001
     } catch {
-      WS_URL = apiBase.replace(/^http/, "ws");
+      // If apiBase was something like "http://localhost:5001/api"
+      // and URL() failed due to bad input, fall back to string parsing.
+      try {
+        const m = apiBase.match(/^[a-z]+:\/\/[^/]+/i);
+        if (m) return m[0];
+      } catch {}
     }
-  } else {
-    WS_URL = window.location.origin.replace(/^http/, "ws");
   }
+  return window.location.origin; // e.g. http://localhost:5173 (vite)
 }
 
-// Singleton socket instance.  It will be lazily created by the hook
-// and reused across calls.  When closed or stale it will be reset to
-// null so that a new connection can be established.
+function toWsUrl(httpishUrl) {
+  // http://... -> ws://...   https://... -> wss://...
+  return httpishUrl.replace(/^http/i, "ws");
+}
+
+function joinPath(base, path) {
+  // base: http(s)://host[:port]
+  // path: "/ws/logs" (ensure it starts with /)
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${base}${p}`;
+}
+
+/**
+ * Compute an ordered list of candidate WebSocket URLs to try.
+ * Priority:
+ *  1) VITE_WS_BASE_URL if it looks like a full ws(s):// URL
+ *  2) VITE_WS_BASE_URL if it’s http(s):// (convert to ws(s)://)
+ *  3) Origin-from-API + VITE_WS_PATH (default "/ws/logs")
+ *  4) Origin-from-API + "/logs"
+ *  5) Origin-from-API + "/ws"
+ */
+function computeCandidateWsUrls() {
+  const candidates = [];
+
+  const explicit = import.meta.env.VITE_WS_BASE_URL;
+  if (explicit) {
+    try {
+      const u = new URL(explicit, window.location.origin);
+      if (u.protocol.startsWith("ws")) {
+        candidates.push(u.toString());
+        return candidates;
+      }
+      if (u.protocol.startsWith("http")) {
+        candidates.push(toWsUrl(u.toString()));
+        return candidates;
+      }
+    } catch {
+      // If explicit is a bare string that URL() can’t parse, try basic replace
+      if (/^ws(s)?:\/\//i.test(explicit)) {
+        candidates.push(explicit);
+        return candidates;
+      }
+      if (/^http(s)?:\/\//i.test(explicit)) {
+        candidates.push(toWsUrl(explicit));
+        return candidates;
+      }
+    }
+  }
+
+  const origin = getOriginFromApiBase(); // http(s)://host[:port]
+  const wsOrigin = toWsUrl(origin);      // ws(s)://host[:port]
+
+  const path = import.meta.env.VITE_WS_PATH || "/ws/logs";
+
+  candidates.push(joinPath(wsOrigin, path)); // primary
+  candidates.push(joinPath(wsOrigin, "/logs"));
+  candidates.push(joinPath(wsOrigin, "/ws"));
+
+  return candidates;
+}
+
+// Singleton socket instance + state
 let socket = null;
+let overrideUrl = null; // runtime override
+
+// Expose a debug hook to override the WS URL at runtime (for quick testing)
+// Usage in console: window.__SET_LOGS_WS__("ws://localhost:5001/ws/logs")
+if (typeof window !== "undefined") {
+  window.__SET_LOGS_WS__ = (url) => {
+    try {
+      const u = new URL(url, window.location.origin);
+      overrideUrl = u.toString();
+      if (socket) {
+        try { socket.close(); } catch {}
+        socket = null;
+      }
+      console.info("[logs-ws] runtime override set ->", overrideUrl);
+    } catch (e) {
+      console.error("[logs-ws] invalid override URL:", url, e?.message);
+    }
+  };
+}
 
 export default function useSingleLogsSocket() {
   const push = useLogsStore((s) => s.push);
   const { flags } = useFeatureFlags();
-  // Record the last time a message was processed; used for throttling
+
+  // Throttle + stale detection
   const lastProcessedRef = useRef(0);
-  // Track last received message timestamp to detect stale sockets
   const lastMessageRef = useRef(Date.now());
-  // Track reconnection attempts for exponential backoff
+
+  // Reconnect/backoff bookkeeping
   const reconnectAttemptsRef = useRef(0);
+  const candidateIndexRef = useRef(0);
+  const candidatesRef = useRef([]);
 
   useEffect(() => {
     let cancelled = false;
 
+    function logDebug(...args) {
+      // Toggle verbose WS logs by setting: window.__LOGS_WS_DEBUG__ = true
+      if (typeof window !== "undefined" && window.__LOGS_WS_DEBUG__) {
+        console.debug("[logs-ws]", ...args);
+      }
+    }
+
     function handleMessage(e) {
       lastMessageRef.current = Date.now();
-      // Throttle onmessage if the logs.throttle flag is enabled
+
+      // Optional throttle
       if (flags?.logs?.throttle) {
         const now = Date.now();
-        // Limit to ~100 messages per second (10 ms per message)
-        if (now - lastProcessedRef.current < 10) return;
+        if (now - lastProcessedRef.current < 10) return; // ~100/s
         lastProcessedRef.current = now;
       }
+
       try {
         let data = JSON.parse(e.data);
-        if (typeof data === "string") data = JSON.parse(data); // unwrap nested JSON if present
+        if (typeof data === "string") data = JSON.parse(data); // unwrap stringified JSON
 
         /* ── 🎆 BUY SUCCESS (any strategy) ───────────────────── */
         if (
@@ -71,10 +179,18 @@ export default function useSingleLogsSocket() {
           triggerBuyAnimation();
 
           toast.success(
-            <>✅ Auto‑buy executed —{txHash ? (<>
-              &nbsp;
-              <a href={`https://solscan.io/tx/${txHash}`} target="_blank" rel="noopener noreferrer">View Tx</a>
-            </>) : (
+            <>✅ Auto-buy executed —{txHash ? (
+              <>
+                &nbsp;
+                <a
+                  href={`https://solscan.io/tx/${txHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View Tx
+                </a>
+              </>
+            ) : (
               " Tx unknown"
             )}</>,
             {
@@ -100,50 +216,100 @@ export default function useSingleLogsSocket() {
         const text = `[${ts}] ${data.line.trim()}`;
         push({ ...data, text });
       } catch {
-        console.warn("Invalid WS message:", e.data);
+        console.warn("[logs-ws] invalid message:", e.data);
       }
+    }
+
+    function currentUrl() {
+      if (overrideUrl) return overrideUrl;
+      const list = candidatesRef.current;
+      const i = Math.min(candidateIndexRef.current, list.length - 1);
+      return list[i];
+    }
+
+    function advanceCandidate() {
+      const list = candidatesRef.current;
+      if (list.length <= 1) return;
+      candidateIndexRef.current = (candidateIndexRef.current + 1) % list.length;
+      logDebug("advance candidate ->", currentUrl());
     }
 
     function connect() {
       if (socket) return;
-      socket = new WebSocket(WS_URL);
+
+      // Initialize candidates on first run
+      if (!candidatesRef.current.length) {
+        const list = computeCandidateWsUrls();
+        candidatesRef.current = list;
+        candidateIndexRef.current = 0;
+        logDebug("candidate URLs:", list);
+      }
+
+      const url = currentUrl();
+      logDebug("connecting →", url);
+      try {
+        socket = new WebSocket(url);
+      } catch (e) {
+        console.error("Logs WebSocket ctor error:", e?.message || e);
+        socket = null;
+        advanceCandidate();
+        scheduleReconnect(true);
+        return;
+      }
+
       reconnectAttemptsRef.current = 0;
+
       socket.onopen = () => {
+        logDebug("connected ✅", url);
         lastMessageRef.current = Date.now();
         reconnectAttemptsRef.current = 0;
       };
       socket.onmessage = handleMessage;
-      socket.onclose = () => {
-        // Null out the socket so a new connection can be created
+      socket.onclose = (evt) => {
+        const { code, reason, wasClean } = evt || {};
+        console.warn(
+          "Logs WebSocket closed",
+          { url, code, reason, wasClean }
+        );
+        // Null out the socket so a new connection can be established
         socket = null;
-        if (!cancelled) scheduleReconnect();
+        // If the close looks like a handshake refusal or policy issue,
+        // try the next candidate path on the next attempt.
+        if (code === 1006 || code === 1008 || code === 1011 || code === 1015) {
+          advanceCandidate();
+        }
+        if (!cancelled) scheduleReconnect(false);
       };
       socket.onerror = (err) => {
         console.error("Logs WebSocket error", err);
+        // Some servers emit error before close; try advancing early.
+        advanceCandidate();
       };
     }
 
-    function scheduleReconnect() {
+    function scheduleReconnect(immediateBump) {
       reconnectAttemptsRef.current += 1;
-      // Exponential backoff: 1 s, 2 s, 4 s, etc., but cap the base at
-      // 30 s.  Add 1–5 s of random jitter on top to avoid thundering herd.
-      const base = Math.min(30000, 1000 * 2 ** reconnectAttemptsRef.current);
+      const attempt = reconnectAttemptsRef.current;
+
+      // Exponential backoff: 1s, 2s, 4s, ... capped at 30s + jitter.
+      const base = Math.min(30000, 1000 * 2 ** attempt);
       const jitter = 1000 + Math.random() * 4000;
       const delay = Math.min(30000, base + jitter);
+
+      const url = currentUrl();
+      logDebug(`reconnect #${attempt} in ~${Math.round(delay / 1000)}s → ${url}`);
+
       setTimeout(() => {
         if (!cancelled) connect();
-      }, delay);
+      }, immediateBump ? 250 : delay);
     }
 
-    // Periodically check for stale connections.  If no messages have
-    // been received for 30 seconds, assume the socket is dead and
-    // trigger a reconnect by closing it.  The onclose handler will
-    // schedule the reconnect.
+    // Kill stale sockets (no messages in 30s) and let onclose handle retry.
     const staleCheck = setInterval(() => {
       if (!socket) return;
       if (Date.now() - lastMessageRef.current > 30000) {
-        console.warn("Logs WebSocket stale, reconnecting…");
-        socket.close();
+        console.warn("[logs-ws] stale (>30s w/o messages), reconnecting…");
+        try { socket.close(); } catch {}
       }
     }, 5000);
 
@@ -153,7 +319,7 @@ export default function useSingleLogsSocket() {
       cancelled = true;
       clearInterval(staleCheck);
       if (socket) {
-        socket.close();
+        try { socket.close(); } catch {}
         socket = null;
       }
     };

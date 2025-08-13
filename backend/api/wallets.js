@@ -10,7 +10,6 @@ const { getFullNetWorthApp } = require("../utils/getFullNetworth");
 // const loadSettings  = require("../telegram/utils/tpSlStorage").loadSettings; // 
 const getWalletTokensWithMeta = require("../services/strategies/paid_api/getWalletTokensWithMeta"); // wallet-level helper
 const axios = require("axios");
-const getTokenPrice = require("../services/strategies/paid_api/getTokenPrice"); // 🆕
 const { getTokenName }  = require("../services/utils/analytics/getTokenName");
 const pLimit = require("p-limit");
 const limit = pLimit(4);  
@@ -27,6 +26,30 @@ const crypto  = require("crypto");
 // Validation for balance queries
 const validate = require("../middleware/validate");
 const { balanceQuerySchema } = require("./schemas/wallets.schema");
+/* ───────────────── Price helper (robust import) ───────────────── */
+const priceMod = require("../services/strategies/paid_api/getTokenPrice");
+// default export may be a function (getTokenPrice); otherwise take named
+const getTokenPrice =
+  typeof priceMod === "function" ? priceMod : priceMod.getTokenPrice;
+
+const SOL_MINT_CONST =
+  (priceMod && priceMod.SOL_MINT) ||
+  "So11111111111111111111111111111111111111112";
+
+async function getSolPriceSafe(userId) {
+  try {
+    if (priceMod && typeof priceMod.getSolPrice === "function") {
+      return await priceMod.getSolPrice(userId);
+    }
+    if (typeof getTokenPrice === "function") {
+      return await getTokenPrice(userId, SOL_MINT_CONST);
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
 
 // ── Pagination helper (idempotent) ───────────────────────────────────────────
 function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
@@ -112,62 +135,72 @@ const injectUntracked = async (userId, walletIds = null) => {
 
 // ✅ POST /api/wallets/balance
 // Body: { label: "default" }
-router.post("/balance", async (req, res) => {
+router.post("/balance", authenticate, async (req, res) => {
   try {
-    const { walletLabel, walletId, pubkey } = req.body;
+    const { walletLabel, label, walletId, pubkey, publicKey } = req.body || {};
+    const userId = req.user?.id;
 
-    /* ── new: fetch by pubkey directly ── */
-    if (pubkey) {
-      const balanceLamports = await connection.getBalance(new PublicKey(pubkey));
-      return res.json({ balance: (balanceLamports / 1e9).toFixed(3) });
-    }
+    // Resolve a public key (prefer explicit pubkey)
+    let publicKeyStr = null;
 
-    /* fallback: older ‘label points to file’ method */
-    if (!label) {
-      return res.status(400).json({ error: "Provide label or pubkey." });
-    }
-
-    const walletPath = path.join(__dirname, "..", "wallets", label);
-    if (!fs.existsSync(walletPath)) {
-      return res.status(404).json({ error: `Wallet file '${label}' not found.` });
-    }
-
-    const fileContent = fs.readFileSync(walletPath, "utf8").trim();
-    let secretKey;
-
-    try {
-      // Try JSON format first (Uint8Array)
-      const parsed = JSON.parse(fileContent);
-      if (!Array.isArray(parsed)) throw new Error();
-      secretKey = Uint8Array.from(parsed);
-    } catch {
-      // Fallback to base58
-      try {
-        const decoded = bs58.decode(fileContent);
-        if (decoded.length !== 64) throw new Error("Invalid base58 key length");
-        secretKey = Uint8Array.from(decoded);
-      } catch (decodeErr) {
-        return res.status(400).json({ error: "Wallet file has invalid format" });
+    if (pubkey || publicKey) {
+      publicKeyStr = (pubkey ?? publicKey).toString();
+    } else if (walletId != null) {
+      const w = await prisma.wallet.findFirst({
+        where: { id: Number(walletId), userId },
+        select: { publicKey: true },
+      });
+      if (!w) return res.status(404).json({ error: "Wallet not found." });
+      publicKeyStr = w.publicKey;
+    } else if (walletLabel || label) {
+      const w = await prisma.wallet.findFirst({
+        where: { label: (walletLabel ?? label).toString(), userId },
+        select: { publicKey: true },
+      });
+      if (!w) return res.status(404).json({ error: "Wallet not found." });
+      publicKeyStr = w.publicKey;
+    } else {
+      // Fallback: user's active wallet
+      const u = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { activeWalletId: true },
+      });
+      if (!u?.activeWalletId) {
+        return res.status(404).json({ error: "No active wallet set for this user." });
       }
+      const w = await prisma.wallet.findUnique({
+        where: { id: u.activeWalletId },
+        select: { publicKey: true },
+      });
+      if (!w?.publicKey) {
+        return res.status(404).json({ error: "Active wallet not found." });
+      }
+      publicKeyStr = w.publicKey;
     }
 
-    const keypair = Keypair.fromSecretKey(secretKey);
-    const balanceLamports = await connection.getBalance(keypair.publicKey);
-    const balanceSol = balanceLamports / 1e9;
+    // Balance & price
+    let owner;
+    try {
+      owner = new PublicKey(publicKeyStr);
+    } catch {
+      return res.status(400).json({ error: "Invalid public key." });
+    }
 
-  /* -------- add price + USD value -------- */
-  const SOL_MINT = "So11111111111111111111111111111111111111112";
-  const solPrice = await getTokenPrice(req.user.id, SOL_MINT);         // cached ⇒ fast
-  const valueUsd = +(balanceSol * solPrice).toFixed(2);
+    const lamports   = await connection.getBalance(owner);
+    const balanceSol = lamports / 1e9;
 
-  res.json({
-    balance : +balanceSol.toFixed(3),
-    price   : solPrice,          // ← USD per SOL
-    valueUsd,                    // ← wallet’s SOL in USD
-  });
- } catch (err) {
-    console.error("Balance check failed:", err.message);
-    res.status(500).json({ error: err.message || "Failed to fetch balance" });
+    const solPrice = await getSolPriceSafe(userId); // never throws; returns 0 on fail
+    const valueUsd = +(balanceSol * solPrice).toFixed(2);
+
+    return res.json({
+      balance : +balanceSol.toFixed(3),
+      price   : solPrice,
+      valueUsd,
+      publicKey: owner.toBase58(),
+    });
+  } catch (err) {
+    console.error("Balance check failed:", err);
+    return res.status(500).json({ error: err.message || "Failed to fetch balance" });
   }
 });
 
@@ -208,28 +241,6 @@ router.get("/balance", validate({ query: balanceQuerySchema }), async (req, res)
 });
 
 
-
-// ✅Used for old fetch with the wallets/default.txt file 
-// router.post("/networth", authenticate, async (req, res) => {
-//   try {
-//     const userId = req.user.id;
-
-//     const wallet = await prisma.wallet.findFirst({
-//       where: { userId },
-//     });
-
-//     if (!wallet) {
-//       return res.status(404).json({ error: "No wallet found for this user." });
-//     }
-
-//     const result = await getFullNetWorthApp(wallet.publicKey);
-//     res.json(result);
-
-//   } catch (err) {
-//     console.error("❌ Networth error:", err);
-//     res.status(500).json({ error: "Failed to fetch wallet net worth" });
-//   }
-// });
 
 // GET  /api/wallets/networth   ← idempotent, no body required
 router.get("/networth", authenticate, async (req, res) => {
@@ -318,14 +329,6 @@ router.get("/tokens/default", async (req, res) => {
     const { current } = require("../services/utils/wallet/walletManager");
     const conn        = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
     const owner       = current().publicKey;
-    /**
-     * - const { current } = require("../services/utils/wallet/walletManager");
-- const owner = current().publicKey;
-    + const { activeWalletId } = await prisma.user.findUnique({ … });
-+ const { publicKey } = await prisma.wallet.findUnique({ where:{ id: activeWalletId }});
-+ const owner = new PublicKey(publicKey);
-
-     */
 
     // Fetch tokens from wallet
     const { value } = await conn.getParsedTokenAccountsByOwner(
@@ -352,8 +355,7 @@ router.get("/tokens/default", async (req, res) => {
           decimals : 9,
         });
       }
-      
-
+    
     // 🔥 Fetch names/symbols/logo/prices using Birdeye wallet portfolio endpoint
     let metaMap = {};
           /* pre-seed meta so it always has a name/icon */
@@ -556,27 +558,18 @@ router.post("/token-meta", async (req, res) => {
 
 
 // grab wallet from default.txt for rotation bot list
-router.get("/labels", (req, res) => {
-  /* the multi-wallet loader you already have in
-     backend/services/utils/wallet/walletManager.js
-     puts every keypair into wm.all()
-     and keeps their order. */
- (async () => {
-    const wm        = require("../services/utils/wallet/walletManager");
-    const wallets   = wm.all();
+// GET /api/wallets/labels  (rotation helper; best-effort)
+router.get("/labels", async (req, res) => {
+  (async () => {
+    const wm      = require("../services/utils/wallet/walletManager");
+    const wallets = wm.all();
 
-    // 🔥 one SOL price fetch (cached 30 s)
-    const { getSolPrice, SOL_MINT } = require("../services/strategies/paid_api/getTokenPrice");
-    const solPrice = await getSolPrice();                // ≤ 1 Birdeye hit
-
-    /* fetch balances in parallel (4-concurrent limiter handy) */
-    const pLimit    = require("p-limit");
-    const limit     = pLimit(4);
-    const connection = new (require("@solana/web3.js").Connection)(process.env.SOLANA_RPC_URL);
+    const solPrice = await getSolPriceSafe(null);
+    const conn     = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
 
     const enriched = await Promise.all(wallets.map((kp, i) =>
       limit(async () => {
-        const balLamports = await connection.getBalance(kp.publicKey);
+        const balLamports = await conn.getBalance(kp.publicKey);
         const balanceSol  = balLamports / 1e9;
         return {
           label   : `wallet-${i + 1}`,
@@ -593,8 +586,7 @@ router.get("/labels", (req, res) => {
     console.error("labels route error:", e);
     res.status(500).json({ error: "Failed to load wallet labels" });
   });
- });
-
+});
 
 
 // GET /api/wallets/tokens/by-label?label=wallet-2

@@ -8,6 +8,11 @@
  * - Keeps your existing routes and tabs
  */
 
+import { Buffer } from "buffer";
+import process from "process";
+if (!window.Buffer) window.Buffer = Buffer;
+if (!window.process) window.process = process;
+
 import React, { StrictMode, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";

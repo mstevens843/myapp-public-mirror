@@ -8,6 +8,7 @@
  * - 401 auto-refresh then retry once
  * - 401 {needsArm:true} → onNeedsArm handler (with fallback toast)
  * - 429 backoff + one network retry
+ * - 304 (GET) → auto-retry once with cache-busting ts param
  * - Options: { retry, retryNetwork, needsArmEnabled, timeoutMs }
  * - Debug: window.__AUTHFETCH_DEBUG__ = true (or setAuthFetchDebug(true))
  */
@@ -155,7 +156,7 @@ async function refreshSession(baseUrlOrigin) {
 }
 
 // ----- Core request with retries + 401 refresh + 419 CSRF + 429 backoff -----
-async function doRequest(url, init, {
+async function doRequest(originalUrl, init, {
   retry429 = 3,
   retryNetwork = 1,
   needsArmEnabled = true,
@@ -170,20 +171,31 @@ async function doRequest(url, init, {
   let networkAttempts = 0;
   let triedRefresh = false;
   let triedCsrf = false;
+  let triedCacheBust304 = false;
+  let currentUrl = originalUrl;
 
   while (true) {
     try {
       if (DEBUG) {
         const safeHeaders = {};
         new Headers(init.headers || {}).forEach((v, k) => safeHeaders[k] = k.toLowerCase() === "authorization" ? "[redacted]" : v);
-        console.debug("[authFetch] →", init.method, url, {
+        console.debug("[authFetch] →", init.method, currentUrl, {
           headers: safeHeaders, hasBody: !!init.body,
           retry429Left: retry429 - attempts429, retryNetworkLeft: retryNetwork - networkAttempts, timeoutMs,
         });
       }
 
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      if (DEBUG) console.debug("[authFetch] ←", init.method, url, res.status);
+      const res = await fetch(currentUrl, { ...init, signal: controller.signal });
+      if (DEBUG) console.debug("[authFetch] ←", init.method, currentUrl, res.status);
+
+      // 304 on GET: retry once with cache-busting ts param to force a fresh body
+      if (res.status === 304 && init.method === "GET" && !triedCacheBust304) {
+        triedCacheBust304 = true;
+        const sep = currentUrl.includes("?") ? "&" : "?";
+        currentUrl = `${currentUrl}${sep}ts=${Date.now()}`;
+        if (DEBUG) console.debug("[authFetch] 304 → retrying with cache-bust:", currentUrl);
+        continue;
+      }
 
       // 401 → needsArm OR refresh-once
       if (res.status === 401) {
@@ -193,10 +205,10 @@ async function doRequest(url, init, {
 
         // needsArm flow
         if (needsArmEnabled && body?.needsArm) {
-          const retry = () => doRequest(url, init, { retry429, retryNetwork, needsArmEnabled });
+          const retry = () => doRequest(currentUrl, init, { retry429, retryNetwork, needsArmEnabled });
           if (onNeedsArmHandler) {
             try {
-              onNeedsArmHandler({ walletId: body.walletId, path: url, options: init, retry });
+              onNeedsArmHandler({ walletId: body.walletId, path: currentUrl, options: init, retry });
             } catch (e) {
               console.error("[authFetch] onNeedsArm handler error:", e);
             }
@@ -221,7 +233,7 @@ async function doRequest(url, init, {
               headers.set("X-CSRF-Token", csrf);
               init = { ...init, headers };
             }
-            if (DEBUG) console.debug("[authFetch] retrying after refresh:", init.method, url);
+            if (DEBUG) console.debug("[authFetch] retrying after refresh:", init.method, currentUrl);
             continue;
           }
           if (on401) { try { on401(res); } catch {} }
@@ -260,7 +272,7 @@ async function doRequest(url, init, {
     } catch (err) {
       if (err?.name === "AbortError") {
         clearTimeout(timeout);
-        if (DEBUG) console.error("[authFetch] timeout/abort:", url, timeoutMs, "ms");
+        if (DEBUG) console.error("[authFetch] timeout/abort:", currentUrl, timeoutMs, "ms");
         throw err;
       }
       if (networkAttempts < retryNetwork) {
@@ -270,7 +282,7 @@ async function doRequest(url, init, {
             action: {
               label: "Retry now",
               onClick: () => {
-                doRequest(url, init, { retry429, retryNetwork, needsArmEnabled }).catch(() => {});
+                doRequest(currentUrl, init, { retry429, retryNetwork, needsArmEnabled }).catch(() => {});
               },
             },
           });
@@ -280,7 +292,7 @@ async function doRequest(url, init, {
         continue;
       }
       clearTimeout(timeout);
-      if (DEBUG) console.error("[authFetch] network error (final):", url, err?.message || err);
+      if (DEBUG) console.error("[authFetch] network error (final):", currentUrl, err?.message || err);
       throw new Error(err?.message || "Network error while contacting backend");
     }
   }
@@ -294,6 +306,7 @@ async function doRequest(url, init, {
  * - Adds Content-Type + Accept when appropriate
  * - Adds X-CSRF-Token if present (non-blocking if missing)
  * - Keeps Bearer via tokenGetter() (disable by default here)
+ * - Adds Cache-Control: no-cache on GET
  * - Supports options.retry (number) to control 429 backoff attempts
  */
 export async function authFetch(path, options = {}) {
@@ -301,14 +314,23 @@ export async function authFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
 
+  // Determine method early for header decisions
+  const method = (options.method || "GET").toUpperCase();
+
   // Optional Authorization (opt-in via setTokenGetter)
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
+  // CSRF for unsafe methods
   const csrf = getCsrfToken();
-  if (csrf && (options.method || "GET").toUpperCase() !== "GET") {
+  if (csrf && !["GET","HEAD","OPTIONS"].includes(method)) {
     headers.set("X-CSRF-Token", csrf);
+  }
+
+  // Encourage revalidation on GET (belt & suspenders vs proxy caching)
+  if (method === "GET" && !headers.has("Cache-Control")) {
+    headers.set("Cache-Control", "no-cache");
   }
 
   const init = {
@@ -316,7 +338,7 @@ export async function authFetch(path, options = {}) {
     cache: "no-store",
     referrerPolicy: "strict-origin-when-cross-origin",
     ...options,
-    method: (options.method || "GET").toUpperCase(),
+    method,
     headers,
   };
   init.body = normalizeBody(options.body, headers);

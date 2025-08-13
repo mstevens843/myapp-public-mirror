@@ -1,25 +1,11 @@
 /**
- * Fetch helper that relies on HttpOnly cookies for auth.
- * Adds X-CSRF-Token header from csrf_token cookie on unsafe methods.
+ * Frontend API helpers — unified on shared authFetch (no local BASE).
  */
-const BASE = import.meta?.env?.VITE_API_BASE_URL || "";
 
-function getCookie(name) {
-  return document.cookie.split("; ").find(r => r.startsWith(name + "="))?.split("=")[1];
-}
+import authFetch, { setBaseUrl } from "./authFetch";
 
-export async function authFetch(url, options = {}) {
-  const opts = { credentials: "include", ...options };
-  const method = (opts.method || "GET").toUpperCase();
-  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
-    const csrf = getCookie("csrf_token");
-    if (csrf) {
-      opts.headers = { ...(opts.headers || {}), "X-CSRF-Token": csrf, "Content-Type": "application/json" };
-    }
-  }
-  const res = await fetch(`${BASE}${url}`, opts);
-  return res;
-}
+// If you prefer, move this to app bootstrap (e.g., main.tsx) instead:
+setBaseUrl(import.meta.env.VITE_API_BASE_URL || "");
 
 /**
  * 🔐 Fetch logged-in user's profile & session info
@@ -31,13 +17,17 @@ export async function authFetch(url, options = {}) {
  */
 export async function getUserProfile() {
   try {
-    const res = await authFetch(`${BASE}/api/auth/me`);
-
+    let res = await authFetch('/api/auth/me', {
+     headers: { 'Cache-Control': 'no-cache' }, // request directive
+   });
+   // Some dev proxies still return 304. Force a fresh read once.
+   if (res.status === 304) {
+     res = await authFetch(`/api/auth/me?ts=${Date.now()}`, { headers: { 'Cache-Control': 'no-cache' } });
+   }
     if (!res) {
       console.warn("No response from /auth/me – user probably not logged in.");
       return null;
     }
-
     const text = await res.text();
     let data;
     try {
@@ -46,12 +36,10 @@ export async function getUserProfile() {
       console.error("❌ Invalid JSON from /auth/me:", text);
       return null;
     }
-
     if (!res.ok) {
       console.error("❌ /auth/me error:", res.status, data?.error || text);
       return null;
     }
-
     return data;
   } catch (err) {
     console.error("❌ getUserProfile failed:", err.message);
@@ -60,21 +48,92 @@ export async function getUserProfile() {
 }
 
 
+/**
+ * 🆕 fetchWalletBalance(opts)
+ * POST /api/wallets/balance
+ * Options (by priority):
+ *   { pubkey } | { walletId } | { walletLabel } | { label } | string (label)
+ * Returns: { balance:Number, price:Number, valueUsd:Number, publicKey:String }
+ */
+export async function fetchWalletBalances(input) {
+  try {
+    let body = {};
 
- /**
-  * checkTokenSafety(mint [, options])
-  *  – options example: { skipSimulation: true, skipLiquidity: false }
-  */
+    if (!input) {
+      // Allow backend to resolve the user's active wallet
+      body = {};
+    } else if (typeof input === "string") {
+      const s = input.trim();
+      // If it looks like a base58 pubkey, send as pubkey; else treat as label
+      const looksLikePubkey = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
+      body = looksLikePubkey ? { pubkey: s } : { walletLabel: s };
+    } else if (typeof input === "object") {
+      const { pubkey, publicKey, walletId, walletLabel, label } = input;
+      if (pubkey || publicKey) body.pubkey = (pubkey ?? publicKey).toString();
+      else if (walletId != null) body.walletId = Number(walletId);
+      else if (walletLabel || label) body.walletLabel = (walletLabel ?? label).toString();
+      else body = {}; // fallback to active wallet
+    } else {
+      throw new Error("Invalid argument for fetchWalletBalances");
+    }
+
+    const res = await authFetch(`/api/wallets/balance`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch {
+      console.error("❌ /wallets/balance → non-JSON:", text);
+      throw new Error("Invalid server response");
+    }
+
+    if (!res.ok) {
+      throw new Error(data?.error || `Balance fetch failed (${res.status})`);
+    }
+
+    return {
+      balance: Number(data.balance),
+      price: Number(data.price),
+      valueUsd: Number(data.valueUsd),
+      publicKey: data.publicKey || null,
+    };
+  } catch (err) {
+    console.error("❌ fetchWalletBalance failed:", err.message);
+    throw err;
+  }
+}
+
+
+
+
+/** Safe wrapper that returns null instead of throwing. */
+export async function fetchWalletBalanceSafe(opts = {}) {
+  try { return await fetchWalletBalances(opts); }
+  catch { return null; }
+}
+
+
+/**
+ * checkTokenSafety(mint [, options])
+ * – options example: { skipSimulation: true, skipLiquidity: false }
+ */
 export async function checkTokenSafety(mint, options = {}) {
   try {
-    const res = await authFetch(`${BASE}/api/safety/check-token-safety`, {
+    const res = await authFetch("/api/safety/check-token-safety", {
       method: "POST",
       body: JSON.stringify({ mint, options }),
     });
-    const text = await res.text();            // 👈 read the stream ONCE
+    const text = await res.text();
+   if (!text && res.status === 304) {
+     // Gracefully handle empty 304 if it ever sneaks through again
+     return null;
+   }
     let data;
     try {
-      data = JSON.parse(text);                // ✅ parse once
+      data = JSON.parse(text);
     } catch {
       console.error("❌ Invalid JSON in response:", text);
       return null;
@@ -83,19 +142,15 @@ export async function checkTokenSafety(mint, options = {}) {
       console.error("❌ Token safety check error:", res.status, data?.error || text);
       return null;
     }
-    return data;                              // ✅ return parsed result
+    return data;
   } catch (err) {
     console.error("❌ Token safety check failed:", err.message);
     return null;
   }
 }
 
-
-
 export async function getWalletNetworth() {
-  // Use the configured API base if present, otherwise default to
-  // relative path.  See BASE definition above for details.
-  const res = await authFetch(`${BASE}/api/wallets/networth`);
+  const res = await authFetch("/api/wallets/networth");
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || "Failed to fetch wallet net worth");
@@ -103,13 +158,10 @@ export async function getWalletNetworth() {
   return await res.json();
 }
 
-
-// ✅ Add this:
 export async function getTokenMarketStats(mint) {
   try {
-    const res = await authFetch(`${BASE}/api/safety/${mint}`);
+    const res = await authFetch(`/api/safety/${mint}`);
     if (!res.ok) throw new Error("Failed to fetch stats");
-
     return await res.json();
   } catch (err) {
     console.warn("Frontend getTokenMarketStats error:", err.message);
@@ -117,21 +169,16 @@ export async function getTokenMarketStats(mint) {
   }
 }
 
-
-// ✅ Add this:
 export async function getTokenMarketStatsPaid(mint) {
   try {
-    const res = await authFetch(`${BASE}/api/safety/target-token/${mint}`)
+    const res = await authFetch(`/api/safety/target-token/${mint}`);
     if (!res.ok) throw new Error("Failed to fetch stats");
-
     return await res.json();
   } catch (err) {
     console.warn("Frontend getTokenMarketStats error:", err.message);
     return null;
   }
 }
-
-  
 
 /** 🔁 SOL → any token (amount in SOL) */
 export async function manualBuy(amountInSOL, mint, opts = {}) {
@@ -146,39 +193,35 @@ export async function manualBuy(amountInSOL, mint, opts = {}) {
     sl,
     tpPercent,
     slPercent,
-    
   } = opts;
-
-  // ❌ No more manual throw if no walletLabel
 
   const body = {
     amountInSOL, mint, walletId, slippage, force, amountInUSDC,
     tp, sl, tpPercent, slPercent
   };
   if (chatId) body.chatId = chatId;
-console.log("📤 manualBuy sending:", body);
-  const res = await authFetch(`${BASE}/api/manual/buy`, {
+
+  const res = await authFetch("/api/manual/buy", {
     method: "POST",
     body: JSON.stringify(body),
   });
 
-const data = await res.json();
+  const data = await res.json();
 
-if (res.status === 401 && data?.needsArm) {
-  // let your UI open the Arm modal with this info
-  const err = new Error("needs-arm");
-  err.code = "NEEDS_ARM";
-  err.walletId = data.walletId;
-  throw err;
-}
+  if (res.status === 401 && data?.needsArm) {
+    const err = new Error("needs-arm");
+    err.code = "NEEDS_ARM";
+    err.walletId = data.walletId;
+    throw err;
+  }
 
-if (res.status === 403 && data?.error?.includes("not tradable")) {
-  throw new Error("not-tradable");
-}
+  if (res.status === 403 && data?.error?.includes("not tradable")) {
+    throw new Error("not-tradable");
+  }
 
-if (!res.ok) {
-  throw new Error(data?.error || "Manual buy failed");
-}
+  if (!res.ok) {
+    throw new Error(data?.error || "Manual buy failed");
+  }
 
   return data.result;
 }
@@ -197,14 +240,13 @@ export async function manualSell(percent, mint, opts = {}) {
   const body = { percent, mint, walletLabel, walletId, slippage, force, strategy };
   if (chatId) body.chatId = chatId;
 
-  const res = await authFetch(`${BASE}/api/manual/sell`, {
+  const res = await authFetch("/api/manual/sell", {
     method: "POST",
     body: JSON.stringify(body),
   });
 
   const data = await res.json();
 
-  // 👇 Arm-to-Trade: trigger modal
   if (res.status === 401 && data?.needsArm) {
     const err = new Error("needs-arm");
     err.code = "NEEDS_ARM";
@@ -215,7 +257,6 @@ export async function manualSell(percent, mint, opts = {}) {
   if (!res.ok) throw new Error(data?.error || "Manual sell failed");
   return data.result;
 }
-
 
 /** 🔁 Sell by EXACT amount of tokens (e.g. all USDC) */
 export async function manualSellAmount(amountInTokens, mint, opts = {}) {
@@ -231,14 +272,13 @@ export async function manualSellAmount(amountInTokens, mint, opts = {}) {
   const body = { amount: amountInTokens, mint, walletLabel, walletId, slippage, force, strategy };
   if (chatId) body.chatId = chatId;
 
-  const res = await authFetch(`${BASE}/api/manual/sell`, {
+  const res = await authFetch("/api/manual/sell", {
     method: "POST",
     body: JSON.stringify(body),
   });
 
   const data = await res.json();
 
-  // 👇 Arm-to-Trade: trigger modal
   if (res.status === 401 && data?.needsArm) {
     const err = new Error("needs-arm");
     err.code = "NEEDS_ARM";
@@ -250,109 +290,73 @@ export async function manualSellAmount(amountInTokens, mint, opts = {}) {
   return data.result;
 }
 
-
-
-
-
-// /** 🔍 Fetch tokens from any wallet by public key. future use.  */
-// export async function fetchWalletTokens(walletPubkey) {
-//   try {
-//     const url = BASE
-//       ? `${BASE}/api/wallets/tokens?wallet=${walletPubkey}`
-//       : `/api/wallet/tokens?wallet=${walletPubkey}`;
-    
-//     const res = await authFetch(url);
-
-//     if (!res.ok) {
-//       const err = await res.text();
-//       console.error("❌ fetchWalletTokens failed:", err);
-//       throw new Error("Failed to fetch wallet tokens");
-//     }
-
-//     return await res.json();   // [{ mint, amount, decimals }]
-//   } catch (err) {
-//     console.error("❌ fetchWalletTokens:", err.message);
-//     return [];
-//   }
-// }
-
-/** 🔍 Fetch tokens for the default server-side wallet. uses default.txt */
+/** 🔍 Fetch tokens for the default server-side wallet (uses default.txt) */
 export async function fetchDefaultWalletTokens() {
   try {
-    const url = BASE
-      ? `${BASE}/api/wallets/tokens/default`
-      : "/api/wallets/tokens/default";   
-    const res = await authFetch(url);
-
+    const res = await authFetch("/api/wallets/tokens/default");
     if (!res.ok) {
       const err = await res.text();
       console.error("❌ Fetch failed:", err);
       throw new Error("Failed to fetch wallet tokens");
     }
-
-    return await res.json();    // [{ mint, amount, decimals, name, symbol }]
+    return await res.json(); // [{ mint, amount, decimals, name, symbol }]
   } catch (err) {
     console.error("❌ fetchDefaultWalletTokens:", err.message);
     return [];
   }
 }
 
-// fetch wallets for rotation bot. 
+/** 🔎 Fetch wallet labels (rotation bot) */
 export async function fetchWalletLabels() {
   try {
-    const url = BASE ? `${BASE}/api/wallets/labels` : "/api/wallets/labels";
-    const res = await authFetch(url);
+    const res = await authFetch("/api/wallets/labels");
     if (!res.ok) throw new Error(await res.text());
-    return await res.json();        // [{ label, pubkey }]
+    return await res.json(); // [{ label, pubkey }]
   } catch (err) {
     console.error("❌ fetchWalletLabels:", err.message);
     return [];
   }
 }
 
-
-// Fetch tokens for rotation bot, multiple wallet usecase. 
+/** 🔍 Fetch tokens by wallet label (rotation use case) */
 export async function fetchRotationWalletTokens(label) {
   try {
-    const url = BASE
-      ? `${BASE}/api/wallets/tokens/by-label?label=${encodeURIComponent(label)}`
-      : `/api/wallets/tokens/by-label?label=${encodeURIComponent(label)}`;
-    const res = await authFetch(url);
+    if (!label) {
+      console.warn("⚠️ fetchRotationWalletTokens: missing label");
+      return [];
+    }
+    const res = await authFetch(`/api/wallets/tokens/by-label?label=${encodeURIComponent(label)}`);
     if (!res.ok) throw new Error(await res.text());
-    return await res.json();               // same shape as default route
+    return await res.json(); // same shape as default route
   } catch (err) {
     console.error("❌ fetchWalletTokens:", err.message);
     return [];
   }
 }
 
-
-
-
 /* ----- Limit & DCA ----- */
 export const createLimitOrder = (body) => {
-  console.log("📤 creating limit order", body);   // optional debug
-
-  return authFetch(`${BASE}/api/orders/limit`, {
+  console.log("📤 creating limit order", body);
+  return authFetch("/api/orders/limit", {
     method: "POST",
     body: JSON.stringify(body),
   }).then(r => r.json());
-}
+};
 
 export const createDcaOrder = (body) =>
-  authFetch(`${BASE}/api/orders/dca`, {
+  authFetch("/api/orders/dca", {
     method: "POST",
     body: JSON.stringify(body),
   }).then(r => r.json());
 
 export const cancelOrder = (id) =>
-  authFetch(`${BASE}/api/orders/cancel/${id}`, { method: "DELETE" })
+  authFetch(`/api/orders/cancel/${id}`, { method: "DELETE" })
     .then(r => r.json());
 
 export const fetchPendingOrders = async () => {
   const [dcaRes, limitRes] = await Promise.all([
-    authFetch(`${BASE}/api/orders/pending-dca`).then(r => r.json()),
-    authFetch(`${BASE}/api/orders/pending-limit`).then(r => r.json()),
+    authFetch("/api/orders/pending-dca").then(r => r.json()),
+    authFetch("/api/orders/pending-limit").then(r => r.json()),
   ]);
   const dca   = Array.isArray(dcaRes) ? dcaRes : [];
   const limit = Array.isArray(limitRes) ? limitRes : [];
@@ -361,10 +365,8 @@ export const fetchPendingOrders = async () => {
 
 /* ----- TP / SL ----- */
 export const updateTpSl = (mint, body) => {
-  // calculate combined sellPct
   const combinedSellPct = (body.tpPercent || 0) + (body.slPercent || 0);
-
-  return authFetch(`${BASE}/api/tpsl/${mint}`, {
+  return authFetch(`/api/tpsl/${mint}`, {
     method: "PUT",
     body: JSON.stringify({
       mint,
@@ -386,14 +388,9 @@ export const updateTpSl = (mint, body) => {
   });
 };
 
-
-
-
-
-
 export async function manualSnipe(mint, amountInSOL = 0.25) {
   try {
-    const res = await authFetch(`${BASE}/api/manual/snipe`, {
+    const res = await authFetch("/api/manual/snipe", {
       method: "POST",
       body: JSON.stringify({ mint, amountInSOL }),
     });
@@ -404,11 +401,10 @@ export async function manualSnipe(mint, amountInSOL = 0.25) {
   }
 }
 
-
 /** ⚙️ Load default TP/SL settings */
 export const fetchTpSlSettings = (walletId) => {
   const id = Number(walletId);
-  return authFetch(`${BASE}/api/tpsl?walletId=${id}`)
+  return authFetch(`/api/tpsl?walletId=${id}`)
     .then((res) => res.json())
     .catch((err) => {
       console.error("❌ Failed to fetch TP/SL settings:", err.message);
@@ -416,27 +412,20 @@ export const fetchTpSlSettings = (walletId) => {
     });
 };
 
-    
-
 export const deleteTpSlSetting = (id) => {
   if (!id) throw new Error("deleteTpSlSetting needs an id");
-
-  return authFetch(`${BASE}/api/tpsl/by-id/${id}`, {
+  return authFetch(`/api/tpsl/by-id/${id}`, {
     method: "DELETE"
   }).then(async (r) => {
     if (!r.ok) throw new Error((await r.text()) || "Failed to delete TP/SL");
     return r.json();
   });
 };
-    
- ///tp: body.tp != null ? Number(body.tp) : null,
-
-/* … existing exports … */
 
 /* ------------------------------------------------------------------ */
 /* 🆕  user-prefs helpers */
 export const getPrefs = (chatId = "default") =>
-  authFetch(`${BASE}/api/prefs/${chatId}`).then(r => {
+  authFetch(`/api/prefs/${chatId}`).then(r => {
     if (!r) {
       console.log("🚫 getPrefs skipped because no auth session or fetch returned null.");
       return null;
@@ -445,7 +434,7 @@ export const getPrefs = (chatId = "default") =>
   });
 
 export const savePrefs = (chatId, obj) =>
-  authFetch(`${BASE}/api/prefs/${chatId}`, {
+  authFetch(`/api/prefs/${chatId}`, {
     method : "PUT",
     body   : JSON.stringify(obj),
   }).then(r => {
@@ -456,19 +445,16 @@ export const savePrefs = (chatId, obj) =>
     return r.json();
   });
 
-
 export async function checkExistingPosition(mint, strategy = "manual") {
   if (!mint || !strategy) return false;
-
   try {
-    const res = await authFetch(`${BASE}/api/tpsl/check-position?mint=${mint}&strategy=${strategy}`);
+    const res = await authFetch(`/api/tpsl/check-position?mint=${mint}&strategy=${strategy}`);
     if (!res) return false;
     if (!res.ok) {
       const text = await res.text();
       console.error("❌ checkExistingPosition failed:", text);
       return false;
     }
-
     const data = await res.json();
     return !!data.exists;
   } catch (err) {
@@ -477,20 +463,15 @@ export async function checkExistingPosition(mint, strategy = "manual") {
   }
 }
 
-
-
 /* ------------------------------------------------------------------ */
 /* 🆕  fetch tokens by walletId (for RebalancerConfig or others) */
-
-
 export async function fetchWalletTokens(walletId) {
   if (!walletId) {
     console.error("❌ fetchWalletTokens: Missing walletId");
     return [];
   }
-
   try {
-    const res = await authFetch(`${BASE}/api/wallets/${walletId}/tokens`);
+    const res = await authFetch(`/api/wallets/${walletId}/tokens`);
     console.log("📡 [fetchWalletTokens] Raw response object:", res);
 
     if (!res) {
@@ -500,7 +481,6 @@ export async function fetchWalletTokens(walletId) {
 
     const text = await res.text();
     let data;
-
     try {
       data = JSON.parse(text);
     } catch (err) {
@@ -533,28 +513,21 @@ export async function fetchWalletTokens(walletId) {
   }
 }
 
-
-
-
-
 export async function validateMint(mint) {
   const isValidFormat = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint || "");
   if (!isValidFormat) {
     return { ok: false, reason: "format" };
   }
-
   try {
-    const res = await authFetch(`${BASE}/api/wallets/validate-mint`, {
+    const res = await authFetch(`/api/wallets/validate-mint`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mint }),
     });
-
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       return { ok: false, reason: body.reason || "invalid" };
     }
-
     const data = await res.json();
     return {
       ok: true,

@@ -1,23 +1,6 @@
-/**
- * backend/api/index.js
- *
- * What changed
- *  - Kept your full router and sub-route wiring intact.
- *  - Ensured requestId stays first for downstream logging/correlation.
- *  - RLS pilot: made userId resolution slightly more forgiving (id | userId | user_id),
- *    still gated by FEATURE_RLS_PILOT and asyncLocalStorage presence.
- *  - Idempotency stays feature-flag driven via utils/featureFlags and only for POST.
- * Why
- *  - Preserve your behavior while plugging in the idempotency/RLS bits consistently.
- * Risk addressed
- *  - Duplicate POST effects; missing per-user DB scoping context when RLS pilot is enabled.
- */
-
 const express = require('express');
 const router = express.Router();
 
-// Feature flag middleware must run before authentication to short-circuit
-// disabled endpoints.  See backend/config/featureFlags.js for details.
 const featureFlagMiddleware = require('../middleware/featureFlag');
 const requestId = require('../middleware/requestId');
 const idempotency = require('../middleware/idempotency');
@@ -38,32 +21,38 @@ const { authLimiter } = require('../middleware/rateLimit');
 const paymentRoutes = require('./payment');
 const accountsRoute = require('./accounts');
 const schedulerRoutes = require('./schedulerRoutes');
-const internalRouter = require('./internalJobs'); // 👈 add require here
+const internalRouter = require('./internalJobs');
 const healthRouter = require('./health');
 const requireAuth = require('../middleware/requireAuth');
-
-// Pull the AsyncLocalStorage instance from the Prisma client.  When the
-// RLS pilot flag is enabled this will be a non-null object.  See
-// backend/prisma/prisma.js for details.
+const flagsRouter = require("./flags");
 const { asyncLocalStorage } = require('../prisma/prisma');
 const armEncryptionRouter = require('./armSessions');
+
 console.log('✅ API router loaded.');
 
+// 🔒 kill caching on auth/account endpoints
+const noCache = (_req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.set('Surrogate-Control', 'no-store');
+  if (typeof res.removeHeader === 'function') res.removeHeader('ETag');
+  next();
+};
+
 // 🔍 Global log to see every hit on /api
-router.use((req, res, next) => {
+router.use((req, _res, next) => {
   console.log(`➡️ API HIT: ${req.method} ${req.path}`);
   next();
 });
 
-// 🚨 Attach a request ID to all incoming requests. This must be early in
-// the middleware chain so subsequent logs and idempotency records include
-// the ID. The middleware will also propagate the ID in the response header.
+// Attach a request ID to all incoming requests
 router.use(requestId);
 
-// 📴 Feature flag check before any other middleware
+// Feature flags
 router.use(featureFlagMiddleware);
 
-// 🧠 Apply `requireAuth` for ALL routes below EXCEPT /auth, /payment and /internalJobs
+// Require auth everywhere except /auth, /payment, /internalJobs
 router.use((req, res, next) => {
   if (
     req.path.startsWith('/auth') ||
@@ -77,41 +66,25 @@ router.use((req, res, next) => {
   requireAuth(req, res, next);
 });
 
-// ──────────────────────────────────────────────────────────────────────────
-// RLS pilot context middleware
-//
-// When the FEATURE_RLS_PILOT flag is enabled we populate an
-// AsyncLocalStorage context with the authenticated user ID on each
-// request.  The Prisma client middleware defined in
-// backend/prisma/prisma.js reads this context and sets
-// `app.user_id` for the duration of every database query.  If the
-// feature flag is disabled or no user is available the request
-// proceeds unchanged.
-router.use((req, res, next) => {
+// ─────────────────── RLS pilot context ───────────────────
+router.use((req, _res, next) => {
   try {
-    // Skip when AsyncLocalStorage is not initialised (flag off)
     if (!asyncLocalStorage) return next();
     const flag = process.env.FEATURE_RLS_PILOT;
     if (!flag || !/^(1|true|yes)$/i.test(flag.trim())) return next();
 
-    // Resolve a user id in a tolerant way; prefer req.user.id
     const userId =
       (req.user && (req.user.id || req.user.userId || req.user.user_id)) || null;
     if (!userId) return next();
 
-    // Use run() to establish a context for downstream async tasks
     asyncLocalStorage.run(userId, () => next());
   } catch (err) {
-    // If anything goes wrong fail open to avoid blocking the request
     console.error('RLS pilot middleware error:', err.message);
     return next();
   }
 });
 
-// 🧾 Idempotency middleware: after authentication we inspect POST requests
-// and enforce Idempotency-Key semantics. We place this after requireAuth
-// so that req.user is available to scope records. Feature flag
-// FEATURE_IDEMPOTENCY controls whether this is enabled (via utils/featureFlags).
+// ───────────────── Idempotency (POST only) ───────────────
 router.use(async (req, res, next) => {
   if (req.method !== 'POST') return next();
   const { isEnabled } = require('../utils/featureFlags');
@@ -124,10 +97,10 @@ router.use(async (req, res, next) => {
   }
 });
 
-// Attach all API sub-routes
+// Routers
 router.use(
   '/mode',
-  (req, res, next) => {
+  (req, _res, next) => {
     console.log('⚙️ /mode router hit');
     req.setModeProcess = (proc) => {
       req.currentModeProcess = proc;
@@ -159,19 +132,23 @@ router.use('/safety', safety);
 console.log('✅ /safety router loaded');
 router.use('/schedule', schedulerRoutes);
 console.log('✅ /schedule router loaded');
-// Apply a stricter rate limit on authentication endpoints to mitigate brute
-// force attempts.  See middleware/rateLimit.js for configuration.
-router.use('/auth', authLimiter, auth);
+
+// 🔑 Auth: rate limit + NO CACHE
+router.use('/auth', noCache, authLimiter, auth);
 console.log('✅ /auth router loaded');
+
+// 💳 Payments (webhooks etc.)
 router.use('/payment', paymentRoutes);
 console.log('✅ /payment router loaded');
-router.use('/account', accountsRoute);
+
+// 👤 Account endpoints: NO CACHE
+router.use('/account', noCache, accountsRoute);
 console.log('✅ /account router loaded');
+
 router.use('/internalJobs', internalRouter);
 router.use('/arm-encryption', armEncryptionRouter);
-// Health API for bot liveness and metrics
 router.use('/health', healthRouter);
-
 console.log('✅ /internalJobs router loaded');
+router.use("/flags", flagsRouter);
 
 module.exports = router;

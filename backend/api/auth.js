@@ -21,10 +21,10 @@ const nacl = require("tweetnacl");
 nacl.util = require("tweetnacl-util");
 const { v4: uuidv4 } = require("uuid");
 const { Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
+const { CSRF_COOKIE, generateCsrfToken, setCsrfCookie } = require("../middleware/csrf");
 
 // Validation, CSRF and auth cookie helpers
 const validate = require("../middleware/validate");
-const { generateCsrfToken, setCsrfCookie } = require("../middleware/csrf"); // ← added setCsrfCookie
 const { loginSchema, refreshSchema } = require("./schemas/auth.schema");
 const {
   setAccessCookie,
@@ -1220,7 +1220,14 @@ router.post("/verify-2fa-login", async (req, res) => {
   });
 });
 
-
+router.get("/csrf", (req, res) => {
+  let token = req.cookies?.[CSRF_COOKIE];
+  if (!token) {
+    token = generateCsrfToken();
+    setCsrfCookie(res, token);
+  }
+  res.json({ csrfToken: token });
+});
 
 
 router.post("/refresh", validate({ body: refreshSchema }), async (req, res) => {

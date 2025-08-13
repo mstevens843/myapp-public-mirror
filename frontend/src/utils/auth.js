@@ -156,23 +156,23 @@ export async function logoutUser() {
  * Keep as a thin shim for legacy code paths; ignores any argument.
  * Returns: { ok: boolean, data?: any, status: number }
  */
-export async function refreshToken(/* unused */) {
-  try {
-    const res = await authFetch("/api/auth/refresh", { method: "POST" });
-    let data = null;
-    try {
-      // server may return JSON or empty body
-      const txt = await res.text();
-      data = txt ? JSON.parse(txt) : null;
-    } catch {
-      data = null;
-    }
-    return { ok: res.ok, data, status: res.status };
-  } catch (err) {
-    console.error("❌ Token refresh failed:", err?.message || err);
-    return { ok: false, data: null, status: 0 };
-  }
-}
+// export async function refreshToken(/* unused */) {
+//   try {
+//     const res = await authFetch("/api/auth/refresh", { method: "POST" });
+//     let data = null;
+//     try {
+//       // server may return JSON or empty body
+//       const txt = await res.text();
+//       data = txt ? JSON.parse(txt) : null;
+//     } catch {
+//       data = null;
+//     }
+//     return { ok: res.ok, data, status: res.status };
+//   } catch (err) {
+//     console.error("❌ Token refresh failed:", err?.message || err);
+//     return { ok: false, data: null, status: 0 };
+//   }
+// }
 
 /**
  * Optional: clearer alias. Prefer this in new code.

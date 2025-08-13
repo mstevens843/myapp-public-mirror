@@ -49,7 +49,8 @@ import logo from "@/assets/solpulse-logo.png";
 import PaymentsTab from "./components/Dashboard/PaymentsTab";
 import MyAccountTab from "@/components/Dashboard/MyAccountTab";
 import AccountMenu from "@/components/Dashboard/Account/AccountMenu";
-import { getWalletNetworth, getUserProfile, authFetch, getPrefs } from "./utils/api"
+import { getWalletNetworth, getUserProfile, getPrefs, fetchWalletBalances } from "./utils/api"
+import { openTradesCsv, getRecentTrades } from "./utils/trades_positions"
 import { logoutUser } from "./utils/auth"; 
 import Cookies from "js-cookie";
 import { useUser } from "@/contexts/UserProvider";
@@ -888,18 +889,14 @@ useEffect(() => { fetchInitialNetworth(); }, []);   // ← runs once on page loa
 
   
 // Fetch trade data on initial load
-useEffect(() => {
-  authFetch(`${import.meta.env.VITE_API_BASE_URL}/api/trades`)
-    .then((res) => res.json())
-    .then((data) => {
-      setTrades(data);
-    })
-    .catch((err) => {
-      console.error("❌ Trade fetch error:", err);
-      toast.error("⚠️ Failed to load trade data.");
-    });
-}, []);
-
+ useEffect(() => {
+   getRecentTrades()
+     .then(setTrades)
+     .catch((err) => {
+       console.error("❌ Trade fetch error:", err);
+       toast.error("⚠️ Failed to load trade data.");
+     });
+ }, []);
 
 // store when it changes
 useEffect(() => {
@@ -1062,28 +1059,19 @@ try {
   //   setSelectedWallets(["default"]);
   // }, []);
 
-  const fetchWalletBalance = async (label) => {
-    try {
-      // Use authFetch so that cookies and CSRF tokens are included.  No Authorization header is sent.
-      const res = await authFetch(`/api/wallets/balance`, {
-        method: "POST",
-        body: JSON.stringify({ label }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setSelectedWalletBalance(parseFloat(data.balance));
-        setLastBalanceUpdate(new Date().toLocaleTimeString());
-        setBalanceGlow(true);
-        setTimeout(() => setBalanceGlow(false), 1000);
-      } else {
-        toast.error(`❌ Balance error: ${data.error || "Unknown"}`);
-      }
-    } catch (err) {
-      console.error("❌ Wallet balance fetch failed:", err);
-      toast.error("❌ Balance fetch error.");
-    }
-  };
-
+const fetchWalletBalance = async (pubkey) => {
+  try {
+    const res = await fetchWalletBalances(typeof pubkey === "string" ? pubkey : { pubkey });
+    if (!res) throw new Error("No response");
+    setSelectedWalletBalance(Number(res.balance));
+    setLastBalanceUpdate(new Date().toLocaleTimeString());
+    setBalanceGlow(true);
+    setTimeout(() => setBalanceGlow(false), 1000);
+  } catch (err) {
+    console.error("❌ Wallet balance fetch failed:", err);
+    toast.error(`❌ Balance error: ${err.message || "Unknown"}`);
+  }
+};
 
 useEffect(() => {
   const interval = setInterval(() => {
@@ -1113,20 +1101,9 @@ useEffect(() => {
 
 
 
-    const handleExportCSV = () =>
-    window.open(`${import.meta.env.VITE_API_BASE_URL}/api/trades/download`, "_blank");
+  const handleExportCSV = () => openTradesCsv();
 
-  const handleClearLogs = () => {
-    if (!window.confirm("🧹 Are you sure you want to clear all trade logs?")) return;
-    authFetch(`/api/trades/reset`, { method: "POST" })
-      .then((res) => res.json())
-      .then(() => {
-        toast.success("🧹 All logs cleared.");
-        setTrades([]);
-      })
-      .catch(() => toast.error("❌ Failed to clear logs."));
-  };
-    
+
 
 
   ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1183,11 +1160,16 @@ return (
 
 {/* Wallet Balance */}
 <div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow space-y-3">
-  <WalletBalancePanel
-    walletLabels={selectedWallets}
-    fetchWalletBalance={fetchWalletBalance}
-  />
-</div>
+ <WalletBalancePanel
+   walletKeys={selectedWallets}                // harmless if unused
+   fetchWalletBalance={fetchWalletBalance}     // keep if you need it later
+   onWalletSwitched={(pubkey) => {
+     if (!pubkey) return;
+     setSelectedWallets([pubkey]);             // keep app-level pubkey in sync
+     fetchWalletBalance(pubkey);               // refresh balance immediately
+   }}
+ />
+ </div>
 
       {/* Config Panel */}
       <div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow space-y-3">

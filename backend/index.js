@@ -170,6 +170,10 @@ if (modeFromCLI) {
 
   const app = express();
 
+
+  // Kill ETag generation so /api responses never 304 by validator
+app.set('etag', false);
+
   // Subscribe to risk engine kill events. When a user breaches a risk limit
   // the risk engine emits a 'kill' event. We relay this as a notification
   // so the user sees an alert in their preferred channels. This is set up

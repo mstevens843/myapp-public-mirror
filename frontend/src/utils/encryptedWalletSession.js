@@ -1,9 +1,8 @@
 // src/utils/encryptedWalletSession.js
-// Default to empty string when VITE_API_BASE_URL is not defined.  Leaving
+// Default to empty string when VITE_API_BASE_URL is not defined. Leaving
 // this undefined will produce literal "undefined/..." URLs at runtime.
 const BASE = import.meta.env.VITE_API_BASE_URL || "";
-import { supabase } from "@/lib/supabase";
-import Cookies from "js-cookie";
+
 import { authFetch } from "./authFetch";
 
 /** ─────────────────────────────────────────────────────────────
@@ -13,7 +12,7 @@ import { authFetch } from "./authFetch";
 export async function checkVaultBalance(payload) {
   try {
     // Use authFetch so cookies and CSRF tokens are automatically sent.
-    const res = await authFetch(`${BASE}/api/auth/vault-balance`, {
+    const res = await authFetch(`/api/auth/vault-balance`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -40,18 +39,19 @@ export async function checkVaultBalance(payload) {
 /** ─────────────────────────────────────────────────────────────
  * Encrypted Wallet Session (Arm-to-Trade) client
  * Backend routes are assumed to live under /api/arm-encryption/*.
- * For the new Return Balance feature you mentioned you moved into an
- * "arm sessions" area, we try both route families so the frontend
- * works regardless of where you mounted them:
- *    /api/arm-sessions/return-balance/*
- *    /api/arm-encryption/return-balance/* (or /auto-return/* legacy)
+ * For the new Auto-Return feature we try both the current endpoints and
+ * legacy aliases so the frontend works regardless of where they’re mounted.
  * ──────────────────────────────────────────────────────────── */
 
 async function httpJson(path, init = {}) {
   const res = await authFetch(path, init);
   const text = await res.text();
   let data = null;
-  try { data = JSON.parse(text); } catch { /* leave as null */ }
+  try {
+    data = JSON.parse(text);
+  } catch {
+    /* leave as null */
+  }
   if (!res.ok) {
     const msg = data?.error || res.statusText || "Request failed";
     throw new Error(msg);
@@ -81,15 +81,15 @@ export async function getArmStatus(walletId) {
 export async function armEncryptedWallet({
   walletId,
   passphrase,
-  twoFactorToken,               // 2FA code (middleware typically expects req.body.twoFactorToken)
-  ttlMinutes,                   // optional; backend clamps/defaults
-  migrateLegacy = false,        // set true to upgrade legacy colon-hex on the fly
+  twoFactorToken, // 2FA code (middleware typically expects req.body.twoFactorToken)
+  ttlMinutes, // optional; backend clamps/defaults
+  migrateLegacy = false, // set true to upgrade legacy colon-hex on the fly
   applyToAll = false,
   passphraseHint,
   forceOverwrite = false,
   // ── NEW: Auto-Return at session end
-  autoReturnOnEnd = false,      // checkbox in Arm modal
-  autoReturnDest,               // optional override of saved safe wallet pubkey
+  autoReturnOnEnd = false, // checkbox in Arm modal
+  autoReturnDest, // optional override of saved safe wallet pubkey
 }) {
   const payload = {
     walletId,
@@ -100,7 +100,7 @@ export async function armEncryptedWallet({
   };
   // Only include optional params if defined to avoid overwriting defaults
   if (applyToAll) payload.applyToAll = true;
-  if (typeof passphraseHint === 'string' && passphraseHint.trim() !== '') {
+  if (typeof passphraseHint === "string" && passphraseHint.trim() !== "") {
     payload.passphraseHint = passphraseHint;
   }
   if (forceOverwrite) payload.forceOverwrite = true;
@@ -139,7 +139,7 @@ export async function disarmEncryptedWallet({ walletId, twoFactorToken }) {
 }
 
 /**
- * Set up pass‑phrase protection for a wallet.
+ * Set up pass-phrase protection for a wallet.
  *
  * This helper calls the backend endpoint that upgrades an unprotected or
  * legacy wallet to use envelope encryption with the provided passphrase.
@@ -168,7 +168,7 @@ export async function setupWalletProtection({
 }
 
 /**
- * Remove pass‑phrase protection from a wallet.  The caller must supply
+ * Remove pass-phrase protection from a wallet. The caller must supply
  * the walletId and the current passphrase.
  */
 export async function removeWalletProtection({ walletId, passphrase }) {
@@ -191,17 +191,43 @@ export async function setRequireArmToTrade(requireArm) {
 
 // ──────────────────────────────────────────────────────────────
 // NEW: Auto-Return (Return Balance) helpers
-// We try both "arm-sessions" and "arm-encryption" families so you're covered.
+// Current server routes: GET /api/arm-encryption/status
+//                        POST /api/arm-encryption/setup
+// Keep legacy aliases as fallbacks to avoid breaking older backends.
 // ──────────────────────────────────────────────────────────────
 
-const RB_SETTINGS_PATHS = [
-  "/api/arm-sessions/return-balance/settings",
+const RB_GET_PATHS = [
+  "/api/arm-encryption/status",
+  "/api/arm-encryption/auto-return/settings",     // try this sooner
   "/api/arm-encryption/return-balance/settings",
-  "/api/arm-encryption/auto-return/settings",
+  "/api/arm-sessions/return-balance/settings",
+];
+
+const RB_SET_PATHS = [
+  "/api/arm-encryption/setup",
+  "/api/arm-encryption/auto-return/settings",     // try this sooner
+  "/api/arm-encryption/return-balance/settings",
+  "/api/arm-sessions/return-balance/settings",
 ];
 
 export async function getAutoReturnSettings() {
-  return httpJsonTry(RB_SETTINGS_PATHS, { method: "GET" });
+  const raw = await httpJsonTry(RB_GET_PATHS, { method: "GET" });
+  // Normalize to { destPubkey, defaultEnabled } for the UI
+  const dest =
+    raw?.destPubkey ??
+    raw?.autoReturnDestPubkey ?? // server field name
+    raw?.destination ??
+    raw?.dest ??
+    "";
+  const enabled =
+    (typeof raw?.defaultEnabled === "boolean" ? raw.defaultEnabled : undefined) ??
+    (typeof raw?.enabled === "boolean" ? raw.enabled : undefined) ??
+    (typeof raw?.autoReturnEnabledDefault === "boolean"
+      ? raw.autoReturnEnabledDefault
+      : undefined) ??
+    false;
+
+  return { destPubkey: dest, defaultEnabled: !!enabled };
 }
 
 /**
@@ -211,8 +237,12 @@ export async function getAutoReturnSettings() {
 export async function saveAutoReturnSettings({ destPubkey, defaultEnabled }) {
   const body = {};
   if (typeof destPubkey === "string") body.destPubkey = destPubkey;
-  if (typeof defaultEnabled === "boolean") body.defaultEnabled = defaultEnabled;
-  return httpJsonTry(RB_SETTINGS_PATHS, {
+  // Support both shapes: legacy expects defaultEnabled; current `/setup` expects enabled
+  if (typeof defaultEnabled === "boolean") {
+    body.defaultEnabled = defaultEnabled;
+    body.enabled = defaultEnabled;
+  }
+  return httpJsonTry(RB_SET_PATHS, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -223,7 +253,9 @@ export async function saveAutoReturnSettings({ destPubkey, defaultEnabled }) {
 export function formatCountdown(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60).toString().padStart(2, "0");
+  const m = Math.floor((s % 3600) / 60)
+    .toString()
+    .padStart(2, "0");
   const ss = (s % 60).toString().padStart(2, "0");
   return `${h}:${m}:${ss}`;
 }

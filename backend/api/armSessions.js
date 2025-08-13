@@ -916,28 +916,21 @@ router.post(
  * are exposed.  If no configuration exists the result may contain null
  * values or omitted fields.
  */
-router.get('/status', async (req, res) => {
-  try {
+ router.get('/status', requireAuth, async (req, res) => {
+   try {
     const user = await prisma.user.findUnique({
-      where: { id: req.user.id },
-      select: {
+       where: { id: req.user.id },
+       select: {
         autoReturnEnabledDefault: true,
         autoReturnDestPubkey: true,
-        autoReturnDestVerifiedAt: true,
-        autoReturnGraceSeconds: true,
-        autoReturnSweepTokens: true,
-        autoReturnSolMinKeepLamports: true,
-        autoReturnFeeBufferLamports: true,
-        autoReturnExcludeMints: true,
-        autoReturnUsdcMints: true,
-      },
-    });
-    return res.json(user || {});
-  } catch (err) {
-    console.error('autoReturn GET status error:', err);
-    res.status(500).json({ error: 'Failed to load auto‑return status' });
-  }
-});
+       },
+     });
+     return res.json(user || {});
+   } catch (err) {
+     console.error('autoReturn GET status error:', err);
+     res.status(500).json({ error: 'Failed to load auto-return status' });
+   }
+ });
 
 /**
  * POST /api/auto-return/setup
@@ -948,7 +941,7 @@ router.get('/status', async (req, res) => {
  * immediately; a real implementation should perform a tiny test transfer
  * and require a signature/2FA challenge before persisting the change.
  */
-router.post('/setup', async (req, res) => {
+router.post('/setup', requireAuth, async (req, res) => {
   const {
     enabled,
     destPubkey,
@@ -988,6 +981,31 @@ router.post('/setup', async (req, res) => {
     res.status(500).json({ error: 'Failed to update auto‑return settings' });
   }
 });
+
+
+// Aliases for legacy FE paths
+router.get('/auto-return/settings', requireAuth, async (req, res) => {
+  const u = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { autoReturnEnabledDefault: true, autoReturnDestPubkey: true },
+  });
+  return res.json({
+    destPubkey: u?.autoReturnDestPubkey || "",
+    defaultEnabled: !!u?.autoReturnEnabledDefault,
+  });
+});
+
+router.post('/auto-return/settings', requireAuth, async (req, res) => {
+  const { destPubkey, defaultEnabled, enabled } = req.body || {};
+  const patch = {};
+  if (destPubkey !== undefined) patch.autoReturnDestPubkey = destPubkey;
+  if (defaultEnabled !== undefined || enabled !== undefined) {
+    patch.autoReturnEnabledDefault = !!(defaultEnabled ?? enabled);
+  }
+  await prisma.user.update({ where: { id: req.user.id }, data: patch });
+  res.json({ ok: true });
+});
+
 
 module.exports = router;
 

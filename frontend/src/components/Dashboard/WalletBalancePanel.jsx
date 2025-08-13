@@ -32,7 +32,7 @@ import {
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const SOL_MINT  = "So11111111111111111111111111111111111111112";
 
-export default function WalletBalancePanel() {
+export default function WalletBalancePanel({ onWalletSwitched }) {
   const [net, setNet] = useState(null);
   const [open, setOpen] = useState({ count: 0, value: 0 });
   const [loading, setLoading] = useState(false);
@@ -69,12 +69,30 @@ export default function WalletBalancePanel() {
   }, []);
 
   /* ---------------- Balances / open trades ---------------- */
-  const fetchNetAndOpen = async () => {
-    try {
-      setLoading(true);
-      const wJson = await getWalletNetworth(); // backend should respect active wallet
-      const allTrades = await getOpenTrades();
-      const trades = allTrades.filter((t) => !STABLE_MINTS.has(t.mint));
+const fetchNetAndOpen = async () => {
+  setLoading(true);
+  try {
+    // Run both in parallel, but don't let trades failure kill the panel
+    const [netRes, openRes] = await Promise.allSettled([
+      getWalletNetworth(),
+      getOpenTrades({ take: 100, skip: 0 }),
+    ]);
+
+    if (netRes.status === "fulfilled") {
+      setNet(netRes.value);
+    } else {
+      console.error("❌ networth fetch failed:", netRes.reason);
+      toast.error("Could not refresh net worth.");
+    }
+
+    if (openRes.status === "fulfilled") {
+      const STABLE_MINTS = new Set([
+        USDC_MINT,
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+        "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",
+        "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT",
+      ]);
+      const trades = openRes.value.filter((t) => !STABLE_MINTS.has(t.mint));
 
       let totalUSD = 0;
       await Promise.all(
@@ -84,30 +102,27 @@ export default function WalletBalancePanel() {
             try {
               const price = await fetchCurrentPrice(t.mint);
               usd = price * Number(t.outAmount ?? 0) / 10 ** (t.decimals ?? 9);
-            } catch {
-              usd = 0;
-            }
+            } catch { usd = 0; }
           }
           totalUSD += usd;
         })
       );
-
-      setNet(wJson);
       setOpen({ count: trades.length, value: +totalUSD.toFixed(2) });
-    } catch (err) {
-      console.error("❌ net/open fetch:", err);
-      toast.error("Could not refresh balances.");
-    } finally {
-      setLoading(false);
+    } else {
+      console.warn("⚠️ open trades fetch failed:", openRes.reason);
+      setOpen({ count: 0, value: 0 }); // don't block the panel
     }
-  };
+  } finally {
+    setLoading(false);
+  }
+};
 
   // initial + whenever wallet changes
   useEffect(() => {
     if (activeWalletId != null) fetchNetAndOpen();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWalletId]);
-
+ 
   /* ---------------- Wallet switch handler ---------------- */
   const handleSwitchWallet = async (id) => {
     if (id === activeWalletId) return;
@@ -119,6 +134,19 @@ export default function WalletBalancePanel() {
         const label =
           wallets.find((w) => w.id === id)?.label || `Wallet ${id}`;
         toast.success(`Active wallet: ${label}`);
+       // 🔁 Notify parent with the new pubkey so App.jsx updates selectedWallets
+       let pk = wallets.find((w) => w.id === id)?.publicKey;
+       if (!pk) {
+         // fallback: refresh wallet list and try again
+         try {
+           const ws = (await loadWallet()) || [];
+           setWallets(ws);
+           pk = ws.find((w) => w.id === id)?.publicKey;
+         } catch {}
+       }
+       if (pk && typeof onWalletSwitched === "function") {
+         onWalletSwitched(pk);
+       }
       } else {
         toast.error("Failed to set active wallet.");
       }
