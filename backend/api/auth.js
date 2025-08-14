@@ -513,6 +513,7 @@ router.get("/me", requireAuth, async (req, res) => {
             label: true,
             publicKey: true,
             isProtected: true,
+            passphraseHint: true, 
           },
         },
         userPreferences: {
@@ -528,7 +529,7 @@ router.get("/me", requireAuth, async (req, res) => {
     const activeWallet = user.activeWalletId
       ? await prisma.wallet.findUnique({
           where:{ id: user.activeWalletId },
-          select:{ id:true, label:true, publicKey:true }
+          select:{ id:true, label:true, publicKey:true, passphraseHint:true, isProtected:true }
         })
       : null;
 

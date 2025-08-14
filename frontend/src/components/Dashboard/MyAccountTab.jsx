@@ -3,10 +3,12 @@
  * - Clean Duration dropdown (shadcn Select, dark themed)
  * - Custom minutes in Arm modal (+ validation ≥1, no max)
  * - Armed banner “Extend time…” dialog for custom extension
- * - “Forgot pass-phrase? View hint” (tooltip + optional inline fallback)
+ * - “Forgot pass-phrase? View hint” (CLICK-ONLY tooltip + optional inline fallback)
+ * - Inline Tooltip components (no external import) — click to toggle; no hover/auto-open
+ * - FIX: Never show email/password for Web3 users (robust detection)
  * ------------------------------------------------------------------ */
 
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useContext, useMemo } from "react";
 import { toast } from "sonner";
 import { Info, CheckCircle, Shield, Timer, Lock, Unlock, Send, Eye, EyeOff } from "lucide-react";
 import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog";
@@ -17,7 +19,6 @@ import confetti from "canvas-confetti";
 import {
   getProfile,
   updateProfile,
-  changePassword,
   deleteAccount,
 } from "@/utils/account";
 import { getSubscriptionStatus } from "@/utils/payments";
@@ -25,7 +26,7 @@ import { enable2FA, disable2FA, verify2FA } from "../../utils/2fa";
 import { useUser } from "@/contexts/UserProvider";
 import { supabase } from "@/lib/supabase";
 // NOTE: import apiFetch (with in-flight dedupe) for /auth/me
-import { authFetch, apiFetch } from "@/utils/authFetch";
+import { apiFetch } from "@/utils/authFetch";
 
 // 🔐 Encrypted Wallet Session helpers (+ Return Balance helpers)
 import {
@@ -52,13 +53,98 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-/* shadcn Tooltip */
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-  TooltipProvider,
-} from "@/components/ui/tooltip";
+/* ---------------------- INLINE TOOLTIP (no imports) ---------------------- */
+/* CLICK-ONLY: Opens on click/Enter/Space, closes on click-away or Escape */
+const TooltipConfigContext = React.createContext({ delay: 0 });
+const TooltipInstanceContext = React.createContext(null);
+
+const TooltipProvider = ({ delayDuration = 0, children }) => (
+  <TooltipConfigContext.Provider value={{ delay: delayDuration }}>
+    {children}
+  </TooltipConfigContext.Provider>
+);
+
+const Tooltip = ({ children }) => {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef(null);
+
+  // Click-away to close
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (containerRef.current && !containerRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+
+  return (
+    <TooltipInstanceContext.Provider value={{ open, setOpen }}>
+      <span ref={containerRef} className="relative inline-flex items-center">{children}</span>
+    </TooltipInstanceContext.Provider>
+  );
+};
+
+const TooltipTrigger = ({ asChild = false, children, ...props }) => {
+  const inst = useContext(TooltipInstanceContext);
+
+  if (!inst) {
+    return asChild && React.isValidElement(children) ? children : <span>{children}</span>;
+  }
+
+  const { open, setOpen } = inst;
+
+  const handlers = {
+    onClick: (e) => {
+      props.onClick?.(e);
+      setOpen(!open);
+    },
+    onKeyDown: (e) => {
+      props.onKeyDown?.(e);
+      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        setOpen((v) => !v);
+      }
+    },
+  };
+
+  if (asChild && React.isValidElement(children)) {
+    const childProps = { ...children.props, ...handlers };
+    return React.cloneElement(children, childProps);
+  }
+
+  return (
+    <span
+      {...handlers}
+      role="button"
+      tabIndex={0}
+      className="inline-flex items-center"
+    >
+      {children}
+    </span>
+  );
+};
+
+const TooltipContent = ({ children, className = "" }) => {
+  const inst = useContext(TooltipInstanceContext);
+  if (!inst || !inst.open) return null;
+
+  return (
+    <div
+      role="tooltip"
+      className={
+        "absolute top-full left-1/2 -translate-x-1/2 z-50 mt-2 rounded bg-zinc-900 text-white px-2 py-1 text-xs border border-zinc-700 shadow-lg " +
+        className
+      }
+    >
+      {children}
+    </div>
+  );
+};
+/* -------------------- END INLINE TOOLTIP (no imports) -------------------- */
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -106,6 +192,7 @@ const MyAccountTab = () => {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [globalPassHint, setGlobalPassHint] = useState("");
 
   // 🔐 Protected Mode + Arm modal state
   const [requireArm, setRequireArm] = useState(false);
@@ -145,31 +232,53 @@ const MyAccountTab = () => {
   const [extendCustomMinutes, setExtendCustomMinutes] = useState(120);
 
   /* ───────── Derived helpers ───────── */
-  const { type, phantomPublicKey, refreshProfile, passphraseHint, loading: userLoading } = useUser();
-  const isWeb3 = type === "web3" || !!phantomPublicKey;
+  const {
+    type,
+    phantomPublicKey,
+    refreshProfile,
+    passphraseHint: globalHintFromCtx,
+    activeWallet: ctxActiveWallet,
+    wallets: ctxWallets = [],
+    loading: userLoading,
+  } = useUser();
 
-  // Determine whether current wallet has protection
-  const [activeWalletHasPassphrase, setActiveWalletHasPassphrase] = useState(false);
+  // Gather an authoritative session "type" directly from auth to avoid flicker or mismatches
+  const [sessionType, setSessionType] = useState(null);
 
+  // Robust Web3 detection — covers multiple provider labels and prevents showing email/password for Web3
+  const isWeb3Account = useMemo(() => {
+    const tx = ((sessionType || type || "") + "").toLowerCase();
+    const inferred =
+      tx.includes("web3") ||
+      tx.includes("wallet") ||
+      tx.includes("phantom") ||
+      tx.includes("solana") ||
+      tx.includes("crypto");
+    return inferred || !!phantomPublicKey;
+  }, [sessionType, type, phantomPublicKey]);
+
+  // If we ever switch to Web3 in-session, make sure the password form is closed
   useEffect(() => {
-    setActiveWalletHasPassphrase(
-      !!(
-        activeWallet?.hasPassphrase ||
-        (activeWallet?.passphraseHash !== null &&
-          activeWallet?.passphraseHash !== undefined) ||
-        activeWallet?.isProtected
-      )
-    );
-  }, [activeWallet]);
+    if (isWeb3Account) setShowPasswordForm(false);
+  }, [isWeb3Account]);
 
-  const armMode =
-    !activeWalletHasPassphrase && !hasGlobalPassphrase ? "firstTime" : "existing";
+  // Determine protection using context wallets (they include isProtected from /auth/me)
+  const activeId = activeWallet?.id ?? ctxActiveWallet?.id ?? null;
+  const ctxActiveIsProtected = useMemo(
+    () => !!ctxWallets.find((w) => w.id === activeId)?.isProtected,
+    [ctxWallets, activeId]
+  );
+  const armMode = (ctxActiveIsProtected || hasGlobalPassphrase) ? "existing" : "firstTime";
 
   // Prefer wallet-specific hint; fall back to user-level hint
   const effectiveHint =
-    (activeWallet?.passphraseHint && String(activeWallet.passphraseHint).trim()) ||
-    (passphraseHint && String(passphraseHint).trim()) ||
-    "";
+    (String(activeWallet?.passphraseHint ?? ctxActiveWallet?.passphraseHint ?? "").trim()) ||
+    (String(globalHintFromCtx ?? globalPassHint ?? "").trim());
+
+  const activeProtected = useMemo(() => {
+    const w = activeWallet;
+    return !!(w?.isProtected || w?.hasPassphrase || w?.passphraseHash != null);
+  }, [activeWallet]);
 
   // Handle "Use for ALL wallets" confirmation
   const handleUseForAllToggle = (checked) => {
@@ -219,8 +328,8 @@ const MyAccountTab = () => {
         fetchActiveWallet(),
       ]);
 
-      // Force-clear web fields if this is a Web3 session.
-      if (isWeb3) {
+      // Force-clear web fields if this is a Web3 session (prevents accidental rendering)
+      if (isWeb3Account) {
         if (profileData) {
           profileData.email = null;
           profileData.username = null;
@@ -252,26 +361,70 @@ const MyAccountTab = () => {
       setLoading(false);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isWeb3]); // re-run if type flips to web3 after mount
+  }, [isWeb3Account]); // re-run if type flips to web3 after mount
 
-  // Extended auth info (2FA toggles, global passphrase) + auto-return settings
   useEffect(() => {
     (async () => {
       try {
         // Use apiFetch for /auth/me to dedupe and avoid 429 retry storms
         const data = await apiFetch("/api/auth/me", { method: "GET", retry: 0 });
         const u = data?.user;
+
+        // Robust session-type for Web3 detection
+        const ut = String(
+          u?.type ||
+            u?.user_metadata?.type ||
+            u?.user_metadata?.loginType ||
+            u?.loginType ||
+            ""
+        );
+        setSessionType(ut);
+
         if (u) {
           setIs2FAEnabled(!!u.is2FAEnabled);
           setRequire2faLogin(!!u.require2faLogin);
           setRequire2faArm(!!u.require2faArm);
           setRequireArm(!!u.requireArmToTrade);
           setHasGlobalPassphrase(!!u.hasGlobalPassphrase);
+
+          // 🔑 Global pass-phrase hint (user-level)
+          setGlobalPassHint(u.passphraseHint || "");
+        }
+
+        // Merge the *active wallet* hint into local state
+        if (data?.activeWallet?.id) {
+          const apiAW = data.activeWallet; // { id, label, publicKey, passphraseHint, ... }
+          setActiveWallet((prev) => {
+            if (!prev) return apiAW; // if we didn't have one yet, use the API one
+            if (prev.id !== apiAW.id) return prev; // don't flip selection silently
+            // same wallet: merge the hint in
+            return {
+              ...prev,
+              passphraseHint:
+                apiAW.passphraseHint ?? prev.passphraseHint ?? null,
+            };
+          });
+        }
+
+        // (Optional) merge hints for wallets list if /me includes passphraseHint
+        if (Array.isArray(data?.wallets) && data.wallets.length) {
+          setWallets((prev) =>
+            prev.map((w) => {
+              const fromApi = data.wallets.find((b) => b.id === w.id);
+              if (!fromApi) return w;
+              const hasKey = Object.prototype.hasOwnProperty.call(
+                fromApi,
+                "passphraseHint"
+              );
+              return hasKey ? { ...w, passphraseHint: fromApi.passphraseHint } : w;
+            })
+          );
         }
       } catch (err) {
         console.error("/api/auth/me failed:", err?.message || err);
       }
 
+      // Auto-Return settings (no-op if endpoint missing)
       try {
         const settings = await getAutoReturnSettings();
         if (settings) {
@@ -281,7 +434,6 @@ const MyAccountTab = () => {
           setArmAutoReturn(!!settings.defaultEnabled);
         }
       } catch (err) {
-        // if endpoint missing that's fine; user can still arm without it
         console.warn("Auto-Return settings not available:", err?.message);
       }
     })();
@@ -347,6 +499,11 @@ const MyAccountTab = () => {
   };
 
   const handleChangePassword = async () => {
+    // Extra guard: do not allow password edits in Web3 sessions
+    if (isWeb3Account) {
+      return toast.error("Password changes are only for Web accounts.");
+    }
+
     if (!currentPassword || !newPassword || !confirmPassword)
       return toast.error("Fill out every password field.");
     if (newPassword !== confirmPassword) return toast.error("New passwords do not match.");
@@ -361,7 +518,7 @@ const MyAccountTab = () => {
         return toast.error("Failed to verify user session.");
       }
 
-      const userType = user.user_metadata?.type || "web";
+      const userType = (user.user_metadata?.type || "").toLowerCase();
       if (userType !== "web") {
         return toast.error("Password changes are only supported for Web accounts.");
       }
@@ -671,7 +828,7 @@ const MyAccountTab = () => {
 
   /* ─────────── UI ─────────── */
   return (
-    <TooltipProvider delayDuration={200}>
+    <TooltipProvider delayDuration={0}>
       <div className="container mx-auto p-6 bg-black text-white">
         {/* Banner */}
         <div className="bg-emerald-600 text-black p-4 rounded-lg mb-6 flex items-center gap-3">
@@ -760,7 +917,7 @@ const MyAccountTab = () => {
             <h3 className="text-lg font-semibold">Profile Information</h3>
             <div className="mt-2 space-y-2">
               {/* Web-only fields */}
-              {!isWeb3 && (
+              {!isWeb3Account && (
                 <>
                   <label>Email (read-only)</label>
                   <input type="email" value={profile.email || ""} disabled className="w-full p-2 rounded" />
@@ -775,7 +932,7 @@ const MyAccountTab = () => {
               )}
 
               {/* Web3-only Phantom pubkey with eye toggle */}
-              {isWeb3 && (
+              {isWeb3Account && (
                 <>
                   <label>Phantom Wallet</label>
                   <div className="flex justify-between items-center bg-zinc-900 border border-zinc-700 p-2 rounded font-mono text-xs text-emerald-400">
@@ -805,7 +962,7 @@ const MyAccountTab = () => {
                 </>
               )}
 
-              {!isWeb3 && (
+              {!isWeb3Account && (
                 <Button onClick={handleSaveProfile} className="mt-2 bg-emerald-600 text-white">
                   Save Profile
                 </Button>
@@ -814,7 +971,7 @@ const MyAccountTab = () => {
           </div>
 
           {/* ───────── Change Password (web only) ───────── */}
-          {!isWeb3 && (
+          {!isWeb3Account && (
             <div className="bg-zinc-800 p-4 rounded-lg">
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-semibold">Change Password</h3>
@@ -878,7 +1035,7 @@ const MyAccountTab = () => {
               </h3>
 
               {/* NEW: Auto-Return Setup button (top-right of the card) */}
-              {(activeWalletHasPassphrase || hasGlobalPassphrase) && (
+              {(ctxActiveIsProtected || hasGlobalPassphrase) && (
                 <Button
                   variant="outline"
                   className="text-emerald-300 border-emerald-600 hover:bg-emerald-900/20"
@@ -900,7 +1057,7 @@ const MyAccountTab = () => {
             </p>
 
             {/* subtle status row for auto-return */}
-            {(activeWalletHasPassphrase || hasGlobalPassphrase) && (
+            {(ctxActiveIsProtected || hasGlobalPassphrase) && (
               <div className="mt-3 text-xs text-zinc-400">
                 Auto-Return:{" "}
                 {autoReturnConfigured ? (
@@ -916,7 +1073,7 @@ const MyAccountTab = () => {
 
             <div className="mt-3 flex items-center justify-between">
               <div className="text-sm flex items-center">
-                {(activeWalletHasPassphrase || hasGlobalPassphrase) ? (
+                {(ctxActiveIsProtected || hasGlobalPassphrase) ? (
                   <Button
                     variant="ghost"
                     className="text-red-400 bg-red-500/10 text-xs px-2 py-1"
@@ -1045,7 +1202,7 @@ const MyAccountTab = () => {
                             <button
                               type="button"
                               className="text-xs text-emerald-400 hover:underline"
-                              onClick={() => setShowHint((v) => !v)} // mobile-friendly fallback
+                              onClick={() => setShowHint((v) => !v)} // inline fallback toggle; tooltip opens via click too
                               aria-label="Forgot pass-phrase? Check hint"
                             >
                               Forgot pass-phrase? Check hint
@@ -1260,7 +1417,7 @@ const MyAccountTab = () => {
                         <button
                           type="button"
                           className="text-xs text-emerald-400 hover:underline"
-                          onClick={() => setShowHint((v) => !v)} // mobile-friendly fallback
+                          onClick={() => setShowHint((v) => !v)} // inline fallback toggle; tooltip opens via click too
                           aria-label="Forgot pass-phrase? Check hint"
                         >
                           Forgot pass-phrase? Check hint
