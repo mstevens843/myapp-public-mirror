@@ -1,306 +1,242 @@
-/**
- * useSingleLogsSocket.jsx
- * ------------------------------------------------------------------
- * What changed
- *  - StrictMode-proof singleton: one owner manages the socket; cleanup
- *    during dev remounts does NOT close the connection.
- *  - Removed idle "stale" reaper so an otherwise healthy, quiet socket
- *    isn't closed every 30s (which caused 1006 churn).
- *  - Kept robust WS URL resolution + diagnostics and exponential backoff.
- *  - Uses addEventListener to avoid handler clobbering across mounts.
- *  - Runtime override: window.__SET_LOGS_WS__(url) to force a URL.
- *
- * Why
- *  - React 18 StrictMode mounts, unmounts, remounts effects in dev.
- *    Tearing the socket down in cleanup yields “closed before established”
- *    and repeated 1006 codes even when the server accepted the upgrade.
- *
- * Risk addressed
- *  - Spurious WS closes in dev and churn when logs are idle.
- * ------------------------------------------------------------------ */
+// src/hooks/useSingleLogsSocket.jsx
+// Stable URL resolution (uses VITE_WS_BASE_URL or VITE_API_BASE_URL origin + VITE_WS_PATH),
+// StrictMode-proof singleton ownership (no premature close on cleanup),
+// exponential backoff with cap, rotate candidates on policy-ish close codes,
+// single toast after max attempts, runtime override via window.__SET_LOGS_WS__(url)
 
 import { useEffect, useRef } from "react";
-import { useLogsStore } from "@/state/LogsStore";
-import { toast } from "react-toastify";
-import { triggerBuyAnimation } from "@/utils/tradeFlash";
-import { useFeatureFlags } from "@/contexts/FeatureFlagContext";
+import { toast } from "sonner";
 
-/* --------------------------- URL resolution --------------------------- */
+/* ====================== URL resolution helpers ====================== */
 
 function getOriginFromApiBase() {
-  const apiBase = import.meta.env.VITE_API_BASE_URL;
-  // If API base is provided, take its origin; else use current origin.
+  const apiBase = import.meta?.env?.VITE_API_BASE_URL;
   if (apiBase) {
     try {
-      const url = new URL(apiBase, window.location.origin);
-      return url.origin; // e.g. http://localhost:5001
+      const u = new URL(apiBase, window.location.origin);
+      return u.origin; // e.g., http://localhost:5001
     } catch {
-      // If apiBase was something like "http://localhost:5001/api"
-      // and URL() failed due to bad input, fall back to string parsing.
-      try {
-        const m = apiBase.match(/^[a-z]+:\/\/[^/]+/i);
-        if (m) return m[0];
-      } catch {}
+      const m = String(apiBase).match(/^[a-z]+:\/\/[^/]+/i);
+      if (m) return m[0];
     }
   }
-  return window.location.origin; // e.g. http://localhost:5173 (vite)
+  return window.location.origin; // fallback: vite origin (http://localhost:5173) if nothing else
 }
 
-const toWsUrl = (httpishUrl) => httpishUrl.replace(/^http/i, "ws");
-const joinPath = (base, path) => `${base}${path.startsWith("/") ? path : `/${path}`}`;
+function toWsUrl(httpish) {
+  try {
+    const u = new URL(httpish, window.location.origin);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    return u.toString();
+  } catch {
+    return String(httpish).replace(/^http/i, "ws");
+  }
+}
+
+function joinPath(base, path) {
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 /**
- * Compute an ordered list of candidate WebSocket URLs to try.
+ * Compute prioritized candidate WS URLs.
  * Priority:
- *  1) VITE_WS_BASE_URL if it looks like a full ws(s):// URL
- *  2) VITE_WS_BASE_URL if it’s http(s):// (convert to ws(s)://)
- *  3) Origin-from-API + VITE_WS_PATH (default "/ws/logs")
- *  4) Origin-from-API + "/logs"
- *  5) Origin-from-API + "/ws"
+ *  1) VITE_WS_BASE_URL if full ws(s)://
+ *  2) VITE_WS_BASE_URL if http(s):// (convert to ws(s)://)
+ *  3) origin(VITE_API_BASE_URL) + VITE_WS_PATH (default /ws/logs)
+ *  4) origin(VITE_API_BASE_URL) + "/logs"
+ *  5) origin(VITE_API_BASE_URL) + "/ws"
  */
 function computeCandidateWsUrls() {
-  const candidates = [];
+  const out = [];
 
-  const explicit = import.meta.env.VITE_WS_BASE_URL;
+  const explicit = import.meta?.env?.VITE_WS_BASE_URL;
   if (explicit) {
     try {
       const u = new URL(explicit, window.location.origin);
-      if (u.protocol.startsWith("ws")) {
-        candidates.push(u.toString());
-        return candidates;
-      }
-      if (u.protocol.startsWith("http")) {
-        candidates.push(toWsUrl(u.toString()));
-        return candidates;
-      }
+      if (u.protocol.startsWith("ws")) return [u.toString()];
+      if (u.protocol.startsWith("http")) return [toWsUrl(u.toString())];
     } catch {
-      // If explicit is a bare string that URL() can’t parse, try basic replace
-      if (/^ws(s)?:\/\//i.test(explicit)) {
-        candidates.push(explicit);
-        return candidates;
-      }
-      if (/^http(s)?:\/\//i.test(explicit)) {
-        candidates.push(toWsUrl(explicit));
-        return candidates;
-      }
+      if (/^ws(s)?:\/\//i.test(explicit)) return [explicit];
+      if (/^http(s)?:\/\//i.test(explicit)) return [toWsUrl(explicit)];
     }
   }
 
-  const origin = getOriginFromApiBase(); // http(s)://host[:port]
-  const wsOrigin = toWsUrl(origin);      // ws(s)://host[:port]
-  const path = import.meta.env.VITE_WS_PATH || "/ws/logs";
+  const httpOrigin = getOriginFromApiBase(); // prefer backend (e.g., http://localhost:5001)
+  const wsOrigin = toWsUrl(httpOrigin);
+  const path = import.meta?.env?.VITE_WS_PATH || "/ws/logs";
 
-  candidates.push(joinPath(wsOrigin, path)); // primary
-  candidates.push(joinPath(wsOrigin, "/logs"));
-  candidates.push(joinPath(wsOrigin, "/ws"));
+  out.push(joinPath(wsOrigin, path));
+  out.push(joinPath(wsOrigin, "/logs"));
+  out.push(joinPath(wsOrigin, "/ws"));
 
-  return candidates;
+  return out;
 }
 
-/* ----------------------- Singleton & StrictMode guard ----------------------- */
+/* ====================== Singleton + ownership ====================== */
 
-// Global singleton socket shared across all hook instances
-let socket = null;
-// Which hook instance “owns” lifecycle decisions
-let socketOwnerId = null;
-// Optional runtime URL override
-let overrideUrl = null;
+let SOCKET = null;           // shared singleton
+let OWNER_ID = null;         // which hook instance controls lifecycle
+let OVERRIDE_URL = null;     // runtime override
 
-// Expose a debug hook to override the WS URL at runtime (for quick testing)
-// Usage in console: window.__SET_LOGS_WS__("ws://localhost:5001/ws/logs")
+// Handy runtime override in dev:
+//   window.__SET_LOGS_WS__("ws://localhost:5001/ws/logs")
 if (typeof window !== "undefined") {
   window.__SET_LOGS_WS__ = (url) => {
     try {
       const u = new URL(url, window.location.origin);
-      overrideUrl = u.toString();
-      if (socket) {
-        try { socket.close(); } catch {}
-        socket = null;
-      }
-      console.info("[logs-ws] runtime override set ->", overrideUrl);
+      OVERRIDE_URL = u.toString();
+      try { SOCKET?.close(1000, "override"); } catch {}
+      SOCKET = null;
+      console.info("[logs-ws] override set ->", OVERRIDE_URL);
     } catch (e) {
-      console.error("[logs-ws] invalid override URL:", url, e?.message);
+      console.error("[logs-ws] invalid override:", url, e?.message);
     }
   };
-  // Optional extra client-side debugging
   window.__LOGS_WS_DEBUG__ = window.__LOGS_WS_DEBUG__ ?? false;
 }
 
-export default function useSingleLogsSocket() {
-  const push = useLogsStore((s) => s.push);
-  const { flags } = useFeatureFlags();
+/* ====================== Hook ====================== */
 
-  // Per-instance refs
-  const myOwnerIdRef = useRef(`owner-${Math.random().toString(36).slice(2)}`);
+const MAX_BACKOFF_MS = 15000;
+const MAX_ATTEMPTS = 10;
+
+export default function useSingleLogsSocket(flags) {
+  const instIdRef = useRef(`owner-${Math.random().toString(36).slice(2)}`);
   const candidatesRef = useRef([]);
-  const candidateIndexRef = useRef(0);
-  const reconnectAttemptsRef = useRef(0);
-  const lastProcessedRef = useRef(0);
+  const candidateIdxRef = useRef(0);
+  const attemptsRef = useRef(0);
+  const toastShownRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
 
-    const debug = (...args) => {
-      if (typeof window !== "undefined" && window.__LOGS_WS_DEBUG__) {
-        console.debug("[logs-ws]", ...args);
-      }
+    const debug = (...a) => {
+      if (window.__LOGS_WS_DEBUG__) console.debug("[logs-ws]", ...a);
     };
 
-    const currentUrl = () => {
-      if (overrideUrl) return overrideUrl;
-      const list = candidatesRef.current;
-      const i = Math.min(candidateIndexRef.current, list.length - 1);
-      return list[i];
+    const candidates = () => {
+      if (!candidatesRef.current.length) {
+        candidatesRef.current = computeCandidateWsUrls();
+        candidateIdxRef.current = 0;
+        debug("candidates:", candidatesRef.current);
+      }
+      return candidatesRef.current;
     };
+
+    const currentUrl = () => OVERRIDE_URL || candidates()[candidateIdxRef.current];
 
     const advanceCandidate = () => {
-      const list = candidatesRef.current;
-      if (list.length <= 1) return;
-      candidateIndexRef.current = (candidateIndexRef.current + 1) % list.length;
-      debug("advance candidate ->", currentUrl());
+      const list = candidates();
+      if (list.length > 1) {
+        candidateIdxRef.current = (candidateIdxRef.current + 1) % list.length;
+        debug("advance candidate ->", currentUrl());
+      }
     };
 
-    function handleMessage(e) {
-      // Optional throttle
-      if (flags?.logs?.throttle) {
-        const now = Date.now();
-        if (now - lastProcessedRef.current < 10) return; // ~100/s
-        lastProcessedRef.current = now;
+    function wire(sock) {
+      sock.addEventListener("open", () => {
+        debug("open ✅", currentUrl());
+        attemptsRef.current = 0;
+      });
+
+      sock.addEventListener("message", (ev) => {
+        // Keep the hook generic: bubble to app-level listeners.
+        try {
+          window.dispatchEvent(new CustomEvent("logs:message", { detail: ev.data }));
+        } catch {}
+      });
+
+      sock.addEventListener("close", (ev) => {
+        const { code, reason } = ev || {};
+        debug("close", code, reason || "");
+        SOCKET = null;
+
+        // Rotate on common policy/handshake failures
+        if (code === 1006 || code === 1008 || code === 1011 || code === 1015) {
+          advanceCandidate();
+        }
+        if (!cancelled) scheduleReconnect();
+      });
+
+      sock.addEventListener("error", (err) => {
+        debug("error", err?.message || err);
+        // Let 'close' drive reconnection
+      });
+    }
+
+    function scheduleReconnect() {
+      attemptsRef.current += 1;
+      const n = attemptsRef.current;
+
+      if (n >= MAX_ATTEMPTS) {
+        if (!toastShownRef.current) {
+          toastShownRef.current = true;
+          toast("Logs connection failed repeatedly. Pausing retries.", { duration: 5000 });
+        }
+        debug("max attempts reached; giving up");
+        return;
       }
 
-      try {
-        let data = JSON.parse(e.data);
-        if (typeof data === "string") data = JSON.parse(data); // unwrap stringified JSON
-
-        // BUY success UX
-        if (
-          data.line?.includes("[🎆 BOUGHT SUCCESS]") ||
-          data.line?.includes("[🎆 REBALANCE SUCCESS]") ||
-          data.line?.includes("[🎆 SIMULATED BUY]")
-        ) {
-          const txMatch = data.line.match(/Tx: https:\/\/solscan\.io\/tx\/(\w+)/);
-          const txHash = txMatch ? txMatch[1] : null;
-          triggerBuyAnimation();
-          toast.success(
-            <>✅ Auto-buy executed —{txHash ? (
-              <> <a href={`https://solscan.io/tx/${txHash}`} target="_blank" rel="noopener noreferrer">View Tx</a></>
-            ) : (" Tx unknown")}</>
-          );
+      const delay = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** n) + (Math.random() * 500);
+      debug(`reconnect #${n} in ~${Math.round(delay / 1000)}s → ${currentUrl()}`);
+      setTimeout(() => {
+        if (!cancelled && OWNER_ID === instIdRef.current && !SOCKET) {
+          connect();
         }
-
-        // Strategy completed UX
-        if (/completed/i.test(data.line)) {
-          const stratMatch = data.line.match(/(\w+)\scompleted/i);
-          const name = stratMatch ? stratMatch[1] : "Strategy";
-          toast.info(`🤖 ${name} session finished`);
-        }
-
-        const ts = new Date().toLocaleTimeString([], { hour12: false });
-        const text = `[${ts}] ${data.line.trim()}`;
-        push({ ...data, text });
-      } catch {
-        // Server may occasionally emit plain text; ignore parse errors quietly.
-      }
+      }, delay);
     }
 
     function connect() {
-      if (socket) return;
-
-      // Initialize candidates on first run
-      if (!candidatesRef.current.length) {
-        const list = computeCandidateWsUrls();
-        candidatesRef.current = list;
-        candidateIndexRef.current = 0;
-        debug("candidate URLs:", list);
-      }
+      if (SOCKET) return; // already connected/connecting
 
       const url = currentUrl();
       debug("connecting →", url);
       try {
-        socket = new WebSocket(url);
+        SOCKET = new WebSocket(url);
       } catch (e) {
-        console.error("Logs WebSocket ctor error:", e?.message || e);
-        socket = null;
+        debug("ctor error", e?.message || e);
+        SOCKET = null;
         advanceCandidate();
-        scheduleReconnect(true);
+        scheduleReconnect();
         return;
       }
-
-      reconnectAttemptsRef.current = 0;
-
-      // Use addEventListener so multiple mounts don't clobber handlers
-      socket.addEventListener("open", () => {
-        debug("connected ✅", url);
-        reconnectAttemptsRef.current = 0;
-      });
-      socket.addEventListener("message", handleMessage);
-      socket.addEventListener("close", (evt) => {
-        const { code, reason, wasClean } = evt || {};
-        console.warn("Logs WebSocket closed", { url, code, reason, wasClean });
-        socket = null;
-        // Rotate candidate on policy/handshake-ish closings
-        if (code === 1006 || code === 1008 || code === 1011 || code === 1015) {
-          advanceCandidate();
-        }
-        if (!cancelled) scheduleReconnect(false);
-      });
-      socket.addEventListener("error", (err) => {
-        console.error("Logs WebSocket error", err);
-        // Let 'close' drive retries; don't double-handle here.
-      });
+      wire(SOCKET);
     }
 
-    function scheduleReconnect(immediateBump) {
-      reconnectAttemptsRef.current += 1;
-      const attempt = reconnectAttemptsRef.current;
-
-      // Exponential backoff: 1s, 2s, 4s, ... capped at 30s + jitter.
-      const base = Math.min(30000, 1000 * 2 ** attempt);
-      const jitter = 1000 + Math.random() * 4000;
-      const delay = Math.min(30000, base + jitter);
-
-      const url = currentUrl();
-      debug(`reconnect #${attempt} in ~${Math.round(delay / 1000)}s → ${url}`);
-
-      setTimeout(() => {
-        if (!cancelled && socketOwnerId === myOwnerIdRef.current) connect();
-      }, immediateBump ? 250 : delay);
+    // ----- Ownership: only the first mounted instance controls lifecycle -----
+    if (!OWNER_ID) {
+      OWNER_ID = instIdRef.current;
+      debug("claimed ownership");
     }
 
-    // ── Ownership: only the first mounted instance manages lifecycle
-    if (!socketOwnerId) {
-      socketOwnerId = myOwnerIdRef.current;
-      debug("claiming WS ownership");
-    }
-
-    if (socketOwnerId === myOwnerIdRef.current) {
+    if (OWNER_ID === instIdRef.current) {
+      // Only the owner resolves candidates and connects
+      candidates();
       connect();
 
-      // Close cleanly on full page unload (not on StrictMode remounts)
+      // Close on full page unload (not on React StrictMode cleanup)
       const onUnload = () => {
-        try { socket?.close(1000, "unload"); } catch {}
-        socket = null;
-        socketOwnerId = null;
+        try { SOCKET?.close(1000, "unload"); } catch {}
+        SOCKET = null;
+        OWNER_ID = null;
       };
       window.addEventListener("beforeunload", onUnload);
 
       return () => {
         cancelled = true;
         window.removeEventListener("beforeunload", onUnload);
-        // DO NOT close the socket here – prevents React 18 StrictMode dev noise.
-        // Release ownership so a subsequent mount can reclaim it.
+        // Do NOT close socket here (prevents "closed before established" in dev)
+        // Just release ownership so the next mount can take over.
         setTimeout(() => {
-          if (socketOwnerId === myOwnerIdRef.current) {
-            socketOwnerId = null;
-          }
+          if (OWNER_ID === instIdRef.current) OWNER_ID = null;
         }, 0);
       };
     } else {
-      // Not the owner → this instance is passive
+      // Passive instance
       return () => { cancelled = true; };
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flags?.logs?.throttle]);
 
-  return socket;
+  return SOCKET;
 }

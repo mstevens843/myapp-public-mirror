@@ -20,20 +20,37 @@ export const UserProvider = ({ children }) => {
       if (!data) return setLoading(false);
 
       // 🔥  FLATTEN EVERYTHING WE ACTUALLY NEED
-      const flat = {
-        ...data.user, // id, username, email, type, phantomPublicKey…
-        plan:               data.plan?.plan,
-        subscriptionStatus: data.plan?.subscriptionStatus,
-        usage:              data.plan?.usage,
-        usageResetAt:       data.plan?.usageResetAt,
-        credits:            data.plan?.credits,
-        preferences:        data.preferences,
-        telegram:           data.telegram,
-        activeWallet:       data.activeWallet,
-        activeWalletId:     data.activeWallet?.id ?? null,
-        wallets:            data.wallets ?? [],
-        counts:             data.counts,
-      };
+const flat = {
+  ...data.user,
+  plan:               data.plan?.plan,
+  subscriptionStatus: data.plan?.subscriptionStatus,
+  usage:              data.plan?.usage,
+  usageResetAt:       data.plan?.usageResetAt,
+  credits:            data.plan?.credits,
+  preferences:        data.preferences,
+  telegram:           data.telegram,
+  // Keep activeWallet as full object (with isProtected + hint)
+  activeWallet:       data.activeWallet
+    ? {
+        id:            data.activeWallet.id,
+        label:         data.activeWallet.label,
+        publicKey:     data.activeWallet.publicKey,
+        isProtected:   !!data.activeWallet.isProtected,
+        passphraseHint:data.activeWallet.passphraseHint || null
+      }
+    : null,
+  activeWalletId:     data.activeWallet?.id ?? null,
+  isWalletProtected:  !!data.activeWallet?.isProtected,
+  // Preserve full wallet objects from backend, including isProtected + hint
+  wallets: (data.wallets ?? []).map(w => ({
+    id:            w.id,
+    label:         w.label,
+    publicKey:     w.publicKey,
+    isProtected:   !!w.isProtected,
+    passphraseHint:w.passphraseHint || null
+  })),
+  counts:             data.counts,
+};
 
       setProfile(flat);
     } catch (err) {

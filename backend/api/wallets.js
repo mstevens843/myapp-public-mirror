@@ -985,7 +985,7 @@ router.get("/portfolio", authenticate, async (req, res) => {
 router.get("/:id/tokens", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
-    const walletId = parseInt(req.params.walletId);
+    const walletId = Number.parseInt(req.params.id, 10);
 
     if (isNaN(walletId)) {
       return res.status(400).json({ error: "Invalid wallet ID" });

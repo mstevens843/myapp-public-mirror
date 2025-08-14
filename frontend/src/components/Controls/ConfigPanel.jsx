@@ -376,7 +376,6 @@ const REQUIRED_KEYS = {
   // ─────────────── No extra fields ───────────────
     sniper       : [...BASE_FIELDS, "entryThreshold", "volumeThreshold"], // 6 required
    breakout       : [...BASE_FIELDS, "entryThreshold", "volumeThreshold"], // 6 required
-  paperTrader:   BASE_FIELDS,
   // ─────────────── With strategy-specific extras ───────────────
   scalper:       [...BASE_FIELDS, ...SCALPER_FIELDS],
   trendFollower: [...BASE_FIELDS, "entryThreshold", "volumeThreshold"],

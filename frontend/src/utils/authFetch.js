@@ -1,30 +1,21 @@
-/**
- * frontend/src/utils/authFetch.js
- * ------------------------------------------------------------------
- * - Cookie-only by default (no Authorization header unless opted in)
- * - BASE + path resolution (no new URL surprises)
- * - credentials:'include', JSON CT normalization
- * - 419 CSRF bootstrap + retry once
- * - 401 auto-refresh then retry once
- * - 401 {needsArm:true} → onNeedsArm handler (with fallback toast)
- * - 429 backoff + one network retry
- * - 304 (GET) → auto-retry once with cache-busting ts param
- * - Options: { retry, retryNetwork, needsArmEnabled, timeoutMs }
- * - Debug: window.__AUTHFETCH_DEBUG__ = true (or setAuthFetchDebug(true))
- */
+// src/utils/authFetch.js
+// What changed (minimal, targeted):
+// - Proactively ensure CSRF before any NON-GET request (once).
+// - Handle CSRF failure as 403 OR 419 (your backend uses 403), then bootstrap once and retry.
+// - After 401 refresh success, re-ensure CSRF (it may rotate) before replay.
+// - Everything else (exports, return type = Response, body/headers, 429/network handling)
+//   remains exactly as before to avoid breaking other flows.
 
 import { toast } from "sonner";
 
 // ----- Global knobs -----
 let onNeedsArmHandler = null;
-// Cookie-only by default. Opt-in to Bearer with setTokenGetter(fn) if you truly need it.
 let tokenGetter = () => null;
 
 let runtimeBaseUrl = null;
 let on401 = null;
 let defaultTimeoutMs = 15000;
 
-// Debug toggle
 let DEBUG = typeof window !== "undefined" && !!window.__AUTHFETCH_DEBUG__;
 export function setAuthFetchDebug(v) {
   DEBUG = !!v;
@@ -32,10 +23,6 @@ export function setAuthFetchDebug(v) {
 }
 
 // ----- Public setters -----
-/**
- * Register a handler for 401 JSON body { needsArm:true, walletId }
- * Handler receives: { walletId, path, options, retry }
- */
 export function setOnNeedsArm(handler) {
   onNeedsArmHandler = typeof handler === "function" ? handler : null;
 }
@@ -44,7 +31,7 @@ export function setBaseUrl(url) { runtimeBaseUrl = typeof url === "string" ? url
 export function setGlobal401Handler(fn) { on401 = typeof fn === "function" ? fn : null; }
 export function setDefaultTimeout(ms) { defaultTimeoutMs = Math.max(1000, Number(ms) || 15000); }
 
-// ----- CSRF helpers -----
+// ----- CSRF helpers (unchanged behavior + a small ensure wrapper) -----
 function ensureMetaCsrfTag() {
   let meta = document.querySelector('meta[name="csrf-token"]');
   if (!meta) {
@@ -59,7 +46,6 @@ function getCookie(name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 export function getCsrfToken() {
-  // Support common names and server __Host- cookies
   const names = ["__Host-csrf", "csrf_token", "csrf", "XSRF-TOKEN", "xsrfToken", "csrfToken"];
   for (const n of names) {
     const v = getCookie(n);
@@ -72,28 +58,43 @@ export function setCsrfToken(token) {
   const meta = ensureMetaCsrfTag();
   meta.setAttribute("content", token || "");
 }
-async function bootstrapCsrf(baseUrlOrigin) {
-  try {
-    const res = await fetch(joinUrl(baseUrlOrigin, "/api/auth/csrf"), {
-      credentials: "include",
-      headers: { Accept: "application/json" },
-    });
-    const data = await res.json().catch(() => ({}));
-    if (data?.csrfToken) setCsrfToken(data.csrfToken);
-    return res.ok;
-  } catch {
-    return false;
-  }
+
+// NEW: ensure once by calling /api/auth/csrf (accepts { token } or { csrfToken })
+let _ensuringCsrf = null;
+async function ensureCsrfOnce(baseUrlOrigin) {
+  const existing = getCsrfToken();
+  if (existing) return existing;
+  if (_ensuringCsrf) return _ensuringCsrf;
+
+  const url = joinUrl(baseUrlOrigin, "/api/auth/csrf");
+  _ensuringCsrf = (async () => {
+    try {
+      const res = await fetch(url, {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
+      const data = await res.json().catch(() => ({}));
+      const token = data?.token || data?.csrfToken || getCsrfToken();
+      if (token) setCsrfToken(token);
+      return token || null;
+    } catch {
+      return null;
+    } finally {
+      _ensuringCsrf = null;
+    }
+  })();
+
+  return _ensuringCsrf;
 }
 
 // ----- Utilities -----
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function jitter(base) { return base + Math.floor(Math.random() * 150); }
+function jitter(base) { return base + Math.random() * 150 | 0; }
+const isUnsafe = (m) => !["GET","HEAD","OPTIONS"].includes((m || "GET").toUpperCase());
 
 function normalizeBody(body, headers) {
   if (body == null) return null;
 
-  // If caller passed a string, still ensure JSON header
   if (typeof body === "string") {
     if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     return body;
@@ -122,18 +123,15 @@ async function parseResponseBody(res) {
 
 // ----- BASE + path resolver -----
 function baseString() {
-  // If env is undefined, return "" so requests are relative to current origin (Vite proxy etc.)
   const envBase = import.meta.env.VITE_API_BASE_URL || "";
   return (runtimeBaseUrl ?? envBase) || "";
 }
 function joinUrl(base, path) {
-  if (!base) return path; // same-origin (use dev proxy)
+  if (!base) return path;
   return `${base.replace(/\/+$/, "")}${path}`;
 }
 function resolveUrl(path) {
-  // Absolute http(s) passed in? Use as-is.
   if (/^https?:\/\//i.test(path)) return path;
-  // Otherwise stick to BASE + path (or same-origin when BASE is "")
   return joinUrl(baseString(), path);
 }
 
@@ -155,7 +153,7 @@ async function refreshSession(baseUrlOrigin) {
   }
 }
 
-// ----- Core request with retries + 401 refresh + 419 CSRF + 429 backoff -----
+// ----- Core request with retries + 401 refresh + CSRF bootstrap (403/419) + 429 backoff -----
 async function doRequest(originalUrl, init, {
   retry429 = 3,
   retryNetwork = 1,
@@ -165,7 +163,7 @@ async function doRequest(originalUrl, init, {
   const timeoutMs = Number(init.timeoutMs || defaultTimeoutMs);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
-  const baseForRefresh = baseString(); // use configured/same-origin base
+  const baseForRefresh = baseString();
 
   let attempts429 = 0;
   let networkAttempts = 0;
@@ -188,7 +186,7 @@ async function doRequest(originalUrl, init, {
       const res = await fetch(currentUrl, { ...init, signal: controller.signal });
       if (DEBUG) console.debug("[authFetch] ←", init.method, currentUrl, res.status);
 
-      // 304 on GET: retry once with cache-busting ts param to force a fresh body
+      // 304 on GET: retry once with cache-busting ts param
       if (res.status === 304 && init.method === "GET" && !triedCacheBust304) {
         triedCacheBust304 = true;
         const sep = currentUrl.includes("?") ? "&" : "?";
@@ -213,12 +211,10 @@ async function doRequest(originalUrl, init, {
               console.error("[authFetch] onNeedsArm handler error:", e);
             }
           } else {
-            try {
-              toast.error("Protected Mode is enabled. Please arm your automation in Account settings before trading.");
-            } catch {}
+            try { toast.error("Protected Mode is enabled. Please arm your automation in Account settings before trading."); } catch {}
           }
           clearTimeout(timeout);
-          return res; // let caller decide next UI action
+          return res;
         }
 
         // Try one refresh → then retry original once
@@ -226,12 +222,14 @@ async function doRequest(originalUrl, init, {
           triedRefresh = true;
           const ok = await refreshSession(baseForRefresh);
           if (ok) {
-            // CSRF might rotate
-            const headers = new Headers(init.headers || {});
-            const csrf = getCsrfToken();
-            if (csrf && !headers.has("X-CSRF-Token") && init.method && !["GET","HEAD","OPTIONS"].includes(init.method)) {
-              headers.set("X-CSRF-Token", csrf);
-              init = { ...init, headers };
+            // CSRF may rotate after refresh → ensure again for unsafe methods
+            if (isUnsafe(init.method)) {
+              const token = getCsrfToken() || await ensureCsrfOnce(baseForRefresh);
+              if (token) {
+                const headers = new Headers(init.headers || {});
+                headers.set("X-CSRF-Token", token);
+                init = { ...init, headers };
+              }
             }
             if (DEBUG) console.debug("[authFetch] retrying after refresh:", init.method, currentUrl);
             continue;
@@ -240,23 +238,20 @@ async function doRequest(originalUrl, init, {
         }
       }
 
-      // 419 → CSRF missing/invalid → bootstrap once then retry
-      if (res.status === 419 && !triedCsrf) {
-        triedCsrf = await bootstrapCsrf(baseForRefresh);
-        if (triedCsrf) {
-          // ensure header is present for non-GET after bootstrap
+      // CSRF failure → your backend uses 403 (some use 419). Support both.
+      if ((res.status === 403 || res.status === 419) && !triedCsrf && isUnsafe(init.method)) {
+        triedCsrf = true;
+        const token = await ensureCsrfOnce(baseForRefresh);
+        if (token) {
           const headers = new Headers(init.headers || {});
-          const csrf = getCsrfToken();
-          if (csrf && !["GET","HEAD","OPTIONS"].includes(init.method)) {
-            headers.set("X-CSRF-Token", csrf);
-            init = { ...init, headers };
-          }
+          headers.set("X-CSRF-Token", token);
+          init = { ...init, headers };
           if (DEBUG) console.debug("[authFetch] retried after CSRF bootstrap");
           continue;
         }
       }
 
-      // 429 backoff
+      // 429 backoff (bounded)
       if (res.status === 429 && attempts429 < retry429) {
         const backoffs = [1000, 2000, 4000];
         const waitMs = (backoffs[attempts429] || 4000) + jitter(50);
@@ -299,36 +294,29 @@ async function doRequest(originalUrl, init, {
 }
 
 // ----- Public API -----
-
-/**
- * authFetch(path, options) -> Response
- * - Cookie auth with credentials: 'include'
- * - Adds Content-Type + Accept when appropriate
- * - Adds X-CSRF-Token if present (non-blocking if missing)
- * - Keeps Bearer via tokenGetter() (disable by default here)
- * - Adds Cache-Control: no-cache on GET
- * - Supports options.retry (number) to control 429 backoff attempts
- */
 export async function authFetch(path, options = {}) {
   const token = tokenGetter();
   const headers = new Headers(options.headers || {});
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
 
-  // Determine method early for header decisions
   const method = (options.method || "GET").toUpperCase();
 
-  // Optional Authorization (opt-in via setTokenGetter)
+  // Optional Authorization
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  // CSRF for unsafe methods
-  const csrf = getCsrfToken();
-  if (csrf && !["GET","HEAD","OPTIONS"].includes(method)) {
-    headers.set("X-CSRF-Token", csrf);
+  // **NEW** Proactively ensure CSRF for unsafe methods before first attempt
+  if (isUnsafe(method)) {
+    const base = baseString();
+    const existing = getCsrfToken();
+    if (!existing) {
+      await ensureCsrfOnce(base);
+    }
+    const tok = getCsrfToken();
+    if (tok) headers.set("X-CSRF-Token", tok);
   }
 
-  // Encourage revalidation on GET (belt & suspenders vs proxy caching)
   if (method === "GET" && !headers.has("Cache-Control")) {
     headers.set("Cache-Control", "no-cache");
   }
@@ -382,9 +370,13 @@ export async function apiFetch(urlOrPath, opts = {}) {
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const csrf = getCsrfToken();
-  if (csrf && !["GET","HEAD","OPTIONS"].includes(method)) {
-    headers.set("X-CSRF-Token", csrf);
+  // Ensure CSRF for unsafe apiFetch as well
+  if (isUnsafe(method)) {
+    const base = baseString();
+    const existing = getCsrfToken();
+    if (!existing) await ensureCsrfOnce(base);
+    const tok = getCsrfToken();
+    if (tok) headers.set("X-CSRF-Token", tok);
   }
 
   const init = {

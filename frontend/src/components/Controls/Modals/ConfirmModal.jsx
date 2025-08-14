@@ -93,7 +93,7 @@ export const strategyFieldMap = {
   feeEscalationLamports : { label: "Fee Escalation",       color: "text-fuchsia-300",format: lamports },
   panicDumpPct          : { label: "Panic-Dump %",         color: "text-red-400",    format: pct },
   outputMint            : { label: "Target Mint",          color: "text-fuchsia-300",format: formatMint },
-  outputMints           : { label: "Target Mints",         color: "text-fuchsia-300",format: a=>Array.isArray(a)?`${a.length} mints`:formatMint(a) },
+  // outputMints           : { label: "Target Mints",         color: "text-fuchsia-300",format: a=>Array.isArray(a)?`${a.length} mints`:formatMint(a) },
   maxSpendPerToken      : { label: "Max/Token Spend",      color: "text-emerald-300",format: sol },
   rebalanceThreshold    : { label: "Rebalance Δ %",        color: "text-yellow-300", format: pct },
   rebalanceInterval     : { label: "Rebalance Every",      color: "text-cyan-300",   format: ms },

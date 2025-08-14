@@ -1,3 +1,9 @@
+// src/components/ErrorBoundary.jsx
+// What changed:
+// - No throw-through; friendly fallback UI.
+// - Buttons: Refresh (reload) & Return to Dashboard (/app).
+// - Kept exact export style you provided.
+
 import React from "react";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -30,35 +36,40 @@ class ErrorBoundary extends React.Component {
     window.location.assign("/app");
   };
 
-render() {
-  if (this.state.hasError) {
-    return (
-      <div
-        role="alert"
-        className="fixed inset-0 grid place-items-center bg-zinc-950"
-      >
-        <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl">
-          <div className="mb-3 flex items-center gap-3">
-            <AlertTriangle className="text-amber-400" size={20} />
-            <h2 className="text-lg font-semibold text-white">Something went wrong</h2>
-          </div>
-          <p className="mb-6 text-sm text-zinc-400">
-            The page crashed. You can reload, or head back to your dashboard.
-          </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Button variant="secondary" onClick={this.handleReload}>
-              Refresh
-            </Button>
-            <Button className="bg-emerald-600 text-white" onClick={this.handleHome}>
-              Return to Dashboard
-            </Button>
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          role="alert"
+          className="fixed inset-0 grid place-items-center bg-zinc-950"
+        >
+          <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl">
+            <div className="mb-3 flex items-center gap-3">
+              <AlertTriangle className="text-amber-400" size={20} />
+              <h2 className="text-lg font-semibold text-white">
+                Something went wrong
+              </h2>
+            </div>
+            <p className="mb-6 text-sm text-zinc-400">
+              The page crashed. You can reload, or head back to your dashboard.
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button variant="secondary" onClick={this.handleReload}>
+                Refresh
+              </Button>
+              <Button
+                className="bg-emerald-600 text-white"
+                onClick={this.handleHome}
+              >
+                Return to Dashboard
+              </Button>
+            </div>
           </div>
         </div>
-      </div>
-    );
+      );
+    }
+    return this.props.children;
   }
-  return this.props.children;
-}
 }
 
 export default ErrorBoundary;
