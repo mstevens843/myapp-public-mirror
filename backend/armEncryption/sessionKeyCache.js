@@ -49,12 +49,20 @@ function getDEK(userId, walletId) {
 }
 
 function status(userId, walletId) {
-  const s = sessions.get(_key(userId, walletId));
-  if (!s) return { armed: false };
-  const msLeft = Math.max(0, s.expiresAt - Date.now());
+  const key = _key(userId, walletId);
+  const s = sessions.get(key);
+  if (!s) return { armed: false, msLeft: 0 };
+
+  const msLeft = s.expiresAt - Date.now();
+  if (msLeft <= 0) {
+    // auto-purge expired entry so everyone sees "not armed"
+    if (s.dek) { try { s.dek.fill(0); } catch {} }
+    sessions.delete(key);
+    return { armed: false, msLeft: 0, armedAt: s.armedAt };
+  }
+
   return { armed: true, msLeft, armedAt: s.armedAt };
 }
-
 /**
  * Retrieve the raw session object for a user/wallet pair. Returns null when
  * there is no active session or when the TTL has expired (expired

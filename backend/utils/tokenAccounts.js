@@ -85,7 +85,7 @@ async function getMintDecimals(mint) {
     console.error("❌ CRASH: new PublicKey(mint) failed:", e.message);
     throw e;
   }
-    if (decimalsCache[mint]) return decimalsCache[mint];
+  if (decimalsCache[mint]) return decimalsCache[mint];
 
   try {
     const mintInfo = await getMint(connection, new PublicKey(mint));
@@ -98,8 +98,15 @@ async function getMintDecimals(mint) {
   }
 }
 
+/** 🔹 Native SOL lamports for a public key (Number of lamports). */
+async function getSolLamports(ownerInput) {
+  const owner = asPublicKey(ownerInput);
+  const lamports = await connection.getBalance(owner, "confirmed");
+  return lamports; // caller can BigInt() this if needed
+}
 
 module.exports = {
   getTokenAccountsAndInfo,
-  getMintDecimals
+  getMintDecimals,
+  getSolLamports,
 };

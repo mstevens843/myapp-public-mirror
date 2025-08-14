@@ -1,4 +1,3 @@
-// backend/services/reservations/index.js
 //
 // A simple in‑memory reservation registry used to track funds that are
 // earmarked for open orders, TP/SL rules, DCA tranches, bot allocations
@@ -26,10 +25,13 @@ function reserve(mint, amount, reason, refId) {
   const key = mint;
   const existing = reservations.get(key) || 0n;
   const amt = typeof amount === 'bigint' ? amount : BigInt(amount);
-  reservations.set(key, existing + amt);
-  // In a real implementation you might store reason/refId for auditing.
-  return reservations.get(key);
+  const next = existing + amt;
+  reservations.set(key, next);
+  console.log("[Reservations] reserve", { mint, add: bi(amt), next: bi(next), reason, refId });
+  return next;
 }
+
+
 
 /**
  * Release previously reserved funds.  If releasing more than currently
@@ -46,10 +48,11 @@ function release(mint, amount, reason, refId) {
   const existing = reservations.get(key) || 0n;
   const amt = typeof amount === 'bigint' ? amount : BigInt(amount);
   const next = existing - amt;
-  reservations.set(key, next > 0n ? next : 0n);
-  return reservations.get(key);
+  const finalVal = next > 0n ? next : 0n;
+  reservations.set(key, finalVal);
+  console.log("[Reservations] release", { mint, sub: bi(amt), next: bi(finalVal), reason, refId });
+  return finalVal;
 }
-
 /**
  * Snapshot the current reservation map.  The returned object is a plain
  * JavaScript object (not a Map) with mint symbols as keys and BigInt
@@ -57,11 +60,14 @@ function release(mint, amount, reason, refId) {
  *
  * @returns {Object<string, bigint>}
  */
+
+
 function snapshot() {
   const snap = {};
-  for (const [mint, amt] of reservations.entries()) {
-    snap[mint] = amt;
-  }
+  for (const [mint, amt] of reservations.entries()) snap[mint] = amt;
+  // Keep the snapshot small in logs
+  const logSnap = Object.fromEntries(Object.entries(snap).map(([k, v]) => [k, bi(v)]));
+  console.log("[Reservations] snapshot", logSnap);
   return snap;
 }
 

@@ -253,7 +253,7 @@ async function doRequest(originalUrl, init, {
 
       // 429 backoff (bounded)
       if (res.status === 429 && attempts429 < retry429) {
-        const backoffs = [1000, 2000, 4000];
+        const backoffs = [10000, 20000, 40000];
         const waitMs = (backoffs[attempts429] || 4000) + jitter(50);
         attempts429++;
         try { toast.info("Rate limited; retrying…"); } catch {}
@@ -283,7 +283,7 @@ async function doRequest(originalUrl, init, {
           });
         } catch {}
         if (DEBUG) console.warn("[authFetch] network error, retrying:", err?.message || err);
-        await sleep(1500);
+        await sleep(10000);
         continue;
       }
       clearTimeout(timeout);

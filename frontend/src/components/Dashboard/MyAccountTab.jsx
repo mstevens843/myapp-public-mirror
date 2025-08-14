@@ -6,6 +6,11 @@
  * - “Forgot pass-phrase? View hint” (CLICK-ONLY tooltip + optional inline fallback)
  * - Inline Tooltip components (no external import) — click to toggle; no hover/auto-open
  * - FIX: Never show email/password for Web3 users (robust detection)
+ * - FIXES:
+ *    • Guard every access to activeWallet.id
+ *    • Remove render-time broadcasts that referenced activeWallet.id
+ *    • Normalize activeWallet shape after API calls
+ *    • Correct undefined `ms` variable usage
  * ------------------------------------------------------------------ */
 
 import React, { useEffect, useState, useRef, useContext, useMemo } from "react";
@@ -16,11 +21,7 @@ import { Button } from "@/components/ui/button";
 import { getTelegramChatId } from "@/utils/telegramApi";
 import { loadWallet, fetchActiveWallet } from "@/utils/auth";
 import confetti from "canvas-confetti";
-import {
-  getProfile,
-  updateProfile,
-  deleteAccount,
-} from "@/utils/account";
+import { getProfile, updateProfile, deleteAccount } from "@/utils/account";
 import { getSubscriptionStatus } from "@/utils/payments";
 import { enable2FA, disable2FA, verify2FA } from "../../utils/2fa";
 import { useUser } from "@/contexts/UserProvider";
@@ -55,14 +56,16 @@ import {
 
 /* ---------------------- INLINE TOOLTIP (no imports) ---------------------- */
 /* CLICK-ONLY: Opens on click/Enter/Space, closes on click-away or Escape */
-const TooltipConfigContext = React.createContext({ delay: 0 });
 const TooltipInstanceContext = React.createContext(null);
 
-const TooltipProvider = ({ delayDuration = 0, children }) => (
-  <TooltipConfigContext.Provider value={{ delay: delayDuration }}>
-    {children}
-  </TooltipConfigContext.Provider>
-);
+const TooltipProvider = ({ delayDuration = 0, children }) => children;
+
+const ARM_EVENT = "arm:state";
+const broadcastArmState = (payload) => {
+  try {
+    window.dispatchEvent(new CustomEvent(ARM_EVENT, { detail: payload }));
+  } catch {}
+};
 
 const Tooltip = ({ children }) => {
   const [open, setOpen] = useState(false);
@@ -242,10 +245,9 @@ const MyAccountTab = () => {
     loading: userLoading,
   } = useUser();
 
-  // Gather an authoritative session "type" directly from auth to avoid flicker or mismatches
+  // Authoritative session "type" directly from auth to avoid flicker
   const [sessionType, setSessionType] = useState(null);
 
-  // Robust Web3 detection — covers multiple provider labels and prevents showing email/password for Web3
   const isWeb3Account = useMemo(() => {
     const tx = ((sessionType || type || "") + "").toLowerCase();
     const inferred =
@@ -257,16 +259,16 @@ const MyAccountTab = () => {
     return inferred || !!phantomPublicKey;
   }, [sessionType, type, phantomPublicKey]);
 
-  // If we ever switch to Web3 in-session, make sure the password form is closed
+  // If we switch to Web3 in-session, close password form
   useEffect(() => {
     if (isWeb3Account) setShowPasswordForm(false);
   }, [isWeb3Account]);
 
-  // Determine protection using context wallets (they include isProtected from /auth/me)
-  const activeId = activeWallet?.id ?? ctxActiveWallet?.id ?? null;
+  // Determine protection using context wallets (include isProtected from /auth/me)
+  const effectiveActiveWalletId = activeWallet?.id ?? ctxActiveWallet?.id ?? null;
   const ctxActiveIsProtected = useMemo(
-    () => !!ctxWallets.find((w) => w.id === activeId)?.isProtected,
-    [ctxWallets, activeId]
+    () => !!ctxWallets.find((w) => w.id === effectiveActiveWalletId)?.isProtected,
+    [ctxWallets, effectiveActiveWalletId]
   );
   const armMode = (ctxActiveIsProtected || hasGlobalPassphrase) ? "existing" : "firstTime";
 
@@ -275,16 +277,25 @@ const MyAccountTab = () => {
     (String(activeWallet?.passphraseHint ?? ctxActiveWallet?.passphraseHint ?? "").trim()) ||
     (String(globalHintFromCtx ?? globalPassHint ?? "").trim());
 
-  const activeProtected = useMemo(() => {
-    const w = activeWallet;
-    return !!(w?.isProtected || w?.hasPassphrase || w?.passphraseHash != null);
-  }, [activeWallet]);
+  // Broadcast listener for other tabs/components
+  useEffect(() => {
+    const onArm = (e) => {
+      const { walletId, armed, msLeft } = e.detail || {};
+      const currentId = effectiveActiveWalletId;
+      if (!currentId || walletId !== currentId) return;
+      setArmStatus({ armed: !!armed, msLeft: msLeft || 0 });
+      if (!armed) setWarned(false);
+    };
+    window.addEventListener(ARM_EVENT, onArm);
+    return () => window.removeEventListener(ARM_EVENT, onArm);
+  }, [effectiveActiveWalletId]);
 
   // Handle "Use for ALL wallets" confirmation
   const handleUseForAllToggle = (checked) => {
     if (checked) {
+      const currentId = effectiveActiveWalletId;
       const customCount = wallets.filter((w) => {
-        if (w.id === activeWallet?.id) return false;
+        if (currentId && w.id === currentId) return false;
         const hasCustom =
           w.hasPassphrase ||
           (w.passphraseHash !== null && w.passphraseHash !== undefined) ||
@@ -353,9 +364,11 @@ const MyAccountTab = () => {
       if (chatId) setTelegramChatId(chatId);
       if (allWallets) setWallets(allWallets);
 
-      if (activeW) {
-        const fullActive = allWallets.find((w) => w.id === activeW);
-        setActiveWallet(fullActive || { id: activeW });
+      // Normalize activeWallet shape
+      if (activeW != null) {
+        const id = typeof activeW === "object" ? activeW.id : activeW;
+        const fullActive = allWallets?.find((w) => w.id === id);
+        setActiveWallet(fullActive || (typeof activeW === "object" ? activeW : { id }));
       }
 
       setLoading(false);
@@ -395,13 +408,12 @@ const MyAccountTab = () => {
         if (data?.activeWallet?.id) {
           const apiAW = data.activeWallet; // { id, label, publicKey, passphraseHint, ... }
           setActiveWallet((prev) => {
-            if (!prev) return apiAW; // if we didn't have one yet, use the API one
+            if (!prev) return apiAW; // no existing — use API one
             if (prev.id !== apiAW.id) return prev; // don't flip selection silently
             // same wallet: merge the hint in
             return {
               ...prev,
-              passphraseHint:
-                apiAW.passphraseHint ?? prev.passphraseHint ?? null,
+              passphraseHint: apiAW.passphraseHint ?? prev.passphraseHint ?? null,
             };
           });
         }
@@ -412,10 +424,7 @@ const MyAccountTab = () => {
             prev.map((w) => {
               const fromApi = data.wallets.find((b) => b.id === w.id);
               if (!fromApi) return w;
-              const hasKey = Object.prototype.hasOwnProperty.call(
-                fromApi,
-                "passphraseHint"
-              );
+              const hasKey = Object.prototype.hasOwnProperty.call(fromApi, "passphraseHint");
               return hasKey ? { ...w, passphraseHint: fromApi.passphraseHint } : w;
             })
           );
@@ -441,24 +450,28 @@ const MyAccountTab = () => {
 
   // 🔁 Poll Arm status for the active wallet (every 20s)
   useEffect(() => {
+    const wid = effectiveActiveWalletId;
+    if (!wid) return; // bail until wallet is loaded
+
     let timer;
     async function poll() {
       try {
-        if (activeWallet?.id) {
-          const s = await getArmStatus(activeWallet.id);
-          setArmStatus({ armed: !!s.armed, msLeft: s.msLeft || 0 });
-          if (!s.armed) setWarned(false);
-        }
+        const s = await getArmStatus(wid);
+        const nextMs = Math.max(0, Number(s?.msLeft || 0));
+        setArmStatus({ armed: !!s?.armed, msLeft: nextMs });
+        broadcastArmState({ walletId: wid, armed: !!s?.armed, msLeft: nextMs });
+        if (!s?.armed) setWarned(false);
       } catch {
-        setArmStatus((prev) => ({ ...prev, armed: false, msLeft: 0 }));
+        setArmStatus({ armed: false, msLeft: 0 });
         setWarned(false);
       } finally {
         timer = setTimeout(poll, 20000);
       }
     }
-    if (activeWallet?.id) poll();
+
+    poll();
     return () => timer && clearTimeout(timer);
-  }, [activeWallet?.id]);
+  }, [effectiveActiveWalletId]);
 
   // ⏱️ Local 1-second countdown
   useEffect(() => {
@@ -621,7 +634,8 @@ const MyAccountTab = () => {
   };
 
   const handleOpenArm = () => {
-    if (!activeWallet?.id) return toast.error("No active wallet selected.");
+    const wid = effectiveActiveWalletId;
+    if (!wid) return toast.error("No active wallet selected.");
     if (armMode !== "firstTime" && require2faArm && !is2FAEnabled) {
       return toast.error(
         "Enable 2FA before you can arm this wallet. Go to the Security tab to set up 2FA."
@@ -633,6 +647,9 @@ const MyAccountTab = () => {
   };
 
   const handleArm = async () => {
+    const wid = effectiveActiveWalletId;
+    if (!wid) return toast.error("No active wallet selected.");
+
     if (!armPassphrase) return toast.error("Enter your wallet pass-phrase.");
     if (armMode === "firstTime") {
       if (!armPassphraseConfirm) return toast.error("Confirm your pass-phrase.");
@@ -653,7 +670,7 @@ const MyAccountTab = () => {
     try {
       if (armMode === "firstTime") {
         await setupWalletProtection({
-          walletId: activeWallet.id,
+          walletId: wid,
           passphrase: armPassphrase,
           applyToAll: armUseForAll,
           passphraseHint:
@@ -662,6 +679,7 @@ const MyAccountTab = () => {
               : undefined,
           forceOverwrite,
         });
+        // Not armed yet — just protected
         setArmStatus({ armed: false, msLeft: 0 });
         setWarned(false);
         setArmModalOpen(false);
@@ -671,39 +689,42 @@ const MyAccountTab = () => {
         setArmUseForAll(false);
         setForceOverwrite(false);
         setArmPassphraseHint("");
-        if (activeWallet) {
-          setActiveWallet((prev) =>
-            prev && prev.id === activeWallet.id
+
+        // Update local wallet flags
+        setActiveWallet((prev) =>
+          prev && prev.id === wid
+            ? {
+                ...prev,
+                isProtected: true,
+                hasPassphrase: true,
+                passphraseHash: prev.passphraseHash || "set",
+              }
+            : prev
+        );
+        setWallets((prev) =>
+          prev.map((w) =>
+            w.id === wid
               ? {
-                  ...prev,
+                  ...w,
                   isProtected: true,
                   hasPassphrase: true,
-                  passphraseHash: prev.passphraseHash || "set",
+                  passphraseHash: w.passphraseHash || "set",
                 }
-              : prev
-          );
-          setWallets((prev) =>
-            prev.map((w) =>
-              w.id === activeWallet.id
-                ? {
-                    ...w,
-                    isProtected: true,
-                    hasPassphrase: true,
-                    passphraseHash: w.passphraseHash || "set",
-                  }
-                : w
-            )
-          );
-        }
+              : w
+          )
+        );
+
         if (armUseForAll) setHasGlobalPassphrase(true);
         toast.success(
           armUseForAll
             ? "Pass-phrase applied to all wallets. Your wallets are now protected."
             : "Wallet protected. Unlock when you’re ready to trade."
         );
+        await refreshProfile(); // sync context
+        broadcastArmState({ walletId: wid, armed: false, msLeft: 0 });
       } else {
         const res = await armEncryptedWallet({
-          walletId: activeWallet.id,
+          walletId: wid,
           passphrase: armPassphrase,
           twoFactorToken: require2faArm && is2FAEnabled ? twoFAToken : undefined,
           ttlMinutes: ttl,
@@ -714,9 +735,10 @@ const MyAccountTab = () => {
           autoReturnDest: autoReturnDest || undefined,
         });
         const armedFor = res.armedForMinutes || ttl;
+        const msLeft = armedFor * 60 * 1000;
         setArmStatus({
           armed: true,
-          msLeft: armedFor * 60 * 1000,
+          msLeft,
         });
         setWarned(false);
         setArmModalOpen(false);
@@ -727,6 +749,7 @@ const MyAccountTab = () => {
         setForceOverwrite(false);
         setArmPassphraseHint("");
         toast.success(`Automation armed for ${armedFor} minutes.`);
+        broadcastArmState({ walletId: wid, armed: true, msLeft });
       }
     } catch (e) {
       const msg = e.message || "";
@@ -743,12 +766,13 @@ const MyAccountTab = () => {
   };
 
   const handleExtend = async (minutes = 120) => {
-    if (!activeWallet?.id) return;
+    const wid = effectiveActiveWalletId;
+    if (!wid) return;
     const ttl = normalizeMinutes(minutes, 120);
     setExtendBusy(true);
     try {
       await extendEncryptedWallet({
-        walletId: activeWallet.id,
+        walletId: wid,
         twoFactorToken: twoFAToken || undefined,
         ttlMinutes: ttl,
       });
@@ -757,6 +781,7 @@ const MyAccountTab = () => {
         msLeft: Math.max(prev.msLeft, 0) + ttl * 60 * 1000,
       }));
       toast.success(`Session extended ${ttl} minutes.`);
+      broadcastArmState({ walletId: wid, armed: true, msLeft: (armStatus.msLeft || 0) + ttl * 60 * 1000 });
     } catch (e) {
       toast.error(e.message || "Failed to extend.");
     } finally {
@@ -765,15 +790,17 @@ const MyAccountTab = () => {
   };
 
   const handleDisarm = async () => {
-    if (!activeWallet?.id) return;
+    const wid = effectiveActiveWalletId;
+    if (!wid) return;
     setDisarmBusy(true);
     try {
       await disarmEncryptedWallet({
-        walletId: activeWallet.id,
+        walletId: wid,
         twoFactorToken: twoFAToken || undefined,
       });
       setArmStatus({ armed: false, msLeft: 0 });
       setWarned(false);
+      broadcastArmState({ walletId: wid, armed: false, msLeft: 0 });
       toast.success("Automation disarmed.");
     } catch (e) {
       toast.error(e.message || "Failed to disarm.");
@@ -785,7 +812,8 @@ const MyAccountTab = () => {
   // Remove protection
   const [removeErrorShown, setRemoveErrorShown] = useState(false);
   const handleRemoveProtection = async () => {
-    if (!activeWallet?.id) {
+    const wid = effectiveActiveWalletId;
+    if (!wid) {
       setRemoveError("No active wallet selected.");
       return;
     }
@@ -797,14 +825,17 @@ const MyAccountTab = () => {
     setRemoveBusy(true);
     setRemoveError("");
     try {
-      await removeWalletProtection({ walletId: activeWallet.id, passphrase });
+      await removeWalletProtection({ walletId: wid, passphrase });
       try {
         await setRequireArmToTrade(false);
       } catch {}
       setRequireArm(false);
       const [allWallets, activeW] = await Promise.all([loadWallet(), fetchActiveWallet()]);
       setWallets(allWallets || []);
-      setActiveWallet(activeW || null);
+      // Normalize activeWallet shape consistently
+      const nextId = typeof activeW === "object" ? activeW?.id : activeW;
+      const fullActive = (allWallets || []).find((w) => w.id === nextId);
+      setActiveWallet(fullActive || (typeof activeW === "object" ? activeW : (nextId ? { id: nextId } : null)));
       toast.success("Protection removed.");
       try {
         await refreshProfile();
@@ -813,6 +844,7 @@ const MyAccountTab = () => {
       }
       setRemoveModalOpen(false);
       setRemovePassphrase("");
+      broadcastArmState({ walletId: wid, armed: false, msLeft: 0 });
     } catch (e) {
       setRemoveError(e.message || "Failed to remove protection.");
       setRemoveErrorShown(true);
@@ -1281,14 +1313,14 @@ const MyAccountTab = () => {
                           step={5}
                           value={customMinutes}
                           onChange={(e) => setCustomMinutes(e.target.value)}
-                          className="w-full p-2 rounded text-black"
+                          className="w-full p-2 rounded text-white"
                         />
                       </div>
                     )}
                   </>
                 )}
 
-                {/* Legacy migration */}
+                {/* Legacy migration
                 {armMode !== "firstTime" && (
                   <label className="flex items-center gap-2 text-sm">
                     <input
@@ -1298,7 +1330,7 @@ const MyAccountTab = () => {
                     />
                     Upgrade legacy wallet encryption during this arm
                   </label>
-                )}
+                )} */}
 
                 {/* NEW: Auto-Return per-session checkbox */}
                 {armMode !== "firstTime" && (

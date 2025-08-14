@@ -521,7 +521,7 @@ export const getChatIdFromCookie = () => {
 };
 
 const App = () => {
-const { activeWallet, loading: userLoading } = useUser();
+const { activeWallet, isProtected, loading: userLoading } = useUser();
 const { prefs } = useUserPrefs();
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   CircleDot,
@@ -17,6 +17,7 @@ import {
 import logo from "@/assets/solpulse-logo.png";
 import AccountMenu from "@/components/Dashboard/Account/AccountMenu";
 import WhatsNew from "./WhatsNew";
+import ArmEndModal from "./ArmEndModal";
 
 /* 🔐 Global Arm chip helpers */
 import { toast } from "sonner";
@@ -33,23 +34,31 @@ const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
-  // Destructure additional fields from useUser: wallets (with isProtected flags) and
-  // hasGlobalPassphrase so we can determine when to show the Arm chip.
-  const { activeWalletId, wallets = [], hasGlobalPassphrase } = useUser(); // ← get active wallet and wallet list from context
 
-  // Determine whether the active wallet has a passphrase or is protected.  We
-  // combine information from the wallet list and a global passphrase.  Only
-  // if one of these is true should we show the floating Arm chip.  Without
-  // protection there is nothing to arm and the button should be hidden.
-  const activeWalletInfo = wallets?.find((w) => w.id === activeWalletId);
-  // Consider several potential flags: hasPassphrase (boolean), explicit
-  // passphraseHash, or isProtected; any truthy value implies protection.
-  const activeWalletHasPass = !!(
-    activeWalletInfo?.hasPassphrase ||
-    (activeWalletInfo?.passphraseHash !== null && activeWalletInfo?.passphraseHash !== undefined) ||
-    activeWalletInfo?.isProtected
-  );
-  const shouldShowArmChip = activeWalletHasPass || hasGlobalPassphrase;
+  // Pull everything we need from UserProvider, including loading so we can gate the initial render.
+  const {
+    activeWalletId: idFromCtx,
+    activeWallet,
+    wallets = [],
+    hasGlobalPassphrase,
+    loading,
+  } = useUser();
+
+  // Gate render until /auth/me has populated context, so protection is detected on first load.
+  if (loading) {
+    return (
+      <div className="glow-bg min-h-screen grid place-items-center text-white">
+        <div className="text-sm opacity-80">Loading…</div>
+      </div>
+    );
+  }
+
+  const activeWalletId = idFromCtx ?? activeWallet?.id ?? null;
+
+  // Determine whether the active wallet is protected (context already normalizes this).
+  const activeWalletInfo = wallets.find((w) => w.id === activeWalletId);
+  const activeWalletHasPass = !!activeWalletInfo?.isProtected;
+  const shouldShowArmChip = activeWalletHasPass || !!hasGlobalPassphrase;
 
   const [activeTab, setActiveTab] = useState(() => {
     return localStorage.getItem("activeTab") || "app";
@@ -69,6 +78,16 @@ export default function Layout() {
   const [warned, setWarned] = useState(false);
   const [extendBusy, setExtendBusy] = useState(false);
   const [disarmBusy, setDisarmBusy] = useState(false);
+
+  // 🔔 End-of-session modal state
+  const [showEndModal, setShowEndModal] = useState(false);
+  const [endModalAutoReturn, setEndModalAutoReturn] = useState(false);
+
+  // Guards/refs
+  const prevArmedRef = useRef(false);
+  const suppressNextEndModalRef = useRef(false); // avoid modal on manual disarm
+  const endModalShownOnceRef = useRef(false); // prevent duplicates from poll + event
+  const lastWalletRef = useRef(activeWalletId);
 
   const running = runningBots.length > 0;
 
@@ -91,25 +110,91 @@ export default function Layout() {
     if (storedTab) setActiveTab(storedTab);
   }, []);
 
+  // Reset modal + guards when wallet changes
+  useEffect(() => {
+    if (lastWalletRef.current !== activeWalletId) {
+      setShowEndModal(false);
+      setEndModalAutoReturn(false);
+      endModalShownOnceRef.current = false;
+      suppressNextEndModalRef.current = false;
+      prevArmedRef.current = false;
+      lastWalletRef.current = activeWalletId;
+    }
+  }, [activeWalletId]);
+
   /* 🔁 Poll arm status every 20s */
   useEffect(() => {
     let timer;
     async function poll() {
       try {
         if (activeWalletId) {
+          // expects backend to include { armed, msLeft, autoReturnTriggered? }
           const s = await getArmStatus(activeWalletId);
-          setArmStatus({ armed: !!s.armed, msLeft: s.msLeft || 0 });
-          if (!s.armed) setWarned(false);
+          const next = { armed: !!s.armed, msLeft: Number(s.msLeft || 0) };
+          const wasArmed = prevArmedRef.current;
+
+          setArmStatus(next);
+
+          // Detect automatic end (TTL expiry) → show modal once
+          if (wasArmed && !next.armed) {
+            if (!suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
+              setEndModalAutoReturn(!!s.autoReturnTriggered);
+              setShowEndModal(true);
+              endModalShownOnceRef.current = true;
+            }
+            suppressNextEndModalRef.current = false; // reset guard
+          }
+
+          // If page loaded after expiry, still surface the one-shot autoReturn flag
+          if (!wasArmed && !next.armed && s.autoReturnTriggered && !endModalShownOnceRef.current) {
+            setEndModalAutoReturn(true);
+            setShowEndModal(true);
+            endModalShownOnceRef.current = true;
+          }
+
+          if (!next.armed) setWarned(false);
+          prevArmedRef.current = next.armed;
         }
       } catch {
         setArmStatus({ armed: false, msLeft: 0 });
         setWarned(false);
+        prevArmedRef.current = false;
       } finally {
         timer = setTimeout(poll, 20000);
       }
     }
     if (activeWalletId) poll();
     return () => timer && clearTimeout(timer);
+  }, [activeWalletId]);
+
+  /* 🔊 Cross-tab/local broadcast for arm/disarm events */
+  const ARM_EVENT = "arm:state";
+  const broadcastArmState = (payload) => {
+    try {
+      window.dispatchEvent(new CustomEvent(ARM_EVENT, { detail: payload }));
+    } catch {}
+  };
+
+  useEffect(() => {
+    const onArm = (e) => {
+      const { walletId, armed, msLeft } = e.detail || {};
+      if (!activeWalletId || walletId !== activeWalletId) return;
+      const wasArmed = prevArmedRef.current;
+      const nextArmed = !!armed;
+      setArmStatus({ armed: nextArmed, msLeft: Number(msLeft || 0) });
+
+      // Manual disarm should not show modal (guarded by suppress flag in handleDisarm)
+      if (wasArmed && !nextArmed && !suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
+        setEndModalAutoReturn(false);
+        setShowEndModal(true);
+        endModalShownOnceRef.current = true;
+      }
+      if (!nextArmed) setWarned(false);
+      prevArmedRef.current = nextArmed;
+      suppressNextEndModalRef.current = false;
+    };
+    window.addEventListener(ARM_EVENT, onArm);
+    return () => window.removeEventListener(ARM_EVENT, onArm);
   }, [activeWalletId]);
 
   /* ⏱️ Local 1s countdown between polls */
@@ -148,10 +233,13 @@ export default function Layout() {
         walletId: activeWalletId,
         ttlMinutes: minutes,
       });
-      setArmStatus((prev) => ({
-        armed: true,
-        msLeft: Math.max(prev.msLeft, 0) + minutes * 60 * 1000,
-      }));
+      const newMsLeft = Math.max(armStatus.msLeft, 0) + minutes * 60 * 1000;
+      setArmStatus({ armed: true, msLeft: newMsLeft });
+      prevArmedRef.current = true;
+      broadcastArmState({ walletId: activeWalletId, armed: true, msLeft: newMsLeft });
+      // If modal was open (edge case), close it after extend
+      setShowEndModal(false);
+      endModalShownOnceRef.current = false;
       toast.success(`Session extended ${minutes} minutes.`);
     } catch (e) {
       toast.error(e.message || "Failed to extend.");
@@ -163,10 +251,13 @@ export default function Layout() {
   const handleDisarm = async () => {
     if (!activeWalletId) return;
     setDisarmBusy(true);
+    suppressNextEndModalRef.current = true; // don't show modal for explicit disarm
     try {
       await disarmEncryptedWallet({ walletId: activeWalletId });
       setArmStatus({ armed: false, msLeft: 0 });
+      prevArmedRef.current = false;
       setWarned(false);
+      broadcastArmState({ walletId: activeWalletId, armed: false, msLeft: 0 });
       toast.success("Automation disarmed.");
     } catch (e) {
       toast.error(e.message || "Failed to disarm.");
@@ -176,12 +267,17 @@ export default function Layout() {
   };
 
   const handleArm = () => {
-    // Route to Account tab so the user can open the Arm modal there
+    // Route to Account tab so the user can open the Arm modal there (single navigate with state)
     setActiveTab("account");
-    navigate(`/account`);
+    navigate("/account", { state: { openArm: true } });
     toast.info("Open the Arm modal to start a secure session.");
-    // (If you want auto-open: pass state or a query param and check in MyAccountTab)
-    navigate('/account', { state: { openArm: true } });
+  };
+
+  const handleCloseEndModal = () => setShowEndModal(false);
+  const handleReArmNow = () => {
+    setShowEndModal(false);
+    setActiveTab("account");
+    navigate("/account", { state: { openArm: true } });
   };
 
   const tabs = [
@@ -198,10 +294,7 @@ export default function Layout() {
   return (
     <div className="glow-bg min-h-screen text-white">
       {/*
-       * Skip link for keyboard users.  Placed at the top of the page it
-       * allows screen reader and keyboard users to bypass the navigation
-       * elements and jump straight to the main content.  The link is
-       * visually hidden until it receives focus.
+       * Skip link for keyboard users.
        */}
       <a
         href="#main-content"
@@ -243,11 +336,8 @@ export default function Layout() {
 
         {/* Account Menu & What's New link */}
         <div className="fixed top-4 right-6 z-50 flex items-center gap-3">
-          {/* What's New button opens the dismissible release notes panel.  It
-              dispatches a custom event that our WhatsNew component listens
-              for.  Styling keeps it subtle in the header. */}
           <button
-            onClick={() => window.dispatchEvent(new Event('openWhatsNew'))}
+            onClick={() => window.dispatchEvent(new Event("openWhatsNew"))}
             className="text-xs text-emerald-300 underline hover:text-emerald-100"
           >
             What's New?
@@ -318,10 +408,15 @@ export default function Layout() {
         </div>
       ) : null}
 
-      {/* What's New modal – always include at root so it can
-          overlay any page.  It self‑manages its visibility based on
-          localStorage and will show only after a version bump or when
-          triggered via the header link. */}
+      {/* 🔔 Arm End Modal */}
+      <ArmEndModal
+        open={showEndModal}
+        autoReturn={endModalAutoReturn}
+        onClose={handleCloseEndModal}
+        onReArm={handleReArmNow}
+      />
+
+      {/* What's New modal */}
       <WhatsNew />
     </div>
   );
