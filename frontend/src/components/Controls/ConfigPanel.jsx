@@ -8,12 +8,10 @@
  * 
  * - Used inside the both dashboard to allow strategy tuning before or during bot runtime. 
  */
-
 import React, { useState, useEffect, useMemo,  useRef } from "react";
 import { logEvent } from "@/utils/logger"; // ✅ Not LogsConsole
 import ModeSelector from "./ModeSelector";
 import { getPrefs, manualBuy, manualSell, updateTpSl, fetchWalletTokens  } from "@/utils/api";
-// import { isValidMintAddress } from "@/utils/solana";
 import StrategyConfigLoader from "@/components/Strategy_Configs/StrategyConfigLoader";
 import { buildMultiStrategyConfig, launchMultiStrategyBot } from "@/utils/multiLaunch";
 import { FaPlayCircle, FaStopCircle } from "react-icons/fa";
@@ -47,22 +45,11 @@ import { Listbox } from '@headlessui/react'
 import LimitModal from "./Modals/LimitModal";
 import { useUserPrefs } from "@/contexts/UserPrefsContext";
 import { useUser } from "@/contexts/UserProvider";
-
-import {
-  Gauge,
-  Timer,
-  Hash,
-  TrendingDown,
-  TrendingUp,
-  Wallet,
-  CheckCircle
-} from "lucide-react";
+import {Gauge, Timer, Hash, TrendingDown, TrendingUp,Wallet, CheckCircle } from "lucide-react";
 import * as ToggleGroup from '@radix-ui/react-toggle-group';
 import ConfirmModal from "./Modals/ConfirmModal";
 import BuySummarySheet from "../Tables_Charts/BuySummarySheet";
 import "@/styles/components/ConfigPanel.css";
-
-
 
 // ConfigPanel.jsx – full REQUIRED_FIELDS imports
 import { REQUIRED_FIELDS as SCALPER_FIELDS }         from "../Strategy_Configs/ScalperConfig";
@@ -75,16 +62,6 @@ import { REQUIRED_FIELDS as REBALANCER_FIELDS }      from "../Strategy_Configs/R
 import { REQUIRED_FIELDS as STEALTH_FIELDS }      from "../Strategy_Configs/StealthBotConfig";
 import { REQUIRED_FIELDS as TURBO_SNIPER_FIELDS }    from "../Strategy_Configs/TurboSniperConfig";
 
-// Import optional fields for enhanced completeness calculation
-import { OPTIONAL_FIELDS as SNIPER_OPTIONAL_FIELDS }       from "../Strategy_Configs/SniperConfig";
-import { OPTIONAL_FIELDS as BREAKOUT_OPTIONAL_FIELDS }     from "../Strategy_Configs/BreakoutConfig";
-import { OPTIONAL_FIELDS as TREND_OPTIONAL_FIELDS }        from "../Strategy_Configs/TrendFollowerConfig";
-import { OPTIONAL_FIELDS as DELAYED_SNIPER_OPTIONAL_FIELDS } from "../Strategy_Configs/DelayedSniperConfig";
-import { OPTIONAL_FIELDS as TURBO_SNIPER_OPTIONAL_FIELDS }   from "../Strategy_Configs/TurboSniperConfig";
-
-
-
-
 // ⬇️  NEW helper – converts minutes → “Xh Ym”
 const formatMinutes = (mins = 0) => {
   const h = Math.floor(mins / 60);
@@ -93,22 +70,10 @@ const formatMinutes = (mins = 0) => {
 };
 
 
-
-
-
-const TARGETTABLE = [
-  "sniper",
-  "delayedSniper",
-  "breakout",
-  "dipBuyer",
-  "trendFollower",
-  "chadMode",
-  "turboSniper",
-];
+const TARGETTABLE = [ "sniper", "delayedSniper", "breakout", "dipBuyer", "trendFollower","chadMode", "turboSniper", ];
 
 /* Mapping between strategy keys and their human‑readable labels (with emoji).
-   This is used by the StrategyRail to display the currently selected
-   strategy in the settings summary row. */
+This is used by the StrategyRail to display the currently selected strategy in the settings summary row. */
 const STRAT_LABEL_MAP = {
   sniper: "🔫 Sniper",
   scalper: "⚡ Scalper",
@@ -125,37 +90,35 @@ const STRAT_LABEL_MAP = {
 };
 
 
+// helper — place near the file top
+const TargetMintBadge = ({ mint }) => (
+  <span
+    className="flex items-center gap-1 text-xs text-blue-300 truncate max-w-[180px] px-2 py-1 rounded-full bg-zinc-800 ring-1 ring-blue-500"
+    title={mint}
+  >
+    <img
+      src={`https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/${mint}/logo.png`}
+      onError={(e) => (e.currentTarget.style.display = "none")}
+      alt="token"
+      className="w-4 h-4 rounded-full"
+    />
+    🎯 {mint.slice(0, 6)}…{mint.slice(-4)}
+  </span>
+);
+
+
+const humanizeMode = (mode) =>
+  (mode || "")
+    .replace(/([A-Z])/g, " $1")   // camelCase → words
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+
+
 /* ───────────────── global user defaults ───────────────── */
 const userPrefs        = JSON.parse(localStorage.getItem("userPrefs") || "{}");
 const DEFAULT_SLIPPAGE =
   typeof userPrefs.slippage === "number" ? userPrefs.slippage : 1.0;
-
-
-  const isValidMintAddress = (address) => /^([1-9A-HJ-NP-Za-km-z]{32,44})$/.test(address);
-
-
-  const WrenchIcon = Wrench;
-
-  const isStrategyConfigValid = (config) => {
-  if (!config) return false;
-  return Object.values(config).every(
-    (v) => v !== "" && v !== null && v !== undefined
-  );
-};
-
-/** ConfigPanel displays a form that lets the user configure key trading bot settings.
- * Props: 
- * - config: current config state object
- * - setConfig: function to update config state
- */
-
-/* ---------- helper to open TP/SL modal (stub) ---------- */
-function openTpSlModal({ mint, entry }) {
-  // TODO: replace with real modal launch
-  toast.success(`🔧 TP/SL modal would open for ${mint.slice(0, 4)}… at ${entry}`);
-}
-
-let lastBlockedMint = null;   
 
 
 const ConfigPanel = ({
@@ -185,17 +148,14 @@ const ConfigPanel = ({
   setLogsOpen,
   currentBotId = null, 
 }) => {
-
   const [safetyResult, setSafetyResult] = useState(null);
   const [activeTab, setActiveTab] = useState("dashboard");
   const [justSetToken, setJustSetToken] = useState(false);
   const [botLoading, setBotLoading] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
-const [confirmResolve, setConfirmResolve] = useState(null);
-const [confirmMeta, setConfirmMeta] = useState(null);
-// const [logBotId, setLogBotId] = useState(null);
- const [logBotId, setLogBotId] = useState(currentBotId);
-
+  const [confirmResolve, setConfirmResolve] = useState(null);
+  const [confirmMeta, setConfirmMeta] = useState(null);
+  const [logBotId, setLogBotId] = useState(currentBotId);
   const miniConsoleRef = useRef(null);
   const [scheduleEnabled, setScheduleEnabled] = useState(false);   // ⏰ toggle
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false); // ⏰ modal
@@ -203,8 +163,8 @@ const [confirmMeta, setConfirmMeta] = useState(null);
   const [countdown , setCountdown]  = useState(""); 
   const isSniper = (mode) => mode === "sniper";
   const [initialSnapshot, setInitialSnapshot] = useState(() => JSON.stringify(config));
- const isDirty = running && JSON.stringify(config) !== initialSnapshot;
-     const ageMins     = config.maxTokenAgeMinutes ?? 60;         // default 60
+  const isDirty = running && JSON.stringify(config) !== initialSnapshot;
+  const ageMins     = config.maxTokenAgeMinutes ?? 60;         // default 60
   const ageFmt      = formatMinutes(ageMins);                  // e.g. “3h 10m”
   const ageWarn     = ageMins < 15 || ageMins > 120;           // aggressive/lenient?
   const ageCssClass = ageWarn ? "text-orange-400" : "text-indigo-300";
@@ -214,48 +174,33 @@ const [confirmMeta, setConfirmMeta] = useState(null);
  }, [running, config]);
 const { prefs } = useUserPrefs();
 
-  // ---------------------------------------------------------------------------
-  // Apply‑all toggle
-  //
-  // Let users optionally copy their current strategy configuration across all
-  // selected wallets.  This state is persisted to localStorage so the
-  // preference survives page reloads.  When enabled, any change to the
-  // configuration will mirror the updated values into a per‑wallet config
-  // cache stored in localStorage under the "walletConfigs" key.  A toast
-  // warning is shown the moment this option is turned on to make it clear
-  // that enabling it will overwrite any existing per‑wallet settings.
-  const [applyAllWallets, setApplyAllWallets] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem("applyAllWallets")) || false;
-    } catch {
-      return false;
-    }
-  });
 
-  // Persist toggle state
-  useEffect(() => {
-    localStorage.setItem("applyAllWallets", JSON.stringify(applyAllWallets));
-  }, [applyAllWallets]);
+  // const [applyAllWallets, setApplyAllWallets] = useState(() => {
+  //   try {
+  //     return JSON.parse(localStorage.getItem("applyAllWallets")) || false;
+  //   } catch {
+  //     return false;
+  //   }
+  // });
 
-  // Whenever config changes and apply‑all is enabled, mirror the current
-  // configuration into a simple key/value map keyed by wallet label.  This
-  // implementation intentionally avoids renaming any fields so that
-  // CONFIG_BUILDERS can consume the values unchanged.  Downstream code can
-  // read these per‑wallet configs from localStorage if needed.
-  useEffect(() => {
-    if (!applyAllWallets) return;
-    try {
-      const existing = JSON.parse(localStorage.getItem("walletConfigs")) || {};
-      if (Array.isArray(selectedWallets)) {
-        selectedWallets.forEach((w) => {
-          if (w) existing[w] = { ...config };
-        });
-        localStorage.setItem("walletConfigs", JSON.stringify(existing));
-      }
-    } catch (err) {
-      console.warn("⚠️ Failed to mirror config across wallets:", err);
-    }
-  }, [config, applyAllWallets, selectedWallets]);
+  // useEffect(() => {
+  //   localStorage.setItem("applyAllWallets", JSON.stringify(applyAllWallets));
+  // }, [applyAllWallets]);
+
+  // useEffect(() => {
+  //   if (!applyAllWallets) return;
+  //   try {
+  //     const existing = JSON.parse(localStorage.getItem("walletConfigs")) || {};
+  //     if (Array.isArray(selectedWallets)) {
+  //       selectedWallets.forEach((w) => {
+  //         if (w) existing[w] = { ...config };
+  //       });
+  //       localStorage.setItem("walletConfigs", JSON.stringify(existing));
+  //     }
+  //   } catch (err) {
+  //     console.warn("⚠️ Failed to mirror config across wallets:", err);
+  //   }
+  // }, [config, applyAllWallets, selectedWallets]);
 
 const resolved = useRef(false); 
 
@@ -263,12 +208,6 @@ const { activeWalletId } = useUser();
 
 
 const handleStart = async () => {
-  // ❌ setBotLoading(true); ← move this down
-
-  const totalSpend  = parseFloat(config.amountToSpend || 0).toFixed(2);
-  const intervalSec = Math.round(config.interval / 1000);
-  const stratCount  = multiModeEnabled ? enabledStrategies.length : 1;
-
   try {
     if (prefs?.confirmBeforeTrade) {
       const confirmed = await new Promise((resolve) => {
@@ -286,11 +225,9 @@ const handleStart = async () => {
         setShowConfirm(true);
       });
 
-      if (!confirmed) return; // ❌ No loading state if user cancels
+      if (!confirmed) return;
     }
-
-    setBotLoading(true); // ✅ Move here after confirm passes
-
+    setBotLoading(true);
     if (scheduleEnabled && launchISO) {
       await scheduleStrategy({
         mode        : selectedMode,
@@ -319,18 +256,6 @@ const handleStop = async () => {
 };
 
 
-
-
-
-const countFilledFields = (config, requiredKeys) =>
-  requiredKeys.filter((key) => {
-    const val = config?.[key];
-    if (Array.isArray(val)) return val.length > 0; //  Fix: bundles/tokens/wallets
-    return val !== "" && val !== null && val !== undefined;
-  }).length;
-
-
-
 useEffect(() => {
   if (miniConsoleRef.current) {
     miniConsoleRef.current.scrollTop = miniConsoleRef.current.scrollHeight;
@@ -342,27 +267,21 @@ useEffect(() => {
     miniConsoleRef.current.scrollTop = miniConsoleRef.current.scrollHeight;
   }
 }, [consoleLogs]);
-
 
 
   /* 🆕 Reset mini-console when we switch to a different bot */
   useEffect(() => {
   if (!logBotId) return;
 
-
   const now = new Date();
   const timestamp = now.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
   });
-
   const label = `<div class="text-cyan-400 font-semibold animate-fade-in drop-shadow-[0_0_6px_#22d3ee99]">
     🧠 Started <span class="font-bold">[${logBotId}]</span> at ${timestamp}
   </div>`;
- 
-
   const divider = `<div class="border-t border-dashed border-zinc-600 my-2 opacity-70 animate-fade-in" />`;
-
   setConsoleLogs([label, divider]);
 }, [logBotId]);
 
@@ -370,16 +289,14 @@ useEffect(() => {
 
 
 
-  const BASE_FIELDS = ["slippage", "interval", "maxTrades", "amountToSpend"];
-
+const BASE_FIELDS = ["slippage", "interval", "maxTrades", "amountToSpend"];
 const REQUIRED_KEYS = {
   // ─────────────── No extra fields ───────────────
-    sniper       : [...BASE_FIELDS, "entryThreshold", "volumeThreshold"], // 6 required
-   breakout       : [...BASE_FIELDS, "entryThreshold", "volumeThreshold"], // 6 required
+  sniper       : [...BASE_FIELDS, "entryThreshold", "volumeThreshold"], // 6 required
+  breakout       : [...BASE_FIELDS, "entryThreshold", "volumeThreshold"], // 6 required
   // ─────────────── With strategy-specific extras ───────────────
   scalper:       [...BASE_FIELDS, ...SCALPER_FIELDS],
   trendFollower: [...BASE_FIELDS, "entryThreshold", "volumeThreshold"],
-  // breakout:      [...BASE_FIELDS, ...BREAKOUT_FIELDS],
   dipBuyer:      [...BASE_FIELDS, ...DIP_FIELDS],
   chadMode:      [...BASE_FIELDS, ...CHAD_FIELDS],
   delayedSniper: [...BASE_FIELDS, ...DELAYED_SNIPER_FIELDS],
@@ -388,44 +305,6 @@ const REQUIRED_KEYS = {
   rotationBot:   [ ...ROTATION_FIELDS, "slippage" ,],
   stealthBot:   [ ...STEALTH_FIELDS, "slippage" ,],
   paperTrader: [...BASE_FIELDS, "entryThreshold", "volumeThreshold"],
-};
-
-/*
- * Optional field lists for each strategy.  These lists are sourced
- * directly from the strategy config files via named imports above.  They
- * correspond to fields that are rendered in the UI but are not strictly
- * required for execution.  We combine these with the required fields
- * and a set of common advanced fields to compute the "field completeness"
- * indicator shown in the strategy rail.  Strategies that do not export
- * an OPTIONAL_FIELDS array (e.g. scalper, chadMode, dipBuyer, rebalancer,
- * rotationBot, stealthBot, paperTrader) are mapped to an empty list.
- */
-const ADVANCED_FIELD_NAMES = [
-  "minMarketCap",
-  "maxMarketCap",
-  "haltOnFailures",
-  "cooldown",
-  "maxSlippage",
-  "priorityFeeLamports",
-  "briberyAmount",
-  "mevMode",
-  "tpPercent",
-  "slPercent",
-];
-
-const OPTIONAL_KEYS = {
-  sniper: SNIPER_OPTIONAL_FIELDS || [],
-  scalper: [],
-  breakout: BREAKOUT_OPTIONAL_FIELDS || [],
-  dipBuyer: [],
-  chadMode: [],
-  delayedSniper: DELAYED_SNIPER_OPTIONAL_FIELDS || [],
-  trendFollower: TREND_OPTIONAL_FIELDS || [],
-  paperTrader: [],
-  rebalancer: [],
-  rotationBot: [],
-  stealthBot: [],
-  turboSniper: TURBO_SNIPER_OPTIONAL_FIELDS || [],
 };
 
 /* ───── helper: list whatever is still blank ───── */
@@ -441,7 +320,7 @@ const getMissingFields = () => {
         }
       });
     }
-    return out;                 // e.g. ["scalper:entryThreshold", "sniper:amountToSpend"]
+    return out; 
   }
   const req = REQUIRED_KEYS[selectedMode] || [];
   return req.filter(k => config[k] === "" || config[k] === null || config[k] === undefined);
@@ -464,11 +343,7 @@ const STRATEGY_OPTIONS = [
 ];
 
 
-
   const [railSelection, setRailSelection] = useState(selectedMode || "sniper");
-
-
-    // helper to get full “emoji + text” from STRATEGY_OPTIONS by selectedMode
   const selectedOption = STRATEGY_OPTIONS.find((o) => o.value === railSelection);
   const selectedEmojiLabel = selectedOption ? selectedOption.label : "No";
   const [lastBlockedMint, setLastBlockedMint] = useState(null);
@@ -483,15 +358,8 @@ const STRATEGY_OPTIONS = [
 
 
   const [multiConfigs, setMultiConfigs] = useState({
-    sniper: {},
-    scalper: {},
-    delayedSniper: {},
-    trendFollower: {},
-    dipBuyer: {},
-    rotationBot: {},
-    stealthBot: {},
-    chadMode: {},
-    breakout: {},
+    sniper: {}, scalper: {}, delayedSniper: {}, trendFollower: {}, dipBuyer: {}, rotationBot: {},
+    stealthBot: {}, chadMode: {}, breakout: {},
   });
 
 
@@ -522,60 +390,40 @@ useEffect(() => {
   };
 
 
-    const requiredFieldStatus = useMemo(() => {
-  /*
-   * Helper to assemble all relevant keys for a given strategy.  We
-   * combine required fields, optional fields, and the set of
-   * common advanced fields.  Duplicates are removed via a Set.
-   */
-  const getAllKeysForStrategy = (strat) => {
-    const req = REQUIRED_KEYS[strat] || [];
-    const opt = OPTIONAL_KEYS[strat] || [];
-    return Array.from(new Set([...req, ...opt, ...ADVANCED_FIELD_NAMES]));
-  };
-
-  if (multiModeEnabled) {
-    // Multi-mode: aggregate across all enabled strategies
-    let allKeys = new Set();
-    let filledCount = 0;
-
-    for (const strat of enabledStrategies) {
-      const keys = getAllKeysForStrategy(strat);
-      keys.forEach((k) => allKeys.add(k));
-      const cfg = multiConfigs[strat] || {};
-      keys.forEach((field) => {
-        const val = cfg?.[field];
-        if (Array.isArray(val)) {
-          if (val.length > 0) filledCount += 1;
-        } else if (val !== "" && val !== null && val !== undefined) {
-          filledCount += 1;
-        }
-      });
-    }
-
-    const total = Array.from(allKeys).length;
-    return `${filledCount}/${total} fields set`;
-  } else {
-    // Single-mode: count fields for the selected strategy
-    const keys = getAllKeysForStrategy(selectedMode);
-    const cfg = config || {};
-    let filled = 0;
-    keys.forEach((field) => {
-      const val = cfg?.[field];
-      if (Array.isArray(val)) {
-        if (val.length > 0) filled += 1;
-      } else if (val !== "" && val !== null && val !== undefined) {
-        filled += 1;
+  const requiredFieldStatus = useMemo(() => {
+    // Required-only completeness: base fields + strategy REQUIRED_FIELDS
+    const countFilled = (cfg, keys) => {
+      let n = 0;
+      for (const k of keys) {
+        const v = cfg?.[k];
+        if (Array.isArray(v)) n += v.length > 0 ? 1 : 0;
+        else if (v !== "" && v !== null && v !== undefined) n += 1;
       }
-    });
-    return `${filled}/${keys.length} fields set`;
-  }
-}, [multiModeEnabled, config, selectedMode, multiConfigs, enabledStrategies]);
+      return n;
+    };
+
+    if (multiModeEnabled) {
+      // Aggregate required-only across enabled strategies
+      let allReq = new Set();
+      for (const strat of enabledStrategies) {
+        (REQUIRED_KEYS[strat] || []).forEach(k => allReq.add(k));
+      }
+      const filled = countFilled(
+        // Flatten a merged view of all multi configs for counting purposes
+        enabledStrategies.reduce((acc, s) => Object.assign(acc, multiConfigs[s] || {}), {}),
+        Array.from(allReq)
+      );
+      const total = Array.from(allReq).length || 0;
+      return total ? `${filled}/${total} fields set` : `0/0 fields set`;
+    }
+    const req = REQUIRED_KEYS[selectedMode] || [];
+    const filled = countFilled(config || {}, req);
+    return `${filled}/${req.length} fields set`;
+  }, [multiModeEnabled, config, selectedMode, multiConfigs, enabledStrategies]);
 
   // Determine the user‑friendly label for the currently selected strategy.
   // If there is no entry in the STRAT_LABEL_MAP fallback to the raw key.
   const selectedOptionLabel = STRAT_LABEL_MAP[selectedMode] || selectedMode;
-
   /**
    * Opens the strategy configuration modal from the strategy rail. In
    * multi‑mode this opens the multi‑strategy modal; otherwise it opens
@@ -590,9 +438,18 @@ useEffect(() => {
     }
   };
 
-
-
-
+  const pillText = useMemo(() => {
+  if (multiModeEnabled) {
+    const n = enabledStrategies.length;
+    return n === 0
+      ? "No strategy selected"
+      : `${n} ${n === 1 ? "strategy" : "strategies"} selected`;
+  }
+  // single-mode
+  return selectedMode
+    ? `${humanizeMode(selectedMode)} mode selected`
+    : "No strategy selected";
+}, [ enabledStrategies.length, selectedMode]);
 
   const [manualBuyAmount, setManualBuyAmount] = useState("");
   const [manualSellPercent, setManualSellPercent] = useState("");
@@ -601,36 +458,34 @@ useEffect(() => {
   const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
   const [isScheduleManagerOpen, setIsScheduleManagerOpen] = useState(false);
   const { schedules, refetchSchedules } = useSchedules();   // see §5
-    const [tempConfig, setTempConfig] = useState(config);
-    const AMOUNT_DISABLED_MODES = ["rotationBot", "rebalancer"];
-    const TPSL_DISABLED_MODES   = ["rotationBot", "rebalancer"];
+  const [tempConfig, setTempConfig] = useState(config);
+  const AMOUNT_DISABLED_MODES = ["rotationBot", "rebalancer"];
+  const TPSL_DISABLED_MODES   = ["rotationBot", "rebalancer"];
+  const modalCfg = React.useMemo(() => {
+    if (selectedMode === "stealthBot") {
+      const { wallets, tokenMint, positionSize,
+              slippage, maxSlippage, priorityFeeLamports } = config;
+      return { wallets, tokenMint, positionSize,
+              slippage, maxSlippage, priorityFeeLamports };
+    }
+    return { ...config, autoRestart };        // unchanged for other bots
+  }, [selectedMode, config, autoRestart]);
 
-const modalCfg = React.useMemo(() => {
-  if (selectedMode === "stealthBot") {
-    const { wallets, tokenMint, positionSize,
-            slippage, maxSlippage, priorityFeeLamports } = config;
-    return { wallets, tokenMint, positionSize,
-             slippage, maxSlippage, priorityFeeLamports };
-  }
-  return { ...config, autoRestart };        // unchanged for other bots
-}, [selectedMode, config, autoRestart]);
+    const onSafetyChange = (partial) =>
+    setConfig((prev) => ({ ...prev, ...partial }));
 
-  const onSafetyChange = (partial) =>
-  setConfig((prev) => ({ ...prev, ...partial }));
-
-    useEffect(() => {
-  if (isConfigModalOpen) {
-    // clone the current config into temp when modal opens
-    setTempConfig({ ...config });
-  }
-}, [isConfigModalOpen]);
+      useEffect(() => {
+    if (isConfigModalOpen) {
+      // clone the current config into temp when modal opens
+      setTempConfig({ ...config });
+    }
+  }, [isConfigModalOpen]);
 
 
 useEffect(() => {
   const loadLastConfig = async () => {
     const last = localStorage.getItem("lastStrategy");
     if (!last || multiModeEnabled) return;
-
     try {
      const arr = await listSavedConfigs();
      const match = arr.find((c) => c.strategy === last);
@@ -659,26 +514,28 @@ useEffect(() => {
   }
 }, [selectedMode]);
 
+useEffect(() => {
+  // In single-mode, mirror the rail’s selection into selectedMode
+  if (!multiModeEnabled && railSelection && railSelection !== selectedMode) {
+    setSelectedMode(railSelection);
+  }
+}, [railSelection, multiModeEnabled, selectedMode, setSelectedMode]);
 
 
 useEffect(() => {
   const handler = (e) => {
     const { mode, config } = e.detail;
-
     // ✅ Update selected mode and load config
     setSelectedMode(mode);
     setRailSelection(mode);
     setConfig(config);
     window.scrollTo({ top: 0, behavior: "smooth" });
     setMultiModeEnabled(false);
-
     toast.success(`📥 Loaded ${mode} bot for editing`);
   };
-
   window.addEventListener("viewBotConfig", handler);
   return () => window.removeEventListener("viewBotConfig", handler);
 }, []);
-
 
 
 
@@ -759,7 +616,6 @@ const getTradesKey = (mode) =>
     ? "maxRotations"
     : "maxTrades";
 
-const slippagePct = config?.slippage != null ? Number(config.slippage).toFixed(2) : "—";
 
 // ---- simple field error map  { fieldName : "msg" }
 const [errors, setErrors] = useState({})
@@ -785,21 +641,6 @@ const tradeOpts = {
   priorityFee: swapOpts.priorityFee,
 };
 
-  /* 🆕 user-level prefs (slippage, autoBuy, confirmBeforeTrade) */
-  // const [prefs, setPrefs] = useState(null);
-
-  // useEffect(() => {
-  //   getPrefs("default").then(setPrefs).catch(() => setPrefs({}));
-  // }, []);
-
-  
-
-
-
-
-const requiresExtraConfig = (mode) =>
-  ["breakout", "rotationBot", "rebalancer", "trendFollower", "chadMode", "dipBuyer", "delayedSniper", "scalper", "sniper", "stealthBot", "paperTrader"].includes(mode);
-
 
 const handleTpSlChange = (e) => {
   const { name, value } = e.target;
@@ -814,7 +655,6 @@ const handleTpSlChange = (e) => {
     if (name === "stopLoss" && numeric !== "") {
       updated.slPercent = prev.slPercent ?? 100;
     }
-
     return updated;
   });
 };
@@ -822,7 +662,6 @@ const handleTpSlChange = (e) => {
   const handleChange = (e) => {
   const { name, value } = e.target;
   const numeric = parseFloat(value);
-
   if (multiModeEnabled) {
     const activeStrategy = railSelection;
     setMultiConfigs((prev) => ({
@@ -842,7 +681,6 @@ const handleTpSlChange = (e) => {
       if (numeric > 99) {
         toast.warn("⚠️ That's a lot of SOL! Make sure you're not over-leveraging.");
       }
-
       if (numeric > selectedWalletBalance) {
         toast.error("❌ You don’t have that much SOL.");
         setErrors(prev => ({ ...prev, amountToSpend: "Exceeds wallet balance" }));
@@ -859,7 +697,6 @@ const handleTpSlChange = (e) => {
    ...(name !== "interval" && name !== "maxTrades" ? { [name]: value } : {}),
  }));
   }
-
   logEvent("CONFIG_CHANGE", { field: name, value });
 };
 
@@ -869,7 +706,6 @@ const handleTpSlChange = (e) => {
     setConfig((prev) => ({ ...prev, amountToSpend: maxSpend }));
     toast.success(`🔋 Using ${maxSpend} SOL (leaving 0.02 for fees)`);
   };
-
 
 
 
@@ -940,11 +776,6 @@ const handleManualBuy = async (rawAmt) => {
 const shortenedToken = (mint) =>
   `${mint.slice(0, 4)}…${mint.slice(-4)}`;
 
-// Provide richer descriptions for each bot strategy. Keeping tooltips
-// concise yet descriptive helps users understand the purpose of each
-// bot without overwhelming them. These descriptions draw on best
-// practices from trading UX research emphasising informative onboarding
-// and frictionless feature discovery【387607645960240†L203-L214】.
 const getStrategyHint = (mode) => (
   {
     sniper: "Automatically buys tokens the moment they list, giving you first‑mover advantage.",
@@ -1005,16 +836,6 @@ const handleManualSell = async (pct) => {
     console.error(err);
   }
 };
-// const isStartDisabled = (
-//   !config.tokenMint ||
-//   !config.slippage || isNaN(config.slippage) || Number(config.slippage) <= 0 ||
-//   !config.interval || isNaN(config.interval) || Number(config.interval) <= 0 ||
-//   !config.maxTrades || isNaN(config.maxTrades) || Number(config.maxTrades) <= 0 ||
-//   !config.amountToSpend || isNaN(config.amountToSpend) || Number(config.amountToSpend) <= 0 ||
-//   (multiModeEnabled && enabledStrategies.some((s) => !isStrategyConfigValid(multiConfigs[s])))
-// );
-
-// ⏰ block start if a schedule is pending for this mode
 
 const [hasSchedule, setHasSchedule] = useState(false);
 
@@ -1037,7 +858,6 @@ useEffect(() => {
       } else {
         setCountdown("");
       }
-
       consecutiveFails = 0;
     } catch (e) {
       consecutiveFails++;
@@ -1050,7 +870,6 @@ useEffect(() => {
 
   poll(); // initial call
   intervalId = setInterval(poll, 120000);
-
   return () => clearInterval(intervalId);
 }, [selectedMode, scheduleModalOpen, open]);
 
@@ -1059,21 +878,15 @@ const isStartDisabled = getMissingFields().length > 0;
 function blockNegatives(e, cb) {
   // Fix crash from destructuring on null event
   if (!e?.target || typeof e.target.name !== "string") return;
-
   const { name, value } = e.target;
-
   // Allow clearing input (backspace/delete)
-  if (value === "") {
-    cb?.(e);
-    return;
-  }
+  if (value === "") { cb?.(e); return; }
 
   // Stop if trying to type a minus in disallowed fields
   const allowNegative = name === "stopLoss";
   if (!allowNegative && value.includes("-")) {
-    return; // Don't update state
+return; // Don't update state
   }
-
   // Valid input, allow change
   cb?.(e);
 }
@@ -1097,7 +910,6 @@ backdrop-blur-md";
     {/* Outer container for manual trade and strategy rail – metallic gradient */}
     <div className="rounded-xl border border-zinc-700 bg-gradient-to-br from-zinc-800 via-zinc-900 to-zinc-700 shadow-inner hover:shadow-emerald-800/10 transition-shadow">
       {/* ───────────────── Quick Manual Trade Card ───────────────── */}
-
       <ManualTradeCard
         config={config}
         prefs={prefs}
@@ -1116,41 +928,40 @@ backdrop-blur-md";
         overrideActive={overrideActive}
         lastBlockedMint={lastBlockedMint}
         setLastBlockedMint={setLastBlockedMint}
-  walletId={activeWallet?.id}
+        walletId={activeWallet?.id}
       />
       {console.log("🪵 activeWallet", activeWallet)}
 
 
+      {/* ╭──────────────── Strategy Rail ────────────────╮ */}
 
-             {/* ╭──────────────── Strategy Rail ────────────────╮ */}
+      <div className="flex gap-4 mt-10">
+      {/* <div className="flex gap-4 rounded-lg p-4 border border-zinc-800 bg-zinc-900 overflow-x-auto scrollbar-none max-w-full"> */}
+      <StrategyRail
+        multiModeEnabled={multiModeEnabled}
+        enabledStrategies={enabledStrategies}
+        toggleStrategy={toggleStrategy}
+        railSelection={railSelection}
+        setRailSelection={setRailSelection}
+        setSelectedMode={setSelectedMode}
+        onScheduleClick={() => setScheduleModalOpen(true)}
+        requiredFieldStatus={requiredFieldStatus}
+        selectedMode={selectedMode}
+        selectedOptionLabel={selectedOptionLabel}
+        onOpenConfig={handleOpenStrategyConfig}
+      />
+        {/* ────────────── Config Section ────────────── */}
+      <div className="flex flex-col md:flex-row pb-6 gap-0 w-full">
 
-<div className="flex gap-4 mt-10">
-{/* <div className="flex gap-4 rounded-lg p-4 border border-zinc-800 bg-zinc-900 overflow-x-auto scrollbar-none max-w-full"> */}
-<StrategyRail
-  multiModeEnabled={multiModeEnabled}
-  enabledStrategies={enabledStrategies}
-  toggleStrategy={toggleStrategy}
-  railSelection={railSelection}
-  setRailSelection={setRailSelection}
-  setSelectedMode={setSelectedMode}
-  onScheduleClick={() => setScheduleModalOpen(true)}
-  requiredFieldStatus={requiredFieldStatus}
-  selectedMode={selectedMode}
-  selectedOptionLabel={selectedOptionLabel}
-  onOpenConfig={handleOpenStrategyConfig}
-/>
-  {/* ────────────── Config Section ────────────── */}
-<div className="flex flex-col md:flex-row pb-6 gap-0 w-full">
-
-  {/* Strategy selection rail + config layout */}
-<motion.div
-  key={multiModeEnabled ? "multi" : "single"}
-  initial={{ opacity: 0, y: 8 }}
-  animate={{ opacity: 1, y: 0 }}
-  exit={{ opacity: 0, y: -8 }}
-  transition={{ duration: 0.25 }}
-  className="flex w-full gap-6"
->    
+        {/* Strategy selection rail + config layout */}
+      <motion.div
+        key={multiModeEnabled ? "multi" : "single"}
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: -8 }}
+        transition={{ duration: 0.25 }}
+        className="flex w-full gap-6"
+      >    
 
 
     {/* ───── Config Content ───── */}
@@ -1167,30 +978,19 @@ backdrop-blur-md";
         ? "🧠 Multi-Strategy Mode"
         : `${selectedEmojiLabel} Auto-Bot Configuration`}
     </h2>
-    {/* {isDirty && (
-  <p className="text-yellow-400 text-xs font-semibold italic mt-1">
-    ⚠️ You're editing a bot that's currently running. Changes won't apply until you stop and restart it.
-  </p>
-)} */}
-
     {!multiModeEnabled && (
-<div className="bg-zinc-800/70 text-zinc-300 text-xs rounded-md p-1 mt-1 w-fit">
-  {getStrategyHint(selectedMode)}
-</div>
-    )}
+      <div className="bg-zinc-800/70 text-zinc-300 text-xs rounded-md p-1 mt-1 w-fit">
+        {getStrategyHint(selectedMode)}
+      </div>
+         )}
+    
 
-    {/* Apply‑all‑wallets toggle – sits beneath the strategy hint.  When
-        enabled, any changes to this strategy’s configuration will be
-        replicated to all selected wallets.  A toast warns the user
-        about overwriting per‑wallet settings when turning it on. */}
+    {/* {!multiModeEnabled && (
+      <div className="bg-zinc-800/70 text-zinc-300 text-xs rounded-md p-1 mt-1 w-fit">
+        {getStrategyHint(selectedMode)}
+      </div>
+          )}
     <div className="flex items-center gap-2 mt-2">
-      {/*
-        The apply‑all‑wallets toggle previously lacked a visible label, which
-        caused screen readers to announce it generically as “checkbox”.  Adding
-        both `aria-label` and a `<label>` tied to the input ensures the
-        purpose is conveyed to assistive technologies while preserving the
-        layout.  The `accent-emerald-500` class retains the green theme.
-      */}
       <input
         type="checkbox"
         id="applyAllWallets"
@@ -1208,19 +1008,14 @@ backdrop-blur-md";
       <label htmlFor="applyAllWallets" className="text-xs text-zinc-300">
         Apply to all wallets
       </label>
-    </div>
+    </div> */}
   </div>
-    {/*  <p className="text-xs text-zinc-500 italic mt-[2px]">
-        {getStrategyHint(selectedMode)}
-      </p> */}
+
 
 {/* ─────────────── TOP CONTROL BAR ─────────────── */}
 <div className="flex justify-between items-center gap-4 mb-4 pb-10">
-
-  {/* ⬅️ Mode Toggle */}
-
-
-  {/* ➡️ Bot Management ToggleGroup */}
+  {/* <- Mode Toggle */}
+  {/* -> Bot Management ToggleGroup */}
   <ToggleGroup.Root type="single" className="flex border space-x-2 border-zinc-700 rounded-md overflow-hidden shadow-inner bg-zinc-800  text-xs font-semibold">
     {/* 🟢 Running Bots */}
     <BotStatusButton
@@ -1232,7 +1027,6 @@ backdrop-blur-md";
     </div>
   }
 />
-
     {/* 💾 Saved Configs */}
     <button
       onClick={() => setIsSavedConfigModalOpen(true)}
@@ -1250,7 +1044,7 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
   >
     <CalendarClock size={14} />
     Schedules
-    {schedules.length > 0 && (               // 🟠 optional badge
+    {schedules.length > 0 && (               //  optional badge
       <span className="ml-1 text-xxs bg-orange-600/60 px-1 rounded">
         {schedules.length}
       </span>
@@ -1264,9 +1058,7 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
   bg-gradient-to-br from-zinc-800 via-zinc-900 to-zinc-700 border border-zinc-700 shadow-inner backdrop-blur
   hover:shadow-emerald-800/10 transition-shadow duration-300">
 
-  {/* Floating summary overlay (replaces right+bottom summaries) */}
-{/* <BotSummaryOverlay config={config} /> */}
-
+{/* Floating summary overlay (replaces right+bottom summaries) */}
 <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-x-9 pl-1 gap-y-10 sm:pr-10 py-1 border-r border-zinc-800">
   {[
     {
@@ -1332,7 +1124,6 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
   if (type === "button") {
     return null;
   }
-
    const intervalValue = multiModeEnabled
     ? multiConfigs[railSelection]?.[getIntervalKey(railSelection)] ?? ""
     : config[getIntervalKey(selectedMode)] ?? "";
@@ -1343,13 +1134,11 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
         {label}
         <FieldTooltip name={name}/>
       </div>
-
       <div className="relative w-full">
         {/* ICON ALWAYS PRESENT */}
         <span className="absolute left-2 top-2.5 z-10 pointer-events-none">
           {icon}
         </span>
-
         {/* rebalancer / rotation get the dropdown, everyone else an input */}
         {name === "interval" &&
         ["rebalancer","rotationBot"].includes(selectedMode) ? (
@@ -1403,9 +1192,7 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
               </Listbox.Options>
             </div>
           </Listbox>
-
         ) : (
-
           <input
             type="text"
             name={name}
@@ -1452,106 +1239,100 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
                             ? "opacity-40 cursor-not-allowed"
                             : ""
                         }`}
+                  />
+                )}
+              </div>
+            </label>
+          );
+        })}
+        </div> 
+
+      {/* Bot controls */}
+      <div className="flex flex-col ml-auto pr-2 w-full md:w-[200px] items-end justify-start relative -mt-4 gap-3">
+        {/* 🛡️ Safety Toggle */}
+        <div className="w-full pb-2">
+          <SafetyToggleRow
+            cfg={config}
+            onChange={onSafetyChange}
           />
+        </div>
 
-        )}
+        {/* Amount (SOL) input */}
+        <label className="flex flex-col text-sm font-medium gap-1 min-w-[120px] items-end w-full">
+          <div className="flex items-center gap-1 self-end">
+            <span>Amount (SOL)</span>
+            <img
+              src="https://assets.coingecko.com/coins/images/4128/small/solana.png"
+              alt="SOL"
+              className="w-4 h-4 cursor-pointer hover:scale-105 transition-transform duration-200"
+            />
+          </div>
+          <div className="relative w-full">
+            <Wallet size={16} className="absolute left-3 top-2.5  text-emerald-600" />
+          <input
+              id="bot-amount"
+              type="text"
+              inputMode="decimal"
+              name="amountToSpend"
+              aria-label="Amount to spend"
+              value={config.amountToSpend || ""}
+              onChange={handleChange}
+              placeholder={
+                selectedWalletBalance
+                  ? `bal ${selectedWalletBalance.toFixed(2)} SOL`
+                  : "0.00"
+              }
+              disabled={AMOUNT_DISABLED_MODES.includes(selectedMode)}
+              className={`pl-4 pr-3 py-2 w-full text-right bg-zinc-800 border
+                ${errors.amountToSpend ? "border-red-500" : "border-zinc-600"}
+                rounded-md placeholder:text-zinc-400
+                focus:outline-none focus:ring-[1.5px]
+                ${errors.amountToSpend ? "focus:ring-red-500" : "focus:ring-emerald-400"}
+                hover:border-emerald-500 hover:shadow-[0_0_6px_#10b98155]
+                transition-all duration-200 ease-in-out
+                ${AMOUNT_DISABLED_MODES.includes(selectedMode) ? "opacity-40 cursor-not-allowed" : ""}`}
+            />
+          </div>
+        </label>
+
+        {/* ▶️ Bot Controls */}
+        <div className="absolute right-150px top-[150px] ">
+          <BotControls
+            // disabled={disabled || isStartDisabled}
+            disabled={false}
+            missing={getMissingFields()}        
+            running={running}
+            onStart={handleStart}
+            onStop={handleStop}
+            autoRestart={autoRestart}
+            setAutoRestart={setAutoRestart}
+            currentMode={selectedMode}
+            botLoading={botLoading}
+            hasSchedule={hasSchedule}
+            countdown={countdown}   
+            />
+        </div>
       </div>
-    </label>
-  );
-})}
-</div> 
-
-        {/* Bot controls */}
-{/* Bot controls */}
-<div className="flex flex-col ml-auto pr-2 w-full md:w-[200px] items-end justify-start relative -mt-4 gap-3">
-  {/* 🛡️ Safety Toggle */}
-  <div className="w-full pb-2">
-    <SafetyToggleRow
-      cfg={config}
-      onChange={onSafetyChange}
-      
-    />
-  </div>
-
-  {/* 💰 Amount (SOL) input */}
-  <label className="flex flex-col text-sm font-medium gap-1 min-w-[120px] items-end w-full">
-    <div className="flex items-center gap-1 self-end">
-      <span>Amount (SOL)</span>
-      <img
-        src="https://assets.coingecko.com/coins/images/4128/small/solana.png"
-        alt="SOL"
-        className="w-4 h-4 cursor-pointer hover:scale-105 transition-transform duration-200"
-      />
-    </div>
-    <div className="relative w-full">
-      <Wallet size={16} className="absolute left-3 top-2.5  text-emerald-600" />
-     <input
-        id="bot-amount"
-        type="text"
-        inputMode="decimal"
-        name="amountToSpend"
-        /* Provide an explicit label for screen readers so this field
-           is announced correctly when navigating via keyboard. */
-        aria-label="Amount to spend"
-        value={config.amountToSpend || ""}
-        onChange={handleChange}
-        placeholder={
-          selectedWalletBalance
-            ? `bal ${selectedWalletBalance.toFixed(2)} SOL`
-            : "0.00"
-        }
-        disabled={AMOUNT_DISABLED_MODES.includes(selectedMode)}
-        className={`pl-4 pr-3 py-2 w-full text-right bg-zinc-800 border
-          ${errors.amountToSpend ? "border-red-500" : "border-zinc-600"}
-          rounded-md placeholder:text-zinc-400
-          focus:outline-none focus:ring-[1.5px]
-          ${errors.amountToSpend ? "focus:ring-red-500" : "focus:ring-emerald-400"}
-          hover:border-emerald-500 hover:shadow-[0_0_6px_#10b98155]
-          transition-all duration-200 ease-in-out
-          ${AMOUNT_DISABLED_MODES.includes(selectedMode) ? "opacity-40 cursor-not-allowed" : ""}`}
-      />
-    </div>
-  </label>
-
-  {/* ▶️ Bot Controls */}
-  <div className="absolute right-150px top-[150px] ">
-    <BotControls
-  // disabled={disabled || isStartDisabled}
-  disabled={false}
-  missing={getMissingFields()}        
-  running={running}
-  onStart={handleStart}
-  onStop={handleStop}
-  autoRestart={autoRestart}
-  setAutoRestart={setAutoRestart}
-  currentMode={selectedMode}
-  botLoading={botLoading}
-    hasSchedule={hasSchedule}   // ⏰ pass-through
-    countdown={countdown}       // ⏰ pass-through
-  />
-  </div>
-</div>
         
 
 
-{/* ───────────────────────── footer row ───────────────────────── */}
+      {/* ───────────────────────── footer row ───────────────────────── */}
 <div className="absolute bottom-[12px] left-4 right-3 flex items-center justify-between text-xs italic">
-
   {/* ◀️ Toggle group on left side */}
   <div className="flex flex-col gap-[3px] items-start text-zinc-300">
-
     {/* ① Explanation text */}
     {TARGETTABLE.includes(railSelection) && (
       <>
-
         {/* ② Toggle + Mint badge on 2nd line */}
         <div className="flex items-center gap-3">
-          {config.useTargetToken && config.tokenMint && (
-            <span className={`px-2 py-[1px] rounded-full bg-zinc-800 ring-1  text-blue-300  ring-blue-500
-                              flex items-center gap-1 ${justSetToken ? "ring-purple-500/30" : ""}`}>
+          {(config.tokenMint) && (
+            <span
+              className={`px-2 py-[1px] rounded-full bg-zinc-800 ring-1 text-blue-300 ring-blue-500
+                          flex items-center gap-1 ${justSetToken ? "ring-purple-500/30" : ""}`}
+            >
               <img
                 src={`https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/${config.tokenMint}/logo.png`}
-                onError={(e) => (e.target.style.display = "none")}
+                onError={(e) => (e.currentTarget.style.display = "none")}
                 alt="token"
                 className="w-3 h-3 rounded-full"
               />
@@ -1561,163 +1342,168 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
         </div>
       </>
     )}
-    {/* ⏰ Dual toggle row  */}
-<div className="flex items-center gap-6 mt-1">
-  {/* Existing Target Token switch already here */}
-<div className="flex items-center gap-2">
-  <Switch
-    checked={config.useTargetToken || false}
-    onCheckedChange={(val) => setConfig((p) => ({ ...p, useTargetToken: val }))}
-    disabled={selectedMode === "chadMode"}
-  />
-  <span className={selectedMode === "chadMode" ? "opacity-50" : ""}>
-    {selectedMode === "chadMode"
-      ? "🔥 Please input token in Chad config"
-      : <>🎯 Limit <strong>{selectedOption?.label?.split(" ")[1]}</strong> to Target Token</>}
-  </span>
-</div>
-
-  {/* ── Mode-selected pill ── */}
-<span
-  className={`ml-2 px-2 py-[1px] rounded-full text-emerald-300 bg-emerald-600/20 
-              border border-emerald-500 text-[11px] font-medium`}
->
-  {running
-      ? `${enabledStrategies.length} strategies selected`
-      : `${selectedEmojiLabel} mode selected`}
-</span>
-</div>
-
+    {/* Dual toggle row  */}
+    <div className="flex items-center gap-6 mt-1">
+      {/* Existing Target Token switch already here */}
+      <div className="flex items-center gap-2">
+        <Switch
+          checked={config.useTargetToken || false}
+          onCheckedChange={(val) =>
+            setConfig((p) => ({ ...p, useTargetToken: val }))
+          }
+          disabled={selectedMode === "chadMode"}
+        />
+        <span
+          className={
+            selectedMode === "chadMode" ? "opacity-50" : ""
+          }
+        >
+          {selectedMode === "chadMode"
+            ? "🔥 Please input token in Chad config"
+            : (
+              <>
+                🎯 Limit <strong>{selectedOption?.label?.split(" ")[1]}</strong> to Target Token
+              </>
+            )}
+        </span>
+      </div>
+          {/* ── Mode-selected pill ── */}
+      <span
+        className={`ml-2 px-2 py-[1px] rounded-full text-emerald-300 bg-emerald-600/20 
+                    border border-emerald-500 text-[11px] font-medium`}
+      >
+        {pillText}
+      </span>
+        </div>
+          </div>
+        </div>
   </div>
 
-</div>
 
-</div>
-{/* Sleek Toggle Switch – always shown */}
-<div className="mt-3 pt-5 text-xs text-zinc-400 italic px-4 flex items-center justify-between rounded-md bg-zinc-900 py-2">
-  <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer group">
-    <span className="text-emerald-400">🖥 Console</span>
-    <div className="relative">
-      <Switch
-        checked={showFullConsole}
-        onCheckedChange={setShowFullConsole}
-        className={`data-[state=checked]:bg-emerald-500 bg-zinc-700 
-                    w-9 h-5 rounded-full relative transition-all duration-300`}
-      />
-      <div className="absolute bottom-full  mb-1 left-1/2 -translate-x-1/2 z-10 hidden group-hover:block text-xs text-zinc-300 bg-zinc-900 px-2 py-1 rounded border border-zinc-700 shadow-lg whitespace-nowrap">
-        Toggle bot log console 
-      </div>
-    </div>
-  </label>
+      {/* Sleek Toggle Switch – always shown */}
+      <div className="mt-3 pt-5 text-xs text-zinc-400 italic px-4 flex items-center justify-between rounded-md bg-zinc-900 py-2">
+        <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer group">
+          <span className="text-emerald-400">🖥 Console</span>
+          <div className="relative">
+            <Switch
+              checked={showFullConsole}
+              onCheckedChange={setShowFullConsole}
+              className={`data-[state=checked]:bg-emerald-500 bg-zinc-700 
+                          w-9 h-5 rounded-full relative transition-all duration-300`}
+            />
+            <div className="absolute bottom-full  mb-1 left-1/2 -translate-x-1/2 z-10 hidden group-hover:block text-xs text-zinc-300 bg-zinc-900 px-2 py-1 rounded border border-zinc-700 shadow-lg whitespace-nowrap">
+              Toggle bot log console 
+            </div>
+          </div>
+        </label>
 
-  {/* Bot Summary — conditional */}
-  {config.amountToSpend && config.interval && (
-    <div className="flex flex-col items-end text-right">
-      <p>
-        📊 <span className="text-pink-400 font-semibold">Bot Summary</span> — Will spend&nbsp;
-        <span className="text-emerald-300 font-semibold">
-          {(() => {
-            const amt = parseFloat(config.amountToSpend);
-             const trades = parseInt(
-               config[getTradesKey(selectedMode)] || 1,
-               10
-             );
-            return (amt * (trades || 1)).toFixed(2);
-          })()}&nbsp;SOL
-        </span>{" "}
-        total (&nbsp;
-        <span className="text-emerald-300 font-semibold">
-          {(+config.amountToSpend || 0).toFixed(2)}
-        </span>{" "}
-        SOL&nbsp;per&nbsp;trade) every&nbsp;
-        <span className="text-indigo-300 font-semibold">
-          {(() => {
-            const raw = +config[getIntervalKey(selectedMode)];
-            const secs = raw >= 1000 ? Math.round(raw / 1000) : raw;
-            return `${secs} sec`;
-          })()}
-        </span>{" "}
-         up&nbsp;to&nbsp;
-         <span className="text-blue-300 font-semibold">
-           {config[getTradesKey(selectedMode)] || "∞"} trades
-        </span>
-      </p>
-
-      <p>
-        TP&nbsp;/&nbsp;SL:&nbsp;
-        <span className="text-yellow-300 font-semibold">
-          {config.takeProfit ?? "—"}%
-        </span>{" "}
-        /{" "}
-        <span className="text-red-300 font-semibold">
-          {config.stopLoss ?? "—"}%
-        </span>
-      </p>
-
-      {Number.isFinite(+config.maxTokenAgeMinutes) && +config.maxTokenAgeMinutes > 0 && (
-        <p>
-          ⏱ Max&nbsp;Token&nbsp;Age:&nbsp;
-          <span className="font-semibold text-rose-300">
-            {+config.maxTokenAgeMinutes}m
-          </span>
-        </p>
-      )}
-
-      {(config.minMarketCap || config.maxMarketCap) && (
-        <p>
-          💰 Market&nbsp;Cap:&nbsp;
-          {config.minMarketCap && (
-            <>
-              <span className="text-orange-300 font-semibold">
-                ≥ ${(+config.minMarketCap).toLocaleString()}
+        {/* Bot Summary — conditional */}
+        {config.amountToSpend && config.interval && (
+          <div className="flex flex-col items-end text-right">
+            <p>
+              📊 <span className="text-pink-400 font-semibold">Bot Summary</span> — Will spend&nbsp;
+              <span className="text-emerald-300 font-semibold">
+                {(() => {
+                  const amt = parseFloat(config.amountToSpend);
+                  const trades = parseInt(
+                    config[getTradesKey(selectedMode)] || 1,
+                    10
+                  );
+                  return (amt * (trades || 1)).toFixed(2);
+                })()}&nbsp;SOL
+              </span>{" "}
+              total (&nbsp;
+              <span className="text-emerald-300 font-semibold">
+                {(+config.amountToSpend || 0).toFixed(2)}
+              </span>{" "}
+              SOL&nbsp;per&nbsp;trade) every&nbsp;
+              <span className="text-indigo-300 font-semibold">
+                {(() => {
+                  const raw = +config[getIntervalKey(selectedMode)];
+                  const secs = raw >= 1000 ? Math.round(raw / 1000) : raw;
+                  return `${secs} sec`;
+                })()}
+              </span>{" "}
+              up&nbsp;to&nbsp;
+              <span className="text-blue-300 font-semibold">
+                {config[getTradesKey(selectedMode)] || "∞"} trades
               </span>
-              {config.maxMarketCap && " / "}
-            </>
-          )}
-          {config.maxMarketCap && (
-            <span className="text-orange-300 font-semibold">
-              ≤ ${(+config.maxMarketCap).toLocaleString()}
-            </span>
-          )}
-        </p>
-      )}
+            </p>
 
-      {scheduleEnabled && launchISO && (
-        <p>
-          📅 Launches&nbsp;
-          <span className="text-emerald-300 font-semibold">
-            {new Date(launchISO).toLocaleTimeString([], {
-              hour: "numeric",
-              minute: "2-digit",
-            })}
-          </span>{" "}
-          ·{" "}
-          {new Date(launchISO).toLocaleDateString(undefined, {
-            month: "short",
-            day: "numeric",
-          })}
-        </p>
-      )}
-    </div>
-  )}
-</div>
+            <p>
+              TP&nbsp;/&nbsp;SL:&nbsp;
+              <span className="text-yellow-300 font-semibold">
+                {config.takeProfit ?? "—"}%
+              </span>{" "}
+              /{" "}
+              <span className="text-red-300 font-semibold">
+                {config.stopLoss ?? "—"}%
+              </span>
+            </p>
 
-{/* MiniConsole – always shown */}
-<MiniConsole
-  show={showFullConsole}
-  consoleLogs={consoleLogs}
-  isAutoscroll={isAutoscroll}
-  setAutoscroll={setAutoscroll}
-  setConsoleLogs={setConsoleLogs}
-  setLogsOpen={setLogsOpen}
-  logBotId={logBotId}
-  currentBotId={currentBotId}
-  selectedMode={selectedMode}
-  config={config}
-/>
+            {Number.isFinite(+config.maxTokenAgeMinutes) && +config.maxTokenAgeMinutes > 0 && (
+              <p>
+                ⏱ Max&nbsp;Token&nbsp;Age:&nbsp;
+                <span className="font-semibold text-rose-300">
+                  {+config.maxTokenAgeMinutes}m
+                </span>
+              </p>
+            )}
 
-    </div>
-  </motion.div>  {/* ✅ CLOSE HERE */}
+            {(config.minMarketCap || config.maxMarketCap) && (
+              <p>
+                💰 Market&nbsp;Cap:&nbsp;
+                {config.minMarketCap && (
+                  <>
+                    <span className="text-orange-300 font-semibold">
+                      ≥ ${(+config.minMarketCap).toLocaleString()}
+                    </span>
+                    {config.maxMarketCap && " / "}
+                  </>
+                )}
+                {config.maxMarketCap && (
+                  <span className="text-orange-300 font-semibold">
+                    ≤ ${(+config.maxMarketCap).toLocaleString()}
+                  </span>
+                )}
+              </p>
+            )}
+
+            {scheduleEnabled && launchISO && (
+              <p>
+                📅 Launches&nbsp;
+                <span className="text-emerald-300 font-semibold">
+                  {new Date(launchISO).toLocaleTimeString([], {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
+                </span>{" "}
+                ·{" "}
+                {new Date(launchISO).toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                })}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* MiniConsole – always shown */}
+      <MiniConsole
+        show={showFullConsole}
+        consoleLogs={consoleLogs}
+        isAutoscroll={isAutoscroll}
+        setAutoscroll={setAutoscroll}
+        setConsoleLogs={setConsoleLogs}
+        setLogsOpen={setLogsOpen}
+        logBotId={logBotId}
+        currentBotId={currentBotId}
+        selectedMode={selectedMode}
+        config={config}
+      />
+          </div>
+        </motion.div> 
 
 
         {/* ────────── Action Cluster ────────── */}
@@ -1725,9 +1511,6 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
           {/* Amount (SOL) input + floating label */}
         </div>
         </div>
-
-
-
           <MultiStrategyConfigModal
             open={isMultiModalOpen}
             onClose={() => setIsMultiModalOpen(false)}
@@ -1739,77 +1522,77 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
           />
         </div>
         </div>
-{isConfigModalOpen && (
-  <>
-    {console.log("🧠 <ConfigPanel> passing walletTokens:", walletTokens)}
+      {isConfigModalOpen && (
+        <>
+          {console.log("🧠 <ConfigPanel> passing walletTokens:", walletTokens)}
 
-    <ConfigModal
-      open={isConfigModalOpen}
-      strategy={selectedOption?.label}
-      config={tempConfig}
-      setConfig={setTempConfig}
-      onSave={(finalConfig) => {
-        setConfig(finalConfig);
-        setIsConfigModalOpen(false);
-      }}
-      onClose={() => setIsConfigModalOpen(false)}
-      disabled={disabled}
-    >
-      <StrategyConfigLoader
-        strategy={selectedMode}
-        config={tempConfig}
-        setConfig={setTempConfig}
-        disabled={disabled}
-        walletTokens={walletTokens}
-      />
-    </ConfigModal>
-  </>
-)}
+          <ConfigModal
+            open={isConfigModalOpen}
+            strategy={selectedOption?.label}
+            config={tempConfig}
+            setConfig={setTempConfig}
+            onSave={(finalConfig) => {
+              setConfig(finalConfig);
+              setIsConfigModalOpen(false);
+            }}
+            onClose={() => setIsConfigModalOpen(false)}
+            disabled={disabled}
+          >
+            <StrategyConfigLoader
+              strategy={selectedMode}
+              config={tempConfig}
+              setConfig={setTempConfig}
+              disabled={disabled}
+              walletTokens={walletTokens}
+            />
+          </ConfigModal>
+        </>
+      )}
     <SavedConfigModal
-  open={isSavedConfigModalOpen}
-  onClose={() => setIsSavedConfigModalOpen(false)}
-  mode={selectedMode}
-  currentConfig={config}
-  onLoad={(cfg) => setConfig(cfg)}
-  setSelectedMode={setSelectedMode}
-/>
+      open={isSavedConfigModalOpen}
+      onClose={() => setIsSavedConfigModalOpen(false)}
+      mode={selectedMode}
+      currentConfig={config}
+      onLoad={(cfg) => setConfig(cfg)}
+      setSelectedMode={setSelectedMode}
+    />
 
-{showConfirm && confirmMeta && (
-  <ConfirmModal
-    {...confirmMeta}
-    onResolve={(ok) => {
-      setShowConfirm(false);
-      if (ok && confirmMeta?.onConfirm) {
-        confirmMeta.onConfirm(); // ← your bot start logic here
-      }
-    }}
-  />
-)}
+    {showConfirm && confirmMeta && (
+      <ConfirmModal
+        {...confirmMeta}
+        onResolve={(ok) => {
+          setShowConfirm(false);
+          if (ok && confirmMeta?.onConfirm) {
+            confirmMeta.onConfirm(); // ← your bot start logic here
+          }
+        }}
+      />
+    )}
 
-<BuySummarySheet
-  open={showBuySummary}
-  onClose={() => setShowBuySummary(false)}
-  summary={lastBuySummary}
-/>
-{scheduleModalOpen && (
-  <ScheduleLaunchModal
-    open={scheduleModalOpen}
-    onClose={() => {
-      setScheduleModalOpen(false);
-      setScheduleEnabled(false);
-    }}
-    onConfirm={(iso) => {
-      setLaunchISO(iso);
-      setScheduleModalOpen(false);
-    }}
-  />
-)}
+    <BuySummarySheet
+      open={showBuySummary}
+      onClose={() => setShowBuySummary(false)}
+      summary={lastBuySummary}
+    />
+    {scheduleModalOpen && (
+      <ScheduleLaunchModal
+        open={scheduleModalOpen}
+        onClose={() => {
+          setScheduleModalOpen(false);
+          setScheduleEnabled(false);
+        }}
+        onConfirm={(iso) => {
+          setLaunchISO(iso);
+          setScheduleModalOpen(false);
+        }}
+      />
+    )}
 
-<LimitModal
-  open={isLimitModalOpen}
-  onClose={() => setIsLimitModalOpen(false)}
-  walletId={activeWallet?.id}     // ✅ or selectedWallet?.id
-/>
+    <LimitModal
+      open={isLimitModalOpen}
+      onClose={() => setIsLimitModalOpen(false)}
+      walletId={activeWallet?.id}    
+    />
 
     <ManageSchedulesModal
       open={isScheduleManagerOpen}
@@ -1818,11 +1601,13 @@ className="px-3 py-2 h-10 flex items-center justify-center gap-2 text-zinc-300
         setScheduleModalOpen(true);
         // preload modal with existing values
         setLaunchISO(job.launchISO);
-        setEditJob(job);                     // optional: hold jobId if you want /update
+        setEditJob(job); 
       }}
     />
         </motion.div>
       );
     };
+
+
 
     export default ConfigPanel;
