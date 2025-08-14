@@ -358,7 +358,7 @@ router.post('/save-config', async (req, res) => {
 router.get('/list-configs', async (req, res) => {
   const { mode } = req.query;
   try {
-    const configs = await savedSvc.getPresets(req.user.id, mode);
+    const configs = await savedSvc.listPresets(req.user.id, mode);
     res.json(configs);
   } catch (err) {
     console.error(err);

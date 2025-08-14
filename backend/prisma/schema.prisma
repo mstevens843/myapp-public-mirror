@@ -116,7 +116,7 @@ model Wallet {
   // 🔻 DEPRECATE this ASAP (stop writing plaintext to it)
   privateKey String ?   // make optional later, then drop after migration
 
-  // 🔐 NEW: envelope-encrypted blob (Argon2id→AES-GCM object)
+  // NEW: envelope-encrypted blob (Argon2id→AES-GCM object)
   encrypted  Json?    // stores {v,alg,kdf,{iv1,tag1,pkCipher},{iv2,tag2,dekCipher},aad}
 
   /// Argon2id hash of the pass-phrase protecting this wallet. If null the
@@ -248,8 +248,8 @@ model SavedConfigs {
   /// Primary key
   id          Int      @id @default(autoincrement())
   /// Owning user (optional)
-  userId      Int?
-  isSaved     String? 
+  userId      String?
+  isSaved       Boolean  @default(true) 
   /// Name of the saved configuration
   name        String?
   /// Strategy this config applies to
@@ -337,6 +337,7 @@ model SavedConfigs {
   privateRpcUrl        String?
   /// Catch-all field for any additional strategy-specific settings not yet modelled
   extras      Json?
+  savedAt       DateTime @default(now())
   createdAt   DateTime @default(now())
   trades      Trade[]   @relation("TradeConfig")
   User User[]
@@ -570,7 +571,7 @@ model ArmSession {
 }
 
 
-// ✨ Added in paper-sim-upgrade
+// Added in paper-sim-upgrade
 // Execution model for paper simulations.  When execModel is not set
 // the simulator behaves like the legacy ideal fill.  Additional
 // models introduce depth‑aware pricing and Jito fallback logic.

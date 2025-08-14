@@ -1,11 +1,11 @@
-import React from 'react';
+import React from "react";
+import { AlertTriangle } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 /**
- * A simple React error boundary to catch runtime errors in the component
- * tree and render a fallback UI instead of leaving the page blank.  This
- * prevents the dreaded white screen of death and gives users an actionable
- * message.  You can extend this component to report errors to a logging
- * service or display a more detailed message.
+ * ErrorBoundary
+ * - Shows a friendly fallback with actions when a child throws.
+ * - Buttons: Refresh (reloads page) and Return to Dashboard (/app).
  */
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -14,21 +14,43 @@ class ErrorBoundary extends React.Component {
   }
 
   static getDerivedStateFromError() {
-    // Update state so the next render shows the fallback UI
     return { hasError: true };
   }
 
   componentDidCatch(error, info) {
-    // You could log the error to an error reporting service
     // eslint-disable-next-line no-console
-    console.error('ErrorBoundary caught an error', error, info);
+    console.error("ErrorBoundary caught an error", error, info);
   }
+
+  handleReload = () => {
+    window.location.reload();
+  };
+
+  handleHome = () => {
+    window.location.assign("/app");
+  };
 
   render() {
     if (this.state.hasError) {
       return (
-        <div role="alert" className="p-4 text-center text-red-600">
-          Something went wrong. Please refresh the page or try again later.
+        <div role="alert" className="min-h-[60vh] flex items-center justify-center bg-black">
+          <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-xl">
+            <div className="mb-3 flex items-center gap-3">
+              <AlertTriangle className="text-amber-400" size={20} />
+              <h2 className="text-lg font-semibold text-white">Something went wrong</h2>
+            </div>
+            <p className="mb-6 text-sm text-zinc-400">
+              The page crashed. You can reload, or head back to your dashboard.
+            </p>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button variant="secondary" onClick={this.handleReload}>
+                Refresh
+              </Button>
+              <Button className="bg-emerald-600 text-white" onClick={this.handleHome}>
+                Return to Dashboard
+              </Button>
+            </div>
+          </div>
         </div>
       );
     }

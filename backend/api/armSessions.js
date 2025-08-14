@@ -6,12 +6,12 @@
 // Legacy support: if wallet.encrypted is *legacy* (iv:tag:cipher hex string) or a
 // legacy `privateKey` exists, the arm endpoint will automatically migrate
 // the secret under the hood on first arm. Clients no longer need to send
-// `migrateLegacy=true`; the server auto‑detects and upgrades in place.
+// `migrateLegacy=true`; the server auto-detects and upgrades in place.
 const express = require("express");
 const router = express.Router();
 const { body, validationResult } = require("express-validator");
 
-const argon2 = require("argon2"); // for pass‑phrase hashing when migrating
+const argon2 = require("argon2"); // for pass-phrase hashing when migrating
 
 const prisma = require("../prisma/prisma");
 const requireAuth = require("../middleware/requireAuth");
@@ -33,13 +33,17 @@ function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
   skip = Math.max(0, skip);
   return { take, skip };
 }
-// ─────────────────────────────────────────────────────────────────────────────
-// helpers
-function ttlClamp(min, def, max, reqVal) {
-  const n = Number(reqVal || def);
-  return Math.max(min, Math.min(n, max));
-}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+
+// Open-ended TTL normalizer: allow any integer minutes ≥ 1, with a default.
+// No upper bound.
+function ttlNormalize(reqVal, def = 240) {
+  const n = Math.floor(Number(reqVal ?? def));
+  if (!Number.isFinite(n) || n < 1) return def;
+  return n;
+}
 
 /* helper that prints a compact preview without leaking secrets */
 function preview(data, len = 120) {
@@ -52,9 +56,6 @@ function preview(data, len = 120) {
     return "[unserialisable]";
   }
 }
-
-
-
 
 router.post("/arm", requireAuth, check2FA, async (req, res) => {
   /* ───── 1. Input validation ───── */
@@ -171,7 +172,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         console.log("🔑 Decrypting legacy blob…");
         pkBuf = legacy.decrypt(blob, { aad });
       } else if (!wallet.isProtected || isBase58PK) {
-        // Decode a base58‑encoded private key.  Accept both Buffers and strings.
+        // Decode a base58-encoded private key.  Accept both Buffers and strings.
         const raw = (() => {
           if (!pkVal) return null;
           if (Buffer.isBuffer(pkVal)) return pkVal.toString();
@@ -194,8 +195,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         throw new Error("Unsupported unprotected wallet format");
       }
 
-      // Re‑encrypt under the supplied pass‑phrase
-      console.log("🔒 Re‑encrypting to envelope-v1…");
+      // Re-encrypt under the supplied pass-phrase
+      console.log("🔒 Re-encrypting to envelope-v1…");
       const wrapped = await encryptPrivateKey(pkBuf, {
         passphrase,
         aad,
@@ -203,11 +204,11 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
       // best-effort wipe the plaintext
       try { pkBuf.fill(0); } catch {}
 
-      // Compute Argon2 hash of the pass‑phrase
+      // Compute Argon2 hash of the pass-phrase
       const passHash = await argon2.hash(passphrase);
 
       if (applyToAll) {
-        // Apply this pass‑phrase to all current and future wallets
+        // Apply this pass-phrase to all current and future wallets
         await prisma.$transaction(async (tx) => {
           // 1. Update user default hash + hint
           await tx.user.update({
@@ -283,7 +284,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         wallet.passphraseHash = null;
         wallet.privateKey = null;
       } else {
-        // Per‑wallet pass‑phrase: set hash on this wallet only
+        // Per-wallet pass-phrase: set hash on this wallet only
         await prisma.wallet.update({
           where: { id: walletId },
           data: {
@@ -313,11 +314,11 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     return res.status(400).json({ error: "Unsupported wallet format; upgrade required" });
   }
 
-  // ───── 5. Verify pass‑phrase for protected wallets ─────
+  // ───── 5. Verify pass-phrase for protected wallets ─────
   const firstTime = !wallet.passphraseHash && !user.defaultPassphraseHash;
 
   if (!migrating && !firstTime) {
-    // Only enforce pass‑phrase matching when wallet is already protected
+    // Only enforce pass-phrase matching when wallet is already protected
     let validPass = false;
     if (wallet.passphraseHash) {
       try {
@@ -326,7 +327,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         validPass = false;
       }
     }
-    // fallback to user default pass‑phrase
+    // fallback to user default pass-phrase
     if (!validPass && user.defaultPassphraseHash) {
       try {
         validPass = await argon2.verify(user.defaultPassphraseHash, passphrase);
@@ -347,7 +348,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
       });
   }
 
-  /* ───── 6. Unwrap DEK using provided pass‑phrase ───── */
+  /* ───── 6. Unwrap DEK using provided pass-phrase ───── */
   let DEK;
   try {
     DEK = await unwrapDEKWithPassphrase(blob, passphrase, aad);
@@ -357,7 +358,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   }
 
   /* ───── 7. Cache session and respond ───── */
-  const ttlMin = ttlClamp(30, 240, 720, ttlMinutes);
+  // Default to 240 minutes if missing/invalid, but allow any integer ≥1
+  const ttlMin = ttlNormalize(ttlMinutes, 240);
   arm(userId, walletId, DEK, ttlMin * 60_000);
   console.log(`🛡️ ARMED wallet ${walletId} for ${ttlMin} min`);
 
@@ -386,7 +388,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
  *   applyToAll      – optional boolean to apply this passphrase to all
  *                     existing and future wallets (global passphrase)
  *   passphraseHint  – optional string hint stored on the user or wallet
- *   forceOverwrite  – optional boolean allowing overwriting existing per‑wallet
+ *   forceOverwrite  – optional boolean allowing overwriting existing per-wallet
  *                     passphrases during applyToAll; otherwise existing
  *                     protected wallets are left untouched
  *
@@ -468,7 +470,7 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
   const isBase58PK = !!pkStringForDetect && !pkStringForDetect.includes(":");
   // Always migrate if wallet is not yet protected or we detect any
   // legacy/base58 secret.  Also honour forceOverwrite to allow replacing
-  // existing per‑wallet passphrases when applying to all.
+  // existing per-wallet passphrases when applying to all.
   const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK || forceOverwrite;
 
   // Emit debug logs without exposing key material.  pkPreview has been removed.
@@ -575,7 +577,7 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
           const pkVal = w.privateKey;
           if (pkVal) {
             // Determine whether the stored privateKey is a legacy encrypted
-            // payload (object with ct or colon‑delimited string) or a base58
+            // payload (object with ct or colon-delimited string) or a base58
             // encoded secret.  When base58 we decode directly; when legacy we
             // decrypt via the legacy helper.  Other formats are skipped.
             const isLegacyPK = !!pkVal && !Buffer.isBuffer(pkVal) && (
@@ -675,10 +677,6 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
   return res.json({ ok: true, walletId, label: wallet.label, migrated: migrating });
 });
 
-
-
-
-
 router.post("/extend", requireAuth, check2FA, async (req, res) => {
   // Log incoming request without echoing sensitive body contents
   console.log("🔁 /extend called", { walletId: (req.body && req.body.walletId) });
@@ -687,8 +685,8 @@ router.post("/extend", requireAuth, check2FA, async (req, res) => {
     console.warn("⛔ /extend missing walletId");
     return res.status(400).json({ error: "walletId required" });
   }
-  // Clamp TTL within allowed bounds and extend the session
-  const ttlMin = ttlClamp(30, 120, 720, ttlMinutes);
+  // Extend by any integer minutes ≥1; default to 120 when missing/invalid
+  const ttlMin = ttlNormalize(ttlMinutes, 120);
   const ok = extend(req.user.id, walletId, ttlMin * 60_000);
   if (!ok) {
     console.warn(`⛔ /extend failed → wallet ${walletId} not armed or session expired`);
@@ -697,11 +695,6 @@ router.post("/extend", requireAuth, check2FA, async (req, res) => {
   console.log(`✅ /extend successful → wallet ${walletId} extended to ${ttlMin} minutes`);
   return res.json({ ok: true, walletId, extendedToMinutes: ttlMin });
 });
-
-
-
-
-
 
 router.post("/disarm", requireAuth, check2FA, async (req, res) => {
   // Log disarm request without dumping the full body
@@ -721,16 +714,15 @@ router.post("/disarm", requireAuth, check2FA, async (req, res) => {
   }
 });
 
-
 /*
  * Route: POST /remove-protection
  *
- * Remove pass‑phrase protection from an existing wallet.  This operation
- * requires the caller to provide the current pass‑phrase for the wallet
- * (or the user’s default pass‑phrase if the wallet uses that).  The server
- * will verify the pass‑phrase, unwrap the DEK and secret key, then
- * re‑encrypt the key using the legacy helper and store it in the
- * `privateKey` field.  The envelope (`encrypted`) and pass‑phrase
+ * Remove pass-phrase protection from an existing wallet.  This operation
+ * requires the caller to provide the current pass-phrase for the wallet
+ * (or the user’s default pass-phrase if the wallet uses that).  The server
+ * will verify the pass-phrase, unwrap the DEK and secret key, then
+ * re-encrypt the key using the legacy helper and store it in the
+ * `privateKey` field.  The envelope (`encrypted`) and pass-phrase
  * metadata are cleared, and `isProtected` is set to false.  Any active
  * arm session for the wallet is terminated.  After removal the wallet
  * behaves as an unprotected legacy wallet.
@@ -770,7 +762,7 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
       console.warn("⚠️ Wallet not protected, nothing to remove");
       return res.status(400).json({ error: "Wallet is not protected" });
     }
-    // Verify pass‑phrase against per‑wallet or global hash
+    // Verify pass-phrase against per-wallet or global hash
     let validPass = false;
     if (wallet.passphraseHash) {
       try {
@@ -814,12 +806,12 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
     // Encrypt the base58 secret using legacy helper with AAD.  The encrypt()
     // helper returns an object with base64-encoded iv, tag and cipher text.
     // Prisma cannot store nested objects into a string column so we convert
-    // this payload into the legacy colon‑delimited hex format.  This format
+    // this payload into the legacy colon-delimited hex format.  This format
     // is supported by the decrypt() helper via the `_decryptLegacy` path.
     const legacyEnc = encrypt(pkBase58, { aad });
     // Convert the base64 payload into hex strings and join with colons.  This
     // mirrors the previous "ivHex:tagHex:cipherHex" storage format.  When
-    // decrypting, the legacy.decrypt() helper will detect a colon‑delimited
+    // decrypting, the legacy.decrypt() helper will detect a colon-delimited
     // string and invoke the legacy decryption routine.
     const ivHex  = Buffer.from(legacyEnc.iv,  'base64').toString('hex');
     const tagHex = Buffer.from(legacyEnc.tag, 'base64').toString('hex');
@@ -839,8 +831,8 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
         isProtected: false,
         passphraseHash: null,
         passphraseHint: null,
-        // Store the colon‑delimited string representation in privateKey.  This
-        // preserves at‑rest encryption while remaining compatible with our
+        // Store the colon-delimited string representation in privateKey.  This
+        // preserves at-rest encryption while remaining compatible with our
         // legacy decrypt() helper.
         privateKey: legacyString,
       },
@@ -853,19 +845,11 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
   }
 });
 
-
-
-
-
-
 router.get("/status/:walletId", requireAuth, async (req, res) => {
   const { walletId } = req.params;
   const s = status(req.user.id, walletId);
   return res.json({ walletId, ...s });
 });
-
-
-
 
 /* ========================================================================
  *  USER-LEVEL SECURITY TOGGLE
@@ -876,7 +860,8 @@ router.post(
   requireAuth,
   [
     body("requireArmToTrade").isBoolean(),
-    body("armDefaultMinutes").optional().isInt({ min: 30, max: 720 }),
+    // Allow any default ≥ 1 minute; no maximum.
+    body("armDefaultMinutes").optional().isInt({ min: 1 }),
   ],
   async (req, res) => {
     // Log incoming toggle request without dumping the full body
@@ -907,35 +892,34 @@ router.post(
   }
 );
 
-
 /**
  * GET /api/auto-return/status
  *
- * Returns the authenticated user’s current auto‑return configuration.  The
+ * Returns the authenticated user’s current auto-return configuration.  The
  * destination public key, default enabled flag and verification timestamp
  * are exposed.  If no configuration exists the result may contain null
  * values or omitted fields.
  */
- router.get('/status', requireAuth, async (req, res) => {
-   try {
+router.get('/status', requireAuth, async (req, res) => {
+  try {
     const user = await prisma.user.findUnique({
-       where: { id: req.user.id },
-       select: {
+      where: { id: req.user.id },
+      select: {
         autoReturnEnabledDefault: true,
         autoReturnDestPubkey: true,
-       },
-     });
-     return res.json(user || {});
-   } catch (err) {
-     console.error('autoReturn GET status error:', err);
-     res.status(500).json({ error: 'Failed to load auto-return status' });
-   }
- });
+      },
+    });
+    return res.json(user || {});
+  } catch (err) {
+    console.error('autoReturn GET status error:', err);
+    res.status(500).json({ error: 'Failed to load auto-return status' });
+  }
+});
 
 /**
  * POST /api/auto-return/setup
  *
- * Configure the auto‑return settings for the authenticated user.  The
+ * Configure the auto-return settings for the authenticated user.  The
  * payload may include a new destination public key and/or default flag.
  * When a destination pubkey is provided we mark it as verified
  * immediately; a real implementation should perform a tiny test transfer
@@ -952,7 +936,7 @@ router.post('/setup', requireAuth, async (req, res) => {
     excludeMints,
     usdcMints,
   } = req.body || {};
-  // Basic pubkey validation: must be a non‑empty string.  In production
+  // Basic pubkey validation: must be a non-empty string.  In production
   // you’d parse using bs58 and ensure the correct length.
   if (destPubkey !== undefined && destPubkey !== null) {
     if (typeof destPubkey !== 'string' || destPubkey.trim().length === 0) {
@@ -978,10 +962,9 @@ router.post('/setup', requireAuth, async (req, res) => {
     return res.json({ ok: true });
   } catch (err) {
     console.error('autoReturn POST setup error:', err);
-    res.status(500).json({ error: 'Failed to update auto‑return settings' });
+    res.status(500).json({ error: 'Failed to update auto-return settings' });
   }
 });
-
 
 // Aliases for legacy FE paths
 router.get('/auto-return/settings', requireAuth, async (req, res) => {
@@ -1006,8 +989,4 @@ router.post('/auto-return/settings', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-
 module.exports = router;
-
-
-
