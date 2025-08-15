@@ -1,8 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import React, { useEffect, useState } from "react";
-import { toast } from "sonner"; 
-import { useUser } from "@/contexts/UserProvider"; 
+import { useUser } from "@/contexts/UserProvider";
+
 export default function ConfigModal({
   open,
   onClose,
@@ -14,40 +14,39 @@ export default function ConfigModal({
   disabled = false,
 }) {
   const [tempConfig, setTempConfig] = useState(config);
-const { activeWallet, activeWalletId } = useUser();
+  const { activeWallet } = useUser();
 
+  useEffect(() => {
+    if (open) {
+      setTempConfig((prev) => ({
+        ...config,
+        walletId: config.walletId ?? activeWallet?.id,
+      }));
+    }
+  }, [open, config, activeWallet]);
 
-useEffect(() => {
-  if (open) {
-    setTempConfig((prev) => ({
-      ...config,
-      walletId: config.walletId ?? activeWallet?.id, 
-    }));
-  }
-}, [open, config, activeWallet]); 
+  const handleSave = () => onSave?.(tempConfig);
+  const handleCancel = () => onClose?.();
 
-const hasMissingFields = Object.values(tempConfig ?? {}).some(
-    (v) => v === "" || v === undefined || v === null
-  );
-  const handleSave = () => {
-  onSave?.(tempConfig); // ⬅️ send tempConfig to parent
-};
-
-  const handleCancel = () => {
-    onClose?.();
-  };
+  // Width rules:
+  const isTurboSniper =
+    typeof strategy === "string" && /turbo\s*sniper/i.test(strategy);
+  const widthClasses = isTurboSniper
+    ? "w-[880px] max-w-[96vw]"
+    : "w-[660px] max-w-[94vw]";
 
   return (
     <Dialog.Root open={open} onOpenChange={(v) => !v && onClose?.()}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 data-[state=open]:animate-fadeIn" />
+        {/* Darker, less see-through background */}
+        <Dialog.Overlay className="fixed inset-0 bg-black/85 backdrop-blur-sm z-40 data-[state=open]:animate-fadeIn" />
 
         <Dialog.Content
-          className="fixed top-1/2 left-1/2 z-50 w-[440px] max-w-[92vw] -translate-x-1/2 -translate-y-1/2
-                     rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl
-                     data-[state=open]:animate-scaleIn transition-all"
+          className={`fixed top-1/2 left-1/2 z-50 ${widthClasses} -translate-x-1/2 -translate-y-1/2
+                      rounded-2xl border border-zinc-700 bg-zinc-1000/95 p-6 shadow-2xl
+                      data-[state=open]:animate-scaleIn transition-all`}
         >
-          {/* 🧠 Header */}
+          {/* Header */}
           <div className="flex justify-between items-center mb-4">
             <Dialog.Title className="text-lg font-bold text-white tracking-wide">
               {strategy} Config
@@ -61,8 +60,8 @@ const hasMissingFields = Object.values(tempConfig ?? {}).some(
             </button>
           </div>
 
-          {/* ⚙️ Config Inputs */}
-          <div className="space-y-4 max-h-[60vh] overflow-y-auto pr-1 mb-4">
+          {/* Body */}
+          <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1 mb-4 overscroll-contain">
             {React.cloneElement(children, {
               config: tempConfig,
               setConfig: setTempConfig,
@@ -70,7 +69,7 @@ const hasMissingFields = Object.values(tempConfig ?? {}).some(
             })}
           </div>
 
-          {/* 🔘 Buttons */}
+          {/* Footer */}
           <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800 mt-2">
             <button
               onClick={handleCancel}
@@ -80,9 +79,9 @@ const hasMissingFields = Object.values(tempConfig ?? {}).some(
             </button>
             <button
               onClick={handleSave}
-              className="px-4 py-2 rounded-md text-white text-sm font-semibold bg-emerald-600 hover:bg-emerald-700"
+              className="px-4 py-2 rounded-md text-black text-sm font-semibold bg-emerald-500 hover:bg-emerald-600"
             >
-              Save
+              Save &amp; Apply
             </button>
           </div>
         </Dialog.Content>

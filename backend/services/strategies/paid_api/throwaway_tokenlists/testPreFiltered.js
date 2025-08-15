@@ -1,5 +1,5 @@
 // testTokenLists.js
-const getTrending = require("./getTrendingTokensList");
+const getTrending = require("../Token_Lists/getTrendingTokensList");
 const getGainers = require("./getTopGainers");
 const getNew = require("./getBirdeyNew");
 

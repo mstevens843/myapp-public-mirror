@@ -39,13 +39,29 @@ function resolveAmount(cfg = {}) {
 }
 
 /* ---------- token-feed helpers --------------------------------------- */
+/* ---------- token-feed helpers --------------------------------------- */
 function validateTokenFeed(cfg = {}, label, errors) {
-  // accept only these three literals
+  // accept only these literals
+  const allowedFeeds = [
+    "new",
+    "trending",
+    "high-liquidity",
+    "mid-cap-growth",
+    "price-surge",
+    "volume-spike",
+    "high-trade",
+    "recent-good-liquidity",
+    "all",
+    "monitored",
+  ];
+
   if (
     cfg.tokenFeed !== undefined &&
-    !["new", "trending", "all"].includes(cfg.tokenFeed)
+    !allowedFeeds.includes(cfg.tokenFeed)
   ) {
-    errors.push(`${label}: tokenFeed must be 'new', 'trending', or 'all'`);
+    errors.push(
+      `${label}: tokenFeed must be one of: ${allowedFeeds.join(", ")}`
+    );
   }
 
   if (

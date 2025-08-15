@@ -67,7 +67,7 @@ export default function ArmEndModal({
               <div className="flex flex-wrap gap-3">
                 <button
                   onClick={onReArm}
-                  className="inline-flex items-center justify-center rounded-lg px-4 py-2.5 text-sm font-medium text-zinc-900 bg-gradient-to-r from-emerald-300 via-fuchsia-300 to-cyan-300 hover:from-emerald-200 hover:via-fuchsia-200 hover:to-cyan-200 shadow-[0_8px_30px_rgb(16,185,129,0.25)]"
+                  className="inline-flex items-center justify-center rounded-lg px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-500 shadow-[0_8px_30px_rgb(16,185,129,0.25)]"
                 >
                   Re-Arm Now
                 </button>

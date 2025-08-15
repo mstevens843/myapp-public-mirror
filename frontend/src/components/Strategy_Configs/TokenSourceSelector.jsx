@@ -1,102 +1,263 @@
-// TokenSourceSelector.jsx
-import React from "react";
-import StrategyTooltip from "./StrategyTooltip";
-import { ChevronDown } from "lucide-react";
+// TokenSourceSelector.jsx — Two-pane "Variant B" layout (left radio list, right detail)
+// Solid dark UI, emerald accents, inline chart illustration
 
-const feedOptions = [
-  { value: "new", label: "New listings", title: "Newly created tokens (Birdeye)" },
-  { value: "trending", label: "Trending tokens", title: "Tokens with highest 24h volume" },
-  { value: "top-gainers-prefiltered", label: "Top Gainers (prefiltered)", title: "Tokens with highest % gain (1h), filtered" },
-  { value: "new-prefiltered", label: "New Tokens (prefiltered)", title: "Fresh mints sorted by creation time, filtered" },
-  { value: "trending-prefiltered", label: "Trending (prefiltered)", title: "High volume tokens with price filter" },
+import React, { useMemo } from "react";
+import StrategyTooltip from "./StrategyTooltip";
+import {
+  Rocket,
+  TrendingUp,
+  BarChart3,
+  CheckCircle2,
+  Droplet,
+  Bolt,
+  Activity,
+  ArrowLeftRight,
+  Clock,
+} from "lucide-react";
+
+/** Shared feed catalog (exported so parent can read labels for summary) */
+export const feedOptions = [
+  {
+    value: "new",
+    label: "New listings",
+    title: "Brand-new tokens as they appear on-chain (Birdeye feed).",
+    icon: Rocket,
+  },
+  {
+    value: "trending",
+    label: "Trending tokens",
+    title: "Highest 24h volume movers — liquidity + attention.",
+    icon: TrendingUp,
+  },
+
+  /* ── New feeds (replacing old prefiltered ones) ───────────────────────────── */
+  {
+    value: "high-liquidity",
+    label: "High Liquidity",
+    title: "Pools with strong depth and tighter spreads—safer execution during volatility.",
+    icon: Droplet,
+  },
+  {
+    value: "mid-cap-growth",
+    label: "Mid-Cap Growth",
+    title: "Mid-cap tokens showing sustained growth and improving market structure.",
+    icon: BarChart3,
+  },
+  {
+    value: "price-surge",
+    label: "Price Surge",
+    title: "Fast movers with sharp intraday upside momentum.",
+    icon: Bolt,
+  },
+  {
+    value: "volume-spike",
+    label: "Volume Spike",
+    title: "Unusual activity flags—sudden increases in traded volume.",
+    icon: Activity,
+  },
+  {
+    value: "high-trade",
+    label: "High Trade Count",
+    title: "Tokens with elevated transaction count—broad participation / bot interest.",
+    icon: ArrowLeftRight,
+  },
+  {
+    value: "recent-good-liquidity",
+    label: "Recently Listed + Liquidity",
+    title: "Newly listed tokens that already have solid liquidity provision.",
+    icon: Clock,
+  },
 ];
 
 export default function TokenSourceSelector({
-  config,          // full strategy config object
-  setConfig,       // setter from parent
-  disabled = false // disabled flag
+  config,
+  setConfig,
+  disabled = false,
 }) {
-  const { tokenFeed = "new", overrideMonitored = false, monitoredTokens = "" } = config;
+  const { tokenFeed = "new", overrideMonitored = false, monitoredTokens = "" } =
+    config || {};
 
-  /* —— common input style reused by parents —— */
-  const inp =
-    "w-full min-h-[34px] text-sm pl-3 pr-8 py-2 rounded-md border border-zinc-700 " +
-    "bg-zinc-900 text-white placeholder:text-zinc-400 focus:outline-none " +
-    "focus:ring-2 focus:ring-emerald-400 hover:border-emerald-500 transition";
+  const selectedFeed = useMemo(
+    () => feedOptions.find((f) => f.value === tokenFeed) || feedOptions[0],
+    [tokenFeed]
+  );
 
-  /* —— local change helpers —— */
-  const change = (e) => {
-    const { name, value, type, checked } = e.target;
+  const tokenCount = useMemo(
+    () =>
+      (monitoredTokens || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean).length,
+    [monitoredTokens]
+  );
+
+  const set = (patch) =>
     setConfig((p) => ({
-      ...p,
-      [name]:
-        type === "checkbox"
-          ? checked
-          : value,
+      ...(p || {}),
+      ...patch,
     }));
+
+  const onPickFeed = (value) => {
+    if (disabled || overrideMonitored) return;
+    set({ tokenFeed: value });
+  };
+
+  const onToggleOverride = (checked) => {
+    set({ overrideMonitored: checked });
   };
 
   return (
-    <div className="flex flex-col gap-2 mt-5">
-      <label className="flex flex-col text-sm font-medium gap-1">
-        {/* ——— top row (label + checkbox) ——— */}
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <span className="flex items-center gap-1 whitespace-nowrap">
-            Token Feed <StrategyTooltip name="tokenFeed" />
-          </span>
+    <div className="mt-2 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] gap-4">
+      {/* LEFT: radio-card list */}
+      <aside
+        className={`rounded-lg border ${
+          overrideMonitored ? "opacity-50" : ""
+        } border-zinc-800 bg-zinc-900/80`}
+      >
+        <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
+          <div className="text-xs font-medium text-zinc-300 flex items-center gap-1">
+            Token Feeds <StrategyTooltip name="tokenFeed" />
+          </div>
+          {/* small “selected” indicator */}
+          <div className="text-[10px] text-zinc-500">{selectedFeed.label}</div>
+        </div>
 
+        <div className="p-2 space-y-2">
+          {feedOptions.map((f) => {
+            const Icon = f.icon || TrendingUp;
+            const active = tokenFeed === f.value;
+            return (
+              <button
+                key={f.value}
+                type="button"
+                disabled={disabled || overrideMonitored}
+                onClick={() => onPickFeed(f.value)}
+                className={`w-full text-left group rounded-md border px-3 py-2 transition
+                  ${
+                    active
+                      ? "border-emerald-500/70 bg-zinc-900"
+                      : "border-zinc-800 bg-zinc-900/40 hover:bg-zinc-900"
+                  } ${disabled ? "opacity-60" : ""}`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`h-4 w-4 rounded-full ring-1 ${
+                        active
+                          ? "bg-emerald-500 ring-emerald-400"
+                          : "bg-zinc-800 ring-zinc-700 group-hover:ring-zinc-600"
+                      }`}
+                    />
+                    <Icon
+                      className={`h-4 w-4 ${
+                        active ? "text-emerald-400" : "text-zinc-400"
+                      }`}
+                    />
+                    <span
+                      className={`text-sm ${
+                        active ? "text-zinc-100" : "text-zinc-300"
+                      }`}
+                    >
+                      {f.label}
+                    </span>
+                  </div>
+                  {active && (
+                    <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+                  )}
+                </div>
+                <div className="mt-1 text-[11px] leading-snug text-zinc-400">
+                  {f.title}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      {/* RIGHT: details + custom list */}
+      <section className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-3 sm:p-4">
+        {/* Header: feed title + help */}
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              name="overrideMonitored"
-              checked={overrideMonitored}
-              onChange={change}
-              disabled={disabled}
-              className="h-3 w-3 accent-emerald-500"
+            {(() => {
+              const Icon = selectedFeed.icon || TrendingUp;
+              return <Icon className="h-5 w-5 text-emerald-400" />;
+            })()}
+            <div className="text-sm font-medium text-zinc-200">
+              {selectedFeed.label}
+            </div>
+          </div>
+          <StrategyTooltip name="tokenFeed" />
+        </div>
+
+        {/* Illustration card */}
+        <div className="mt-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-3">
+          {/* Inline “chart” SVG to match the mock (no external asset) */}
+          <svg viewBox="0 0 160 60" className="h-20 w-full" aria-hidden="true">
+            <rect x="8" y="28" width="14" height="24" rx="2" className="fill-zinc-800" />
+            <rect x="28" y="18" width="14" height="34" rx="2" className="fill-zinc-800" />
+            <rect x="48" y="10" width="14" height="42" rx="2" className="fill-zinc-800" />
+            <rect x="68" y="22" width="14" height="30" rx="2" className="fill-zinc-800" />
+            <polyline
+              points="6,44 24,36 44,20 64,30 84,16 102,26 120,10 140,18 154,8"
+              fill="none"
+              className="stroke-emerald-400"
+              strokeWidth="2.5"
+              strokeLinejoin="round"
             />
-            <span className="text-xs text-zinc-400">Use My Token List</span>
+          </svg>
+          <p className="mt-1 text-[11px] text-zinc-400 leading-snug">
+            {selectedFeed.title}
+          </p>
+        </div>
+
+        {/* Override toggle */}
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-zinc-300">Use My Token List</span>
             <StrategyTooltip name="overrideMonitored" />
           </div>
+
+          <label className="relative inline-flex h-5 w-9 items-center">
+            <input
+              type="checkbox"
+              className="peer sr-only"
+              checked={!!overrideMonitored}
+              onChange={(e) => onToggleOverride(e.target.checked)}
+              disabled={disabled}
+            />
+            <span className="absolute inset-0 rounded-full bg-zinc-700 transition peer-checked:bg-emerald-500" />
+            <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4" />
+          </label>
         </div>
 
-        {/* ——— feed select ——— */}
-        <div className="relative mt-1">
-          <select
-            name="tokenFeed"
-            value={tokenFeed}
-            onChange={change}
-            disabled={disabled}
-            className={`${inp} appearance-none pr-10`}
-          >
-        {feedOptions.map((o) => (
-          <option key={o.value} value={o.value} title={o.title}>
-            {o.label}
-          </option>
-        ))}
-          </select>
-          <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+        {/* Custom list textarea */}
+        <div className={`mt-3 ${overrideMonitored ? "opacity-100" : "opacity-60"}`}>
+          <div className="flex items-center gap-1 text-xs font-medium text-zinc-300 mb-1">
+            <span>Custom Tokens (one per line)</span>
+            <StrategyTooltip name="monitoredTokens" />
+          </div>
+          <div className="relative rounded-md border border-zinc-800 bg-zinc-950/60">
+            <textarea
+              name="monitoredTokens"
+              rows={4}
+              value={monitoredTokens}
+              onChange={(e) => set({ monitoredTokens: e.target.value })}
+              placeholder="Mint addresses…"
+              className="w-full resize-y bg-transparent px-2 py-2 text-sm text-white placeholder:text-zinc-500 outline-none"
+              disabled={disabled || !overrideMonitored}
+            />
+          </div>
+          <div className="mt-1 flex items-center justify-between">
+            <p className="text-[11px] text-zinc-400">
+              When “Use My Token List” is enabled, the feed is ignored.
+            </p>
+            <p className="text-[11px] text-zinc-400">
+              {overrideMonitored ? `Detected: ${tokenCount} token${tokenCount === 1 ? "" : "s"}` : "—"}
+            </p>
+          </div>
         </div>
-      </label>
-
-      {/* ——— custom list textarea (only if checked) ——— */}
-      {overrideMonitored && (
-        <label className="flex flex-col text-sm font-medium gap-1 mt-2">
-          <span className="flex items-center gap-1 whitespace-nowrap">
-            Custom Tokens (one per line) <StrategyTooltip name="monitoredTokens" />
-          </span>
-          <textarea
-            name="monitoredTokens"
-            rows={3}
-            value={monitoredTokens}
-            onChange={(e) =>
-              setConfig((p) => ({ ...p, monitoredTokens: e.target.value }))
-            }
-            placeholder="Mint addresses…"
-            disabled={disabled}
-            className="w-full text-sm pl-3 pr-2 py-2 rounded-md border border-zinc-700 bg-zinc-900 text-white placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
-          />
-        </label>
-      )}
+      </section>
     </div>
   );
 }
