@@ -1,7 +1,8 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 const { v4: uuid } = require("uuid");
 const { getSwapQuote, executeSwap } = require("../utils/swap");
-const { getTokenBalance, getTokenPrice, getTokenPriceApp, getTokenBalanceRaw } = require("../utils/marketData");
+const { getTokenBalance, getTokenBalanceRaw } = require("../utils/marketData");
+const getTokenPrice = require("../services/strategies/paid_api/getTokenPrice.js")
 const { PublicKey } = require("@solana/web3.js");
 const fs = require("fs");
 const path = require("path");
@@ -23,7 +24,7 @@ const { decryptPrivateKeyWithDEK } = require("../armEncryption/envelopeCrypto");
 // ------------------------------------------------------------------
 // restore missing log-file constant (dashboard still reads this file)
 const { closePositionFIFO } = require("./utils/analytics/fifoReducer")
-
+const idempotencyStore = require('../utils/idempotencyStore');
 //   } catch { /* silent fail */ }
 // }
 
@@ -63,10 +64,10 @@ async function getDecimalsCached(mint) {
   _decCache.set(mint, { v, exp: now + 3600_000 });
   return v;
 }
-async function getPxCached(mint) {
+async function getPxCached(mint, userId = null) {
   const key = mint; const now = Date.now(); const e = _pxCache.get(key);
   if (e && e.exp > now) return e.v;
-  const v = await getTokenPriceApp(mint);      // you already call this elsewhere
+  const v = await getTokenPrice(userId, mint);      // you already call this elsewhere
   _pxCache.set(key, { v, exp: now + 30_000 });
   return v;
 }
@@ -189,9 +190,21 @@ async function performManualBuy(opts) {
     context = "default",
     skipLog = false,
     tp, sl, tpPercent, slPercent,
+
+    // ✅ NEW: tie executor to route-level idempotency
+    clientOrderId = null,
   } = opts;
 
   console.log("💾 performManualBuy received TP/SL:", { tp, sl, tpPercent, slPercent });
+
+  // ✅ If we’ve already completed this exact request, return the cached full summary.
+  if (clientOrderId) {
+    const cached = idempotencyStore.get(clientOrderId);
+    if (cached) {
+      console.log("♻️ performManualBuy returning cached result for clientOrderId:", clientOrderId);
+      return cached;
+    }
+  }
 
   // ===== Guards =====
   requireAlive();
@@ -199,33 +212,31 @@ async function performManualBuy(opts) {
     throw new Error(`coolOff active for mint ${mint}`);
   }
 
-  /* ── wallet & prefs ────────────────────────────────────────────────────────── */
+  /* ── wallet & prefs ──────────────────────────────────────────────────────── */
   let wallet;
   try {
     wallet = await loadWalletKeypairArmAware(userId, walletId);
   } catch (e) {
     if (e.status === 401 || e.code === "AUTOMATION_NOT_ARMED") { e.expose = true; throw e; }
     throw e;
-  }  
+  }
   const prefs  = await getUserPreferencesByUserId(userId, context);
-  /* slippage: explicit > saved slippage > saved max‑slippage > fallback arg */
-  let slippageToUse =
-    (prefs?.slippage ?? prefs?.defaultMaxSlippage ?? slippageInput);
-  // clamp to user's max if provided
+
+  /* slippage: explicit > saved slippage > saved max-slippage > fallback arg */
+  let slippageToUse = (prefs?.slippage ?? prefs?.defaultMaxSlippage ?? slippageInput);
   if (prefs?.defaultMaxSlippage != null) {
     slippageToUse = Math.min(Number(slippageToUse), Number(prefs.defaultMaxSlippage));
   }
-  /* MEV / bribery / priority‑fee */
-  const mevMode        = (prefs?.mevMode === "secure" ? "secure" : "fast");   // sanitise
+
+  /* MEV / bribery / priority-fee */
+  const mevMode        = (prefs?.mevMode === "secure" ? "secure" : "fast");
   const briberyAmount  = prefs?.briberyAmount ?? 0;
   const priorityFeeToUse =
-    prefs?.defaultPriorityFee !== undefined
-      ? prefs.defaultPriorityFee
-      : 0;
+    prefs?.defaultPriorityFee !== undefined ? prefs.defaultPriorityFee : 0;
   const shared         = mevMode === "secure";
   console.log("🛡️ MEV settings:", { mevMode, shared, priorityFeeToUse, briberyAmount });
 
-  /* ── wallet row ────────────────────────────────────────────────────────────── */
+  /* ── wallet row ──────────────────────────────────────────────────────────── */
   const walletRow = await prisma.wallet.findUnique({
     where: { publicKey: wallet.publicKey.toBase58() },
     select: { id: true },
@@ -244,46 +255,31 @@ async function performManualBuy(opts) {
     });
     if (alreadyHolding) {
       throw new Error(
-        "🚫 Cannot set TP/SL on buy: you already hold this mint+strategy. Manage it in Open Trades.",
+        "🚫 Cannot set TP/SL on buy: you already hold this mint+strategy. Manage it in Open Trades."
       );
     }
   }
 
-  /* validate buy amount ------------------------------------------------------- */
+  /* validate buy amount ------------------------------------------------------ */
   if (
     (!amountInSOL && !amountInUSDC) ||
     ((amountInSOL != null && +amountInSOL <= 0) &&
-      (amountInUSDC != null && +amountInUSDC <= 0))
+     (amountInUSDC != null && +amountInUSDC <= 0))
   ) {
     throw new Error("❌ No valid buy amount provided – must specify amountInSOL or amountInUSDC.");
   }
 
-  /* build quote --------------------------------------------------------------- */
+  /* build quote -------------------------------------------------------------- */
   const inputMint = amountInUSDC
     ? "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" // USDC
     : SOL_MINT;                                      // SOL
 
   const inAmount = amountInUSDC
-    ? Math.floor(amountInUSDC * 1e6)   // USDC (6 dec)
-    : Math.floor(amountInSOL * 1e9);   // SOL  (9 dec)
+    ? Math.floor(amountInUSDC * 1e6)   // USDC (6 dec)
+    : Math.floor(amountInSOL * 1e9);   // SOL  (9 dec)
 
-  // ===== Dup guards (DB + TTL) =====
-  const dupRecent = await prisma.trade.findFirst({
-    where: {
-      userId, walletId, mint, strategy, type: "buy",
-      createdAt: { gte: new Date(Date.now() - 60_000) },
-    },
-    orderBy: { createdAt: "desc" },
-    select: { txHash: true },
-  });
-  if (dupRecent?.txHash) return { tx: dupRecent.txHash, message: "Duplicate prevented (recent buy)" };
-
-  const buyId = idKeyForBuy({ userId, walletId, mint, inAmount });
-  if (!idTtlCheckAndSet(buyId, 60)) {
-    const hit = _idemCache.get(buyId);
-    if (hit && (!hit.exp || hit.exp > Date.now())) return hit.res;
-    return { tx: null, message: "Suppressed duplicate click" };
-  }
+  // ❌❌ Old executor-level TTL/dup suppression removed.
+  // We now rely on the route’s jobRunner + clientOrderId for idempotency.
 
   console.log("⚙️ Applied user prefs for manual buy:", {
     slippageInput,
@@ -300,7 +296,7 @@ async function performManualBuy(opts) {
     inputMint,
     outputMint: mint,
     amount: inAmount,
-    slippageBps,                              // always pass bps
+    slippageBps, // always pass bps
   });
   if (!quote) throw new Error("❌ No route for manual buy");
 
@@ -311,7 +307,7 @@ async function performManualBuy(opts) {
       quote,
       wallet,
       shared,                                 // MEV secure?
-      priorityFee: priorityFeeToUse,          // µ‑lamports
+      priorityFee: priorityFeeToUse,          // µ-lamports
       briberyAmount,                          // lamports
     });
   } catch (err) {
@@ -327,7 +323,7 @@ async function performManualBuy(opts) {
   }
   if (!tx) throw new Error("❌ Swap transaction failed or returned null");
 
-  /* price math ---------------------------------------------------------------- */
+  /* price math --------------------------------------------------------------- */
   const decimals       = await getDecimalsCached(mint);
   const entryPriceSOL  = (Number(quote.inAmount) * 10 ** decimals) / (Number(quote.outAmount) * 1e9);
   const solPrice       = await getPxCached(SOL_MINT);
@@ -339,7 +335,7 @@ async function performManualBuy(opts) {
 
   /* analytics & DB ----------------------------------------------------------- */
   if (!skipLog) {
-    /* 1️⃣ log file */
+    // 1) file log
     logTrade({
       timestamp: new Date().toISOString(),
       strategy,
@@ -360,7 +356,7 @@ async function performManualBuy(opts) {
       shared,
     });
 
-    /* 2️⃣ trade row */
+    // 2) trade row
     await prisma.trade.create({
       data: {
         mint,
@@ -385,10 +381,13 @@ async function performManualBuy(opts) {
         priorityFee: priorityFeeToUse,
         briberyAmount,
         mevShared: shared,
+        userId,
+        // optionally persist the clientOrderId if you have a column for it
+        // clientOrderId,
       },
     });
 
-    /* 3️⃣ optional TP/SL rule */
+    // 3) optional TP/SL rule
     if (tp != null || sl != null) {
       console.log("📝 Creating TP/SL rule with:", { tp, sl, tpPercent, slPercent });
       await prisma.tpSlRule.create({
@@ -409,9 +408,6 @@ async function performManualBuy(opts) {
     }
   }
 
-  // cache successful result for TTL window
-  _idemCache.set(buyId, { res: { tx, message: "Buy complete (cached)" }, exp: Date.now() + 60_000 });
-
   /* alert -------------------------------------------------------------------- */
   const explorer  = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
   const tokenUrl  = `https://birdeye.so/token/${mint}`;
@@ -423,19 +419,19 @@ async function performManualBuy(opts) {
 
 🧾 *Mint:* \`${short}\`
 🔗 [View Token on Birdeye](${tokenUrl})
-💸 *In:* ${ amountInSOL != null ? `${fmt(amountInSOL, 3)} SOL` : `${fmt(amountInUSDC, 2)} USDC`
+💸 *In:* ${ amountInSOL != null ? `${fmt(amountInSOL, 3)} SOL` : `${fmt(amountInUSDC, 2)} USDC`
     }  ≈ \`$${usdValue ?? "?"}\`
 📈 *Entry:* \`$${entryPriceUSD ?? "N/A"}\`
 🎯 *TP/SL:* \`${ tpPercent != null || slPercent != null
-        ? `+${tpPercent ?? "N/A"} % / -${slPercent ?? "N/A"} %` : "N/A"}\`
+        ? `+${tpPercent ?? "N/A"} % / -${slPercent ?? "N/A"} %` : "N/A"}\`
 👤 *Wallet:* \`${walletLabel}\`
 🕒 *Time:* ${time}
 📡 [View Transaction](${explorer})
 `.trim();
   await alertUser(userId, alertMsg, "Buy");
 
-  /* return payload ----------------------------------------------------------- */
-  return {
+  /* ✅ return full payload (and cache by clientOrderId) ---------------------- */
+  const summary = {
     tx,
     mint,
     amountInSOL,
@@ -448,6 +444,12 @@ async function performManualBuy(opts) {
     usdValue,
     message: "Buy complete",
   };
+
+  if (clientOrderId) {
+    idempotencyStore.set(clientOrderId, summary);
+  }
+
+  return summary;
 }
 
 

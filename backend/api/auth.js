@@ -110,7 +110,30 @@ router.post("/phantom", async (req, res) => {
     }
 
     // 2) Lookup existing user by phantomPublicKey (no creation here)
-    const user = await prisma.user.findUnique({ where: { phantomPublicKey } });
+    // const user = await prisma.user.findUnique({ where: { phantomPublicKey } });
+    const user = await prisma.user.findUnique({
+      where: { phantomPublicKey },
+      select: {
+        id: true,
+        userId: true,
+        type: true,
+        activeWalletId: true,
+        phantomPublicKey: true,
+        is2FAEnabled: true,
+        require2faLogin: true,
+        require2faArm: true,
+         requireArmToTrade: true,
+        wallets: {
+          select: {
+            id: true,
+            label: true,
+           publicKey: true,
+            isProtected: true,
+           passphraseHint: true,
+          }
+        } 
+      }
+    });
 
     // 2a) New wallet → FE should go to /generate
     if (!user) {
@@ -142,16 +165,16 @@ router.post("/phantom", async (req, res) => {
       setCsrfCookie(res, csrfToken);
     }
 
-    return res.json({
-      success: true,
-      userExists: true,
-      twoFARequired: false,
-      userId: user.userId,
-      type: user.type,
-      // tokens included for non-browser clients; browsers rely on cookies
-      accessToken,
-      refreshToken,
-    });
+return res.json({
+  success: true,
+  userExists: true,
+  twoFARequired: false,
+  userId: user.userId,
+  type: user.type,
+  accessToken,
+  refreshToken,
+  user // 👈 send full profile with wallets + isProtected
+});
   } catch (err) {
     console.error("🔥 Auth error (phantom):", err.stack || err);
     res.status(500).json({ error: "Server error" });
@@ -936,58 +959,73 @@ router.post("/resend-confirm", async (req, res) => {
 
 // POST /auth/login
 router.post("/login", validate({ body: loginSchema }), async (req, res) => {
-const { email, username, password, is2FAEnabled } = req.body
+  const { email, username, password, is2FAEnabled } = req.body;
+
   if (!email && !username) return res.status(400).json({ error: "Missing fields" });
   if (!password) return res.status(400).json({ error: "Password is required" });
 
-  let user;
-  // ✅ Supabase login
- // ✅ Resolve email if only username is provided
-let resolvedEmail = email;
+  try {
+    // Resolve email from username if needed
+    let resolvedEmail = email;
+    if (!resolvedEmail && username) {
+      const userByUsername = await prisma.user.findUnique({
+        where: { username }
+      });
+      if (!userByUsername) {
+        return res.status(400).json({ error: "Invalid username." });
+      }
+      resolvedEmail = userByUsername.email;
+    }
 
-if (!resolvedEmail && username) {
-  const userByUsername = await prisma.user.findUnique({
-    where: { username }
-  });
+    // Supabase login
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: resolvedEmail,
+      password
+    });
 
-  if (!userByUsername)
-    return res.status(400).json({ error: "Invalid username." });
+    if (error) {
+      console.error("Supabase login error:", error.message);
+      return res.status(400).json({ error: error.message });
+    }
 
-  resolvedEmail = userByUsername.email;
-}
+    // Email must be verified
+    if (!data.user.email_confirmed_at) {
+      return res.status(403).json({
+        error: "Email not verified yet.",
+        unconfirmed: true
+      });
+    }
 
-// ✅ Supabase login
-const { data, error } = await supabase.auth.signInWithPassword({
-  email: resolvedEmail,
-  password
-});
+    // Pull our local user with the exact fields the UI needs
+    const user = await prisma.user.findUnique({
+      where: { userId: data.user.id },
+      select: {
+        id: true,
+        userId: true,
+        email: true,
+        username: true,
+        type: true,
+        activeWalletId: true,
+        phantomPublicKey: true,
+        is2FAEnabled: true,
+        require2faLogin: true,
+        require2faArm: true,
+        requireArmToTrade: true,
+        wallets: {
+          select: {
+            id: true,
+            label: true,
+            publicKey: true,
+            isProtected: true,
+            passphraseHint: true,
+          }
+        }
+      }
+    });
 
+    if (!user) return res.status(400).json({ error: "User not found in local system." });
 
-  if (error) {
-    console.error("Supabase login error:", error.message);
-    return res.status(400).json({ error: error.message });
-  }
-
-  // ✅ Check email verification
-if (!data.user.email_confirmed_at) {
-  return res.status(403).json({
-    error: "Email not verified yet.",
-    unconfirmed: true
-  });
-}
-
-  // ✅ Now find your local user by Supabase userId
-  user = await prisma.user.findUnique({
-    where: { userId: data.user.id }
-  });
-
-  if (!user) return res.status(400).json({ error: "User not found in local system." });
-
-    /* --------------------------------------------------
-        Dynamic 2-FA gate
-       • require2faLogin === true  →  ask for code
-       • flag can be OFF even if 2FA is enabled (arm-only)
-    -------------------------------------------------- */
+    // 2FA gate for login (independent from ARM-only flows)
     if (user.is2FAEnabled && user.require2faLogin) {
       return res.json({
         message: "2FA required",
@@ -996,43 +1034,34 @@ if (!data.user.email_confirmed_at) {
       });
     }
 
-
-  // ✅ Issue your access + refresh tokens with short lifetimes
+    // Issue access + refresh tokens
     const accessToken  = jwt.sign({ id: user.id, type: user.type }, JWT_SECRET, { expiresIn: "15m" });
-    const refreshToken = jwt.sign({ id: user.id },              JWT_SECRET, { expiresIn: "30d" });
+    const refreshToken = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: "30d" });
 
-    // Persist the refresh token so we can rotate and blacklist old ones
-    await prisma.refreshToken.create({
-      data: { token: refreshToken, userId: user.id },
-    });
+    await prisma.refreshToken.create({ data: { token: refreshToken, userId: user.id } });
 
-    // Get the user's first wallet for convenience
-    const firstWallet = await prisma.wallet.findFirst({
-      where: { userId: user.id },
-    });
-
-    // Set cookies for access and refresh tokens (helpers)
+    // Cookies + CSRF (double-submit)
     setAccessCookie(res, accessToken);
     setRefreshCookie(res, refreshToken);
-
-    // Generate and set a CSRF token cookie using double submit pattern (helper)
     {
       const csrfToken = generateCsrfToken();
       setCsrfCookie(res, csrfToken);
     }
 
-    // Return tokens and basic user info in response (for non‑browser clients)
-    res.json({
-      accessToken,
-      refreshToken,
-      userId: user.id,
-      activeWallet: firstWallet ? {
-        id: firstWallet.id,
-        label: firstWallet.label,
-        publicKey: firstWallet.publicKey,
-      } : null,
+    // 🎯 Return full user payload so the frontend can hydrate immediately
+    return res.json({
+      success: true,
+      twoFARequired: false,
+      user,              // << includes wallets[].isProtected + activeWalletId
+      accessToken,       // for non-browser clients; browsers rely on cookies
+      refreshToken
     });
+  } catch (err) {
+    console.error("🔥 /auth/login error:", err.stack || err);
+    return res.status(500).json({ error: "Server error" });
+  }
 });
+
 
 
 // POST /auth/logout

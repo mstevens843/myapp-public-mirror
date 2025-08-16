@@ -4,8 +4,8 @@
 // reflect the current number of running jobs.
 
 const { v4: uuid } = require('uuid');
-const idempotencyStore = require('../../utils/idempotencyStore.js');
-const metrics = require('../utils/');
+const idempotencyStore = require("../../utils/idempotencyStore");
+const metrics = require('../../middleware/metrics');
 
 // Track in‑flight jobs keyed by their idempotency key.  This ensures
 // concurrent callers with the same key wait on the same promise rather
@@ -14,7 +14,7 @@ const runningJobs = new Map();
 
 /**
  * Update the queue depth gauge.  Called whenever the number of
- * in‑flight jobs changes.
+ * in‑flight jobs changes. zgbz   fz
  */
 function updateGauge() {
   metrics.setQueueDepth('jobRunner', runningJobs.size);

@@ -31,20 +31,10 @@ import { useUser } from "@/contexts/UserProvider";
 
 const PRE_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
 
+/* ------------------------------- GATE ------------------------------- */
+/* Only checks loading. It always calls the SAME hooks each render.    */
 export default function Layout() {
-  const navigate = useNavigate();
-  const location = useLocation();
-
-  // Pull everything we need from UserProvider, including loading so we can gate the initial render.
-  const {
-    activeWalletId: idFromCtx,
-    activeWallet,
-    wallets = [],
-    hasGlobalPassphrase,
-    loading,
-  } = useUser();
-
-  // Gate render until /auth/me has populated context, so protection is detected on first load.
+  const { loading } = useUser(); // 1 hook, same every render
   if (loading) {
     return (
       <div className="glow-bg min-h-screen grid place-items-center text-white">
@@ -52,6 +42,23 @@ export default function Layout() {
       </div>
     );
   }
+  return <LayoutInner />; // mount the real layout only after loaded
+}
+
+/* ------------------------------- INNER ------------------------------ */
+/* Never early-returns; hook order/count is stable across renders.     */
+function LayoutInner() {
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Pull everything we need from UserProvider
+  const {
+    activeWalletId: idFromCtx,
+    activeWallet,
+    wallets = [],
+    hasGlobalPassphrase,
+    // NOTE: do NOT early-return on loading here—gate handles it.
+  } = useUser();
 
   const activeWalletId = idFromCtx ?? activeWallet?.id ?? null;
 
@@ -293,9 +300,7 @@ export default function Layout() {
 
   return (
     <div className="glow-bg min-h-screen text-white">
-      {/*
-       * Skip link for keyboard users.
-       */}
+      {/* Skip link for keyboard users. */}
       <a
         href="#main-content"
         className="sr-only focus:not-sr-only absolute top-0 left-0 m-2 px-3 py-2 bg-emerald-600 text-white rounded"
@@ -412,8 +417,12 @@ export default function Layout() {
       <ArmEndModal
         open={showEndModal}
         autoReturn={endModalAutoReturn}
-        onClose={handleCloseEndModal}
-        onReArm={handleReArmNow}
+        onClose={() => setShowEndModal(false)}
+        onReArm={() => {
+          setShowEndModal(false);
+          setActiveTab("account");
+          navigate("/account", { state: { openArm: true } });
+        }}
       />
 
       {/* What's New modal */}

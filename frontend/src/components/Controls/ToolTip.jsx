@@ -6,8 +6,8 @@ export default function FieldTooltip({ name }) {
     slippage: "Max % difference allowed between expected and executed price.",
     interval: "Time in seconds between trades (e.g. 3 seconds).",
     maxTrades: "Maximum number of trades before stopping.",
-    stopLoss: "Auto-sell if price drops below this % from entry.",
-    takeProfit: "Auto-sell if price rises above this % from entry.",
+    stopLoss: "[OPTIONAL] Auto-sell if price drops below this % from entry.",
+    takeProfit: "[OPTIONAL] Auto-sell if price rises above this % from entry.",
   }[name] || "Tooltip coming soon.";
 
   return (

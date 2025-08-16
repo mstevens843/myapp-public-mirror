@@ -302,7 +302,7 @@ export default function ManualTradeCard({
             className="w-36 px-3 py-2 bg-zinc-800 border border-zinc-600 text-white rounded"
           />
 
-          <button
+        <button
             onClick={() => {
               if (!targetMint) {
                 toast.error("⚠️ Enter a token mint address first.");

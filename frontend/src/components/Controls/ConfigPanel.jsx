@@ -141,6 +141,17 @@ const userPrefs = JSON.parse(localStorage.getItem("userPrefs") || "{}");
 const DEFAULT_SLIPPAGE =
   typeof userPrefs.slippage === "number" ? userPrefs.slippage : 1.0;
 
+/* 🔒 Hardened props to kill browser suggestions/autofill */
+const NO_SUGGEST_PROPS = {
+  autoComplete: "off",
+  autoCorrect: "off",
+  autoCapitalize: "off",
+  spellCheck: false,
+  "aria-autocomplete": "none",
+  "data-form-type": "other",
+  "data-lpignore": "true",
+};
+
 const ConfigPanel = ({
   config,
   setConfig,
@@ -706,7 +717,7 @@ const ConfigPanel = ({
     toast.success(`🔋 Using ${maxSpend} SOL (leaving 0.02 for fees)`);
   };
 
-  const handleManualBuy = async (rawAmt) => {
+ const handleManualBuy = async (rawAmt) => {
     // Determine the mint to use for manual buy.  Prefer config.tokenMint
     // but fall back to config.outputMint to support rotation/chad modes.
     const mint = config.tokenMint || config.outputMint;
@@ -1066,11 +1077,11 @@ const ConfigPanel = ({
                       },
                       {
                         label: (
-                          <div className="flex justify-between w-full">
-                            <span>Stop Loss (%)</span>
-                            <span className="text-zinc-400 italic text-xs">
+                          <div className="flex items-center">
+                            <span className="text-white">Stop Loss (%)</span>
+                            {/* <span className="ml-2 text-zinc-400 italic text-xs whitespace-nowrap">
                               (Optional)
-                            </span>
+                            </span> */}
                           </div>
                         ),
                         name: "stopLoss",
@@ -1084,11 +1095,11 @@ const ConfigPanel = ({
                       },
                       {
                         label: (
-                          <div className="flex justify-between w-full">
-                            <span>Take Profit (%)</span>
-                            <span className="text-zinc-400 italic text-xs">
+                          <div className="flex items-center">
+                            <span className="text-white">Take Profit (%)</span>
+                            {/* <span className="ml-2 text-zinc-400 italic text-xs whitespace-nowrap">
                               (Optional)
-                            </span>
+                            </span> */}
                           </div>
                         ),
                         name: "takeProfit",
@@ -1127,11 +1138,7 @@ const ConfigPanel = ({
 
                       return (
                         <label key={name} className={FIELD_WRAPPER}>
-                          <div
-                            className={`flex items-center gap-1 ${
-                              isOptional && !value ? "text-zinc-300/80 italic" : ""
-                            }`}
-                          >
+                          <div className="flex items-center gap-1">
                             {label}
                             <FieldTooltip name={name} />
                           </div>
@@ -1194,6 +1201,8 @@ const ConfigPanel = ({
                                 step={name === "amountToSpend" ? "0.001" : "1"}
                                 placeholder={placeholder}
                                 value={value}
+                                {...NO_SUGGEST_PROPS}
+                                onFocus={(e) => e.currentTarget.setAttribute("autocomplete", "off")}
                                 onChange={(e) =>
                                   ["stopLoss", "takeProfit"].includes(name)
                                     ? handleTpSlChange(e)
@@ -1207,7 +1216,7 @@ const ConfigPanel = ({
                                     AMOUNT_DISABLED_MODES.includes(selectedMode))
                                 }
                                 className={`${INPUT_BASE} ${
-                                  isOptional && !value ? "opacity-80" : ""
+                                  isOptional && !value ? "" : ""
                                 } ${
                                   ["stopLoss", "takeProfit"].includes(name) &&
                                   TPSL_DISABLED_MODES.includes(selectedMode)
@@ -1251,6 +1260,8 @@ const ConfigPanel = ({
                           name="amountToSpend"
                           aria-label="Amount to spend"
                           value={config.amountToSpend || ""}
+                          {...NO_SUGGEST_PROPS}
+                          onFocus={(e) => e.currentTarget.setAttribute("autocomplete", "off")}
                           onChange={handleChange}
                           placeholder={
                             selectedWalletBalance

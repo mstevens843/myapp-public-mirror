@@ -23,10 +23,11 @@ const BotControls = ({
   className = "",
 }) => (
   <div
-    className={`flex flex-col gap-4 w-full bg-zinc-900/50 pt-3 pb-3 px-[30px]
+    className={`flex flex-col gap-4 w-full bg-zinc-900/50 pt-3 pb-3 px-[42px]
 
                 rounded-lg shadow-md border border-zinc-700 ${className}`}
-    style={{ transform: "translateY(16px)" }}
+    style={{ transform: "translateY(16px) translateX(-6px)" }}
+    
   >
     {/* ───── Start / Stop ───── */}
     <motion.button

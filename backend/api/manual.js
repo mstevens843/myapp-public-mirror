@@ -21,6 +21,35 @@ const { checkToken: checkTokenSafety } = require('../services/security/tokenSafe
 const { sendNotification } = require('../services/notifications');
 // Explicitly import safety check helper (was implicitly referenced)
 const { isSafeToBuy } = require("../services/utils/safety/safetyCheckers/botIsSafeToBuy");
+const crypto = require("crypto");
+
+const uuidV4Regex =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function stablePick(obj, keys) {
+  const out = {};
+  for (const k of keys) if (obj[k] !== undefined) out[k] = obj[k];
+  return out;
+}
+
+function deriveIdKey(userId, path, body) {
+  // keep only fields that define intent
+  const core = stablePick(body, [
+    "amountInSOL",
+    "amountInUSDC",
+    "mint",
+    "walletId",
+    "slippage",
+    "tp",
+    "sl",
+    "tpPercent",
+    "slPercent",
+  ]);
+  const bucket = Math.floor(Date.now() / 30000); // 30s window
+  const salt = String(process.env.IDEMPOTENCY_SALT || "");
+  const raw = JSON.stringify({ userId, path, core, bucket, salt });
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
 
 // ── Pagination helper (idempotent) ───────────────────────────────────────────
 function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
@@ -89,7 +118,7 @@ const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 // --- MANUAL BUY -----------------------------------------------------------
 // Validate and protect manual buy requests. The order of middleware is important:
 // 1) requireAuth ensures only authenticated users can access
-// 2) csrfProtection enforces double‑submit cookies when session cookies are used
+// 2) csrfProtection enforces double-submit cookies when session cookies are used
 // 3) validate parses and validates the request body against the buySchema
 // Renamed legacy buy route to avoid interfering with the idempotent handler.
 router.post("/buy-old", requireAuth, csrfProtection, validate({ body: buySchema }), async (req, res) => {
@@ -362,33 +391,33 @@ try {
 // });
 
 
-//   router.get("/quote", async (req, res) => {
-//   const { inputMint, outputMint, amount, slippage } = req.query;
+router.get("/quote", async (req, res) => {
+  const { inputMint, outputMint, amount, slippage } = req.query;
 
-//   if (!inputMint || !outputMint || !amount || !slippage) {
-//     return res.status(400).json({ error: "Missing required params" });
-//   }
+  if (!inputMint || !outputMint || !amount || !slippage) {
+    return res.status(400).json({ error: "Missing required params" });
+  }
 
-//   try {
-//     const quote = await getSwapQuote({
-//       inputMint,
-//       outputMint,
-//       amount: parseInt(amount),
-//       slippage: parseFloat(slippage),
-//     });
+  try {
+    const quote = await getSwapQuote({
+      inputMint,
+      outputMint,
+      amount: parseInt(amount),
+      slippage: parseFloat(slippage),
+    });
 
-//     if (!quote) return res.status(500).json({ error: "Quote failed" });
+    if (!quote) return res.status(500).json({ error: "Quote failed" });
 
-//     res.json({
-//       outAmount: quote.outAmount,
-//       outToken: quote.outTokenSymbol,
-//       priceImpact: quote.priceImpactPct,
-//     });
-//   } catch (err) {
-//     console.error("❌ /api/quote error:", err.message);
-//     res.status(500).json({ error: "Internal Server Error" });
-//   }
-// });
+    res.json({
+      outAmount: quote.outAmount,
+      outToken: quote.outTokenSymbol,
+      priceImpact: quote.priceImpactPct,
+    });
+  } catch (err) {
+    console.error("❌ /api/quote error:", err.message);
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
 
 
 
@@ -401,7 +430,11 @@ try {
 // logic in a jobRunner so that duplicate requests with the same
 // Idempotency-Key execute exactly once and return the cached response.
 router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), async (req, res) => {
-  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  const headerKey = req.get('Idempotency-Key') || req.headers['idempotency-key'];
+  const idKey = (headerKey && uuidV4Regex.test(String(headerKey).trim()))
+    ? String(headerKey).trim()
+    : deriveIdKey(req.user.id, req.path, req.body);
+
   try {
     const jobResult = await runJob(idKey, async () => {
       console.log("🔥 /manual/buy HIT with body:", req.body);
@@ -422,6 +455,7 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
         tpPercent,
         slPercent,
       } = req.body;
+
       // Resolve wallet and label
       let wallet;
       let resolvedLabel = walletLabel;
@@ -440,29 +474,27 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
       } catch (e) {
         return { status: 403, response: { error: e.message } };
       }
+
       // Defaults and safety checks
       strategy = strategy || "manual";
       skipLog  = skipLog  || false;
+
       if ((amountInSOL && mint === USDC_MINT) || (amountInUSDC && mint === SOL_MINT)) {
         console.log("🚫 SOL ↔ USDC conversion detected — skipping trade logs");
         skipLog = true;
       }
+
       if (!amountInSOL && !amountInUSDC) {
         const prefs = await getUserPreferencesByUserId(req.user.id, context);
         if (prefs?.autoBuyEnabled) amountInSOL = prefs.autoBuyAmount;
       }
+
       if (!force) {
         const safe = await isSafeToBuy(mint);
         if (!safe) return { status: 403, response: { error: "Token failed honeypot check." } };
       }
 
       // ---- Global token safety service ----
-      // Before performing a buy verify the token is considered safe. The
-      // tokenSafetyService returns a verdict of allow/warn/block along with
-      // reasons. A verdict of "block" aborts the trade immediately. When
-      // the verdict is "warn" the user must explicitly set `force=true` to
-      // proceed. Warnings are surfaced to the UI via an error response so
-      // the frontend can display reasons.
       try {
         const { verdict, reasons } = await checkTokenSafety(mint);
         if (verdict === 'block') {
@@ -476,11 +508,6 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
       }
 
       // ---- Risk engine check ----
-      // Estimate proposed USD exposure. If amountInUSDC is provided we use
-      // that. Otherwise we roughly estimate SOL value using a configured
-      // fallback price (via environment) since manual trade flows require
-      // quoting anyway. For accurate exposures integrators should provide
-      // amountInUSDC.
       let proposedUsd = 0;
       try {
         if (amountInUSDC) proposedUsd = parseFloat(amountInUSDC);
@@ -489,6 +516,7 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
           proposedUsd = parseFloat(amountInSOL) * solPrice;
         }
       } catch (_) {}
+
       if (!force) {
         const rc = riskEngine.checkTrade(req.user.id, mint, proposedUsd);
         if (!rc.allowed) {
@@ -498,13 +526,16 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
           return { status: 403, response: { error: `Trade size exceeds risk budget. Max allowed: ${rc.maxUsd.toFixed(2)} USD` } };
         }
       }
+
       const prefsForConfirm = await getUserPreferencesByUserId(req.user.id, context);
       if (prefsForConfirm.confirmBeforeTrade && !force) {
         return { status: 403, response: { error: "🔒 Trade requires confirmation." } };
       }
+
       if ((tp != null && tpPercent == null) || (sl != null && slPercent == null)) {
         return { status: 400, response: { error: "tpPercent/slPercent required when tp/sl set." } };
       }
+
       // Execute buy
       let result;
       try {
@@ -530,6 +561,7 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
         }
         throw e;
       }
+
       // TP/SL rule creation
       if (tp != null || sl != null) {
         console.log("📥 Creating new TP/SL rule:", { tp, sl, tpPercent, slPercent });
@@ -554,10 +586,7 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
         console.log(`✅ Created new independent TP/SL rule for ${mint}`);
       }
 
-      // Record exposure after successful buy in the risk engine. If the
-      // transaction did not return a dollar value we estimate using the
-      // same heuristic as above. We ignore any errors here as failures
-      // shouldn’t block the client response.
+      // Record exposure after successful buy (best-effort)
       try {
         let usd = 0;
         if (amountInUSDC) usd = parseFloat(amountInUSDC);
@@ -569,7 +598,8 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
       } catch (_) {}
 
       return { status: 200, response: { success: true, result } };
-    });
+    }, { timeoutMs: 90_000, maxRetries: 1 });
+
     const status = jobResult.status || 200;
     return res.status(status).json(jobResult.response || {});
   } catch (err) {
@@ -581,10 +611,14 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
 // -----------------------------------------------------------------------------
 // New idempotent manual sell route. This handler mirrors the legacy
 // `/sell-old` behaviour but wraps the logic in a job runner so that duplicate
-// requests with the same Idempotency-Key execute exactly once. When the
-// header is omitted the job is not cached and will run every time.
+// requests with the same Idempotency-Key execute exactly once. If the header
+// is omitted, derive a deterministic key so concurrent clicks are coalesced.
 router.post("/sell", requireAuth, async (req, res) => {
-  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  const headerKey = req.get('Idempotency-Key') || req.headers['idempotency-key'];
+  const idKey = (headerKey && uuidV4Regex.test(String(headerKey).trim()))
+    ? String(headerKey).trim()
+    : deriveIdKey(req.user.id, req.path, req.body);
+
   try {
     const jobResult = await runJob(idKey, async () => {
       let {
@@ -680,7 +714,8 @@ router.post("/sell", requireAuth, async (req, res) => {
         throw e;
       }
       return { status: 200, response: { success: true, result } };
-    });
+    }, { timeoutMs: 90_000, maxRetries: 1 });
+
     const status = jobResult.status || 200;
     return res.status(status).json(jobResult.response || {});
   } catch (err) {

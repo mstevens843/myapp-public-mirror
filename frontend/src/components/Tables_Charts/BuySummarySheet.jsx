@@ -1,22 +1,62 @@
 // components/BuySummarySheet.jsx
-import { Sheet, SheetContent } from "@/components/ui/sheet"
-import { CheckCircle } from "lucide-react"
-import { useEffect, useRef } from "react"
+import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { CheckCircle } from "lucide-react";
+import { useEffect, useRef } from "react";
 
 export default function BuySummarySheet({ open, onClose, summary }) {
-  const bottomRef = useRef(null)
+  const bottomRef = useRef(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [summary])
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [summary]);
 
-  // 🛡️ If no summary yet, render nothing
-  if (!summary) return null
+  // 🛡️ If no summary object yet, render nothing
+  if (!summary) return null;
+
+  // ───────── helpers with safe fallbacks ─────────
+  const toNum = (v) => {
+    const n = typeof v === "string" ? parseFloat(v) : v;
+    return Number.isFinite(n) ? n : null;
+  };
+  const fmtSOL = (n) => (n == null ? "—" : toNum(n).toFixed(6));
+  const fmtUSD = (n) =>
+    n == null
+      ? "—"
+      : toNum(n).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+
+  // Accept a few common aliases so UI doesn't break if backend fields vary.
+  const entryPriceSOL =
+    toNum(summary.entryPrice) ??
+    toNum(summary.entry_price) ??
+    toNum(summary.pricePerToken) ??
+    null;
+
+  const entryPriceUSD =
+    toNum(summary.entryPriceUSD) ??
+    toNum(summary.entry_price_usd) ??
+    toNum(summary.usdPerToken) ??
+    null;
+
+  const totalUSD =
+    toNum(summary.usdValue) ??
+    toNum(summary.totalUsd) ??
+    toNum(summary.totalUSD) ??
+    null;
+
+  const tx =
+    summary.tx ||
+    summary.txHash ||
+    summary.signature ||
+    summary.transactionHash ||
+    null;
 
   return (
     <Sheet open={open} onOpenChange={onClose}>
       <SheetContent
-        hideOverlay          /* ⇦ keeps background clickable */
+        hideOverlay /* ⇦ keeps background clickable */
         side="left"
         className="h-[280px] w-full p-4 overflow-y-auto bg-zinc-900 text-sm font-mono border-t border-zinc-800 z-50"
       >
@@ -30,31 +70,40 @@ export default function BuySummarySheet({ open, onClose, summary }) {
         <div className="space-y-2 leading-relaxed">
           <p>
             <span className="font-medium">• Entry Price:</span>{" "}
-            {summary.entryPrice?.toFixed(6)} SOL
+            {fmtSOL(entryPriceSOL)} <span className="text-zinc-400">SOL</span>
           </p>
+
           <p>
             <span className="font-medium">• Entry Price&nbsp;(USD):</span>{" "}
-            ${summary.entryPriceUSD}
+            <span className="text-zinc-400">$</span>
+            {fmtUSD(entryPriceUSD)}
           </p>
+
           <p>
             <span className="font-medium">• Total USD&nbsp;Value:</span>{" "}
-            ${summary.usdValue}
+            <span className="text-zinc-400">$</span>
+            {fmtUSD(totalUSD)}
           </p>
+
           <p>
             <span className="font-medium">• Tx:</span>{" "}
-            <a
-              href={`https://explorer.solana.com/tx/${summary.tx}?cluster=mainnet-beta`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-400 underline"
-            >
-              View Transaction
-            </a>
+            {tx ? (
+              <a
+                href={`https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-400 underline"
+              >
+                View Transaction
+              </a>
+            ) : (
+              <span className="text-zinc-400">—</span>
+            )}
           </p>
         </div>
 
         <div ref={bottomRef} />
       </SheetContent>
     </Sheet>
-  )
+  );
 }

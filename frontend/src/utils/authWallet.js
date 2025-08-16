@@ -113,8 +113,9 @@ export async function phantomLogin(payload) {
 
     const text = await res.text();
     let data;
-    try { data = JSON.parse(text); }
-    catch {
+    try {
+      data = JSON.parse(text);
+    } catch {
       console.error("❌ /auth/phantom → non-JSON:", text);
       return null;
     }
@@ -123,6 +124,16 @@ export async function phantomLogin(payload) {
       console.error("❌ Phantom login failed:", res.status, data?.error || text);
       return null;
     }
+
+    // 🔊 Broadcast to UserProvider so it can hydrate RIGHT NOW.
+    // If backend returns user payload, include it. If not, fire event without detail
+    // so the provider does a /auth/me refresh immediately.
+    if (data?.user) {
+      window.dispatchEvent(new CustomEvent("auth:login", { detail: { user: data.user } }));
+    } else {
+      window.dispatchEvent(new CustomEvent("auth:login"));
+    }
+
     return data;
   } catch (err) {
     console.error("❌ Phantom login request error:", err.message);

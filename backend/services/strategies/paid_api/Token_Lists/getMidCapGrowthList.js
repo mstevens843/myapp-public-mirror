@@ -8,12 +8,12 @@
  */
 
 try {
-  require("dotenv").config({ path: __dirname + "/../../../.env" });
+require("dotenv").config({ path: __dirname + "/../../../../.env" });
 } catch (_) {
   /* dotenv is optional */
 }
-const CU_TABLE = require("./cuTable");
-const { birdeyeCUCounter } = require("./birdeyeCUCounter");
+const CU_TABLE = require("../cuTable");
+const { birdeyeCUCounter } = require("../birdeyeCUCounter");
 
 const URL = "https://public-api.birdeye.so/defi/v3/token/list";
 

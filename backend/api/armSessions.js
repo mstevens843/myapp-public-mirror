@@ -815,4 +815,128 @@ router.post("/auto-return/settings", requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
+
+
+/*
+ * Route: POST /remove-protection
+ *
+ * Remove pass‑phrase protection from an existing wallet.  This operation
+ * requires the caller to provide the current pass‑phrase for the wallet
+ * (or the user’s default pass‑phrase if the wallet uses that).  The server
+ * will verify the pass‑phrase, unwrap the DEK and secret key, then
+ * re‑encrypt the key using the legacy helper and store it in the
+ * `privateKey` field.  The envelope (`encrypted`) and pass‑phrase
+ * metadata are cleared, and `isProtected` is set to false.  Any active
+ * arm session for the wallet is terminated.  After removal the wallet
+ * behaves as an unprotected legacy wallet.
+ */
+router.post("/remove-protection", requireAuth, async (req, res) => {
+  // Log invocation without echoing the passphrase or full body
+  console.log("🔓 /remove-protection called", { walletId: (req.body && req.body.walletId) });
+  const { walletId, passphrase } = req.body || {};
+  if (!walletId || passphrase === undefined) {
+    console.warn("⛔ Missing walletId or passphrase on remove-protection");
+    return res.status(400).json({ error: "walletId & passphrase required" });
+  }
+  try {
+    const userId = req.user.id;
+    // Fetch wallet and user
+    const [user, wallet] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { defaultPassphraseHash: true },
+      }),
+      prisma.wallet.findFirst({
+        where: { id: walletId, userId },
+        select: {
+          id: true,
+          encrypted: true,
+          isProtected: true,
+          passphraseHash: true,
+          privateKey: true,
+        },
+      }),
+    ]);
+    if (!wallet) {
+      console.warn("⛔ Wallet not found for remove-protection");
+      return res.status(404).json({ error: "Wallet not found" });
+    }
+    if (!wallet.isProtected) {
+      console.warn("⚠️ Wallet not protected, nothing to remove");
+      return res.status(400).json({ error: "Wallet is not protected" });
+    }
+    // Verify pass‑phrase against per‑wallet or global hash
+    let validPass = false;
+    if (wallet.passphraseHash) {
+      try {
+        validPass = await argon2.verify(wallet.passphraseHash, passphrase);
+      } catch {
+        validPass = false;
+      }
+    }
+    if (!validPass && user.defaultPassphraseHash) {
+      try {
+        validPass = await argon2.verify(user.defaultPassphraseHash, passphrase);
+      } catch {
+        validPass = false;
+      }
+    }
+    if (!validPass) {
+      console.warn("⛔ Invalid passphrase on remove-protection");
+      return res.status(401).json({ error: "Invalid passphrase" });
+    }
+    // Derive secret key from envelope
+    const aad = `user:${userId}:wallet:${walletId}`;
+    let DEK;
+    try {
+      DEK = await unwrapDEKWithPassphrase(wallet.encrypted, passphrase, aad);
+    } catch (err) {
+      console.error("❌ Failed to unwrap DEK on remove-protection:", err.message);
+      return res.status(401).json({ error: "Invalid passphrase" });
+    }
+    let pkBuf;
+    try {
+      pkBuf = decryptPrivateKeyWithDEK(wallet.encrypted, DEK, aad);
+    } catch (err) {
+      console.error("❌ Failed to decrypt private key on remove-protection:", err.message);
+      return res.status(500).json({ error: "Failed to decrypt wallet key" });
+    }
+    // Encode to base58
+    const pkBase58 = bs58.encode(Buffer.from(pkBuf));
+    // Clear sensitive buffers
+    try { pkBuf.fill(0); } catch {}
+    try { DEK.fill(0); } catch {}
+    const legacyEnc = encrypt(pkBase58, { aad });
+    const ivHex  = Buffer.from(legacyEnc.iv,  'base64').toString('hex');
+    const tagHex = Buffer.from(legacyEnc.tag, 'base64').toString('hex');
+    const ctHex  = Buffer.from(legacyEnc.ct,  'base64').toString('hex');
+    const legacyString = `${ivHex}:${tagHex}:${ctHex}`;
+    // Remove any active session
+    try {
+      disarm(userId, walletId);
+    } catch (e) {
+      console.warn("⚠️ Error disarming during remove-protection:", e.message);
+    }
+    // Persist changes: clear envelope & passphrase, set privateKey
+    await prisma.wallet.update({
+      where: { id: walletId },
+      data: {
+        encrypted: null,
+        isProtected: false,
+        passphraseHash: null,
+        passphraseHint: null,
+        privateKey: legacyString,
+      },
+    });
+    console.log(`✅ Removed protection for wallet ${walletId}`);
+    return res.json({ ok: true, walletId, removed: true });
+  } catch (err) {
+    console.error("🔥 remove-protection error:", err.stack || err);
+    return res.status(500).json({ error: "Failed to remove protection" });
+  }
+});
+
+
+
+
 module.exports = router;

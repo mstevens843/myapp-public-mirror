@@ -15,19 +15,29 @@ setBaseUrl(import.meta.env.VITE_API_BASE_URL || "");
  * - plan, subscriptionStatus, usage, usageResetAt, credits
  * - is2FAEnabled, preferences (tpSlEnabled, slippage, etc)
  */
-export async function getUserProfile() {
+export async function getUserProfile(initialProfile = null) {
   try {
+    // 🆕 If caller already has a profile from login, skip the fetch
+    if (initialProfile) {
+      return initialProfile;
+    }
+
     let res = await authFetch('/api/auth/me', {
-     headers: { 'Cache-Control': 'no-cache' }, // request directive
-   });
-   // Some dev proxies still return 304. Force a fresh read once.
-   if (res.status === 304) {
-     res = await authFetch(`/api/auth/me?ts=${Date.now()}`, { headers: { 'Cache-Control': 'no-cache' } });
-   }
+      headers: { 'Cache-Control': 'no-cache' },
+    });
+
+    // Some dev proxies still return 304. Force a fresh read once.
+    if (res.status === 304) {
+      res = await authFetch(`/api/auth/me?ts=${Date.now()}`, {
+        headers: { 'Cache-Control': 'no-cache' }
+      });
+    }
+
     if (!res) {
       console.warn("No response from /auth/me – user probably not logged in.");
       return null;
     }
+
     const text = await res.text();
     let data;
     try {
@@ -36,17 +46,18 @@ export async function getUserProfile() {
       console.error("❌ Invalid JSON from /auth/me:", text);
       return null;
     }
+
     if (!res.ok) {
       console.error("❌ /auth/me error:", res.status, data?.error || text);
       return null;
     }
+
     return data;
   } catch (err) {
     console.error("❌ getUserProfile failed:", err.message);
     return null;
   }
 }
-
 
 /**
  * 🆕 fetchWalletBalance(opts)
@@ -195,6 +206,14 @@ export async function manualBuy(amountInSOL, mint, opts = {}) {
     slPercent,
   } = opts;
 
+  // one key per user click; reused for any internal retries
+  const idemKey =
+    (typeof window !== "undefined" &&
+     window.crypto &&
+     typeof window.crypto.randomUUID === "function")
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
   const body = {
     amountInSOL, mint, walletId, slippage, force, amountInUSDC,
     tp, sl, tpPercent, slPercent
@@ -203,7 +222,9 @@ export async function manualBuy(amountInSOL, mint, opts = {}) {
 
   const res = await authFetch("/api/manual/buy", {
     method: "POST",
+    headers: { "Idempotency-Key": idemKey },
     body: JSON.stringify(body),
+    timeoutMs: 90000,
   });
 
   const data = await res.json();
@@ -226,6 +247,10 @@ export async function manualBuy(amountInSOL, mint, opts = {}) {
   return data.result;
 }
 
+
+
+
+
 /** 🔁 Sell by PERCENT of balance (0–1) */
 export async function manualSell(percent, mint, opts = {}) {
   const {
@@ -237,12 +262,24 @@ export async function manualSell(percent, mint, opts = {}) {
     strategy = "manual",
   } = opts;
 
+
+    // one key per user click; reused for any internal retries
+  const idemKey =
+    (typeof window !== "undefined" &&
+     window.crypto &&
+     typeof window.crypto.randomUUID === "function")
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+
   const body = { percent, mint, walletLabel, walletId, slippage, force, strategy };
   if (chatId) body.chatId = chatId;
 
   const res = await authFetch("/api/manual/sell", {
     method: "POST",
+    headers: { "Idempotency-Key": idemKey },
     body: JSON.stringify(body),
+    timeoutMs: 90000,
   });
 
   const data = await res.json();
@@ -257,6 +294,8 @@ export async function manualSell(percent, mint, opts = {}) {
   if (!res.ok) throw new Error(data?.error || "Manual sell failed");
   return data.result;
 }
+
+
 
 /** 🔁 Sell by EXACT amount of tokens (e.g. all USDC) */
 export async function manualSellAmount(amountInTokens, mint, opts = {}) {
@@ -269,12 +308,22 @@ export async function manualSellAmount(amountInTokens, mint, opts = {}) {
     strategy = "manual",
   } = opts;
 
+  const idemKey =
+    (typeof window !== "undefined" &&
+     window.crypto &&
+     typeof window.crypto.randomUUID === "function")
+      ? window.crypto.randomUUID()
+      : `sell-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+
   const body = { amount: amountInTokens, mint, walletLabel, walletId, slippage, force, strategy };
   if (chatId) body.chatId = chatId;
 
   const res = await authFetch("/api/manual/sell", {
     method: "POST",
+    headers: { "Idempotency-Key": idemKey },
     body: JSON.stringify(body),
+    timeoutMs: 90000,
   });
 
   const data = await res.json();
@@ -289,6 +338,12 @@ export async function manualSellAmount(amountInTokens, mint, opts = {}) {
   if (!res.ok) throw new Error(data?.error || "Manual sell failed");
   return data.result;
 }
+
+
+
+
+
+
 
 /** 🔍 Fetch tokens for the default server-side wallet (uses default.txt) */
 export async function fetchDefaultWalletTokens() {

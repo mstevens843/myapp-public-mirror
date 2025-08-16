@@ -59,7 +59,6 @@ export async function loginUser(userData) {
 
     const text = await res.text();
     let data;
-
     try {
       data = JSON.parse(text);
     } catch {
@@ -72,9 +71,25 @@ export async function loginUser(userData) {
       return null;
     }
 
-    // ✅ Persist only the active wallet; tokens are managed via HttpOnly cookies
-    if (data.activeWallet) {
-      localStorage.setItem("activeWallet", JSON.stringify(data.activeWallet));
+    // 2FA gate: let the UI route to /2fa
+    if (data?.twoFARequired) {
+      return data;
+    }
+
+    // 🟢 Instant hydrate of UserProvider (same flow as Phantom)
+    if (data?.user) {
+      window.dispatchEvent(new CustomEvent("auth:login", { detail: { user: data.user } }));
+    } else {
+      // Fallback: tell provider to refresh /auth/me immediately
+      window.dispatchEvent(new CustomEvent("auth:login"));
+    }
+
+    // (Optional) keep legacy behavior of persisting activeWallet locally if you still use it elsewhere
+    if (data?.user?.activeWalletId && Array.isArray(data.user.wallets)) {
+      const aw = data.user.wallets.find(w => w.id === data.user.activeWalletId);
+      if (aw) {
+        try { localStorage.setItem("activeWallet", JSON.stringify({ id: aw.id, label: aw.label, publicKey: aw.publicKey })); } catch {}
+      }
     }
 
     return data;

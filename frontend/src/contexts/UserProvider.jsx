@@ -1,3 +1,4 @@
+// UserProvider.jsx
 import { createContext, useContext, useEffect, useState } from "react";
 import { getUserProfile } from "@/utils/api";
 import { toast } from "sonner";
@@ -14,44 +15,99 @@ export const UserProvider = ({ children }) => {
   const [arming, setArming] = useState(false);
   const [armError, setArmError] = useState(null);
 
+  // -- helpers -------------------------------------------------------------
+
+  // Normalize a login payload (which might be just a "user" object)
+  // into the same "me" shape that /auth/me returns.
+  const normalizeToMeShape = (raw) => {
+    if (!raw) return null;
+
+    // If it already looks like /auth/me (has top-level user)
+    if (raw.user) {
+      // Ensure top-level wallets/activeWallet are present if backend nests them
+      const u = raw.user || {};
+      const active =
+        raw.activeWallet ||
+        u.activeWallet ||
+        (raw.wallets || u.wallets || []).find((w) => w.id === (u.activeWalletId ?? raw.activeWalletId)) ||
+        null;
+
+      return {
+        ...raw,
+        activeWallet: active ?? null,
+        wallets: raw.wallets ?? u.wallets ?? [],
+      };
+    }
+
+    // Otherwise assume it's a "user" object
+    const u = raw;
+    const wallets = u.wallets ?? [];
+    const active =
+      u.activeWallet ||
+      wallets.find((w) => w.id === u.activeWalletId) ||
+      null;
+
+    return {
+      user: u,
+      plan: null,
+      preferences: null,
+      telegram: null,
+      counts: null,
+      activeWallet: active ?? null,
+      wallets,
+    };
+  };
+
+  const flattenProfile = (data) => {
+    const active = data.activeWallet ?? null;
+    const wallets = (data.wallets ?? []).map((w) => ({
+      id: w.id,
+      label: w.label,
+      publicKey: w.publicKey,
+      isProtected: !!w.isProtected,
+      passphraseHint: w.passphraseHint || null,
+    }));
+
+    return {
+      // everything from user (id, username, email, type, etc.)
+      ...(data.user || {}),
+      plan:               data.plan?.plan,
+      subscriptionStatus: data.plan?.subscriptionStatus,
+      usage:              data.plan?.usage,
+      usageResetAt:       data.plan?.usageResetAt,
+      credits:            data.plan?.credits,
+      preferences:        data.preferences,
+      telegram:           data.telegram,
+
+      // active wallet (object + convenience flags)
+      activeWallet: active
+        ? {
+            id:            active.id,
+            label:         active.label,
+            publicKey:     active.publicKey,
+            isProtected:   !!active.isProtected,
+            passphraseHint: active.passphraseHint || null,
+          }
+        : null,
+      activeWalletId:    active?.id ?? (data.user?.activeWalletId ?? null),
+      isWalletProtected: !!active?.isProtected,
+
+      // full wallet list
+      wallets,
+
+      counts: data.counts,
+    };
+  };
+
+  // Public: refresh from /auth/me (canonical source)
   const refreshProfile = async () => {
     try {
       const data = await getUserProfile(); // ← /auth/me payload
-      if (!data) return setLoading(false);
-
-      // 🔥  FLATTEN EVERYTHING WE ACTUALLY NEED
-const flat = {
-  ...data.user,
-  plan:               data.plan?.plan,
-  subscriptionStatus: data.plan?.subscriptionStatus,
-  usage:              data.plan?.usage,
-  usageResetAt:       data.plan?.usageResetAt,
-  credits:            data.plan?.credits,
-  preferences:        data.preferences,
-  telegram:           data.telegram,
-  // Keep activeWallet as full object (with isProtected + hint)
-  activeWallet:       data.activeWallet
-    ? {
-        id:            data.activeWallet.id,
-        label:         data.activeWallet.label,
-        publicKey:     data.activeWallet.publicKey,
-        isProtected:   !!data.activeWallet.isProtected,
-        passphraseHint:data.activeWallet.passphraseHint || null
+      if (!data) {
+        setLoading(false);
+        return;
       }
-    : null,
-  activeWalletId:     data.activeWallet?.id ?? null,
-  isWalletProtected:  !!data.activeWallet?.isProtected,
-  // Preserve full wallet objects from backend, including isProtected + hint
-  wallets: (data.wallets ?? []).map(w => ({
-    id:            w.id,
-    label:         w.label,
-    publicKey:     w.publicKey,
-    isProtected:   !!w.isProtected,
-    passphraseHint:w.passphraseHint || null
-  })),
-  counts:             data.counts,
-};
-
+      const flat = flattenProfile(normalizeToMeShape(data));
       setProfile(flat);
     } catch (err) {
       console.error("❌ Failed to load user profile:", err);
@@ -61,7 +117,53 @@ const flat = {
     }
   };
 
-  useEffect(() => { refreshProfile(); }, []);
+  // Public: hydrate immediately from a login response (no fetch)
+  const hydrateFromLogin = (raw) => {
+    try {
+      const normalized = normalizeToMeShape(raw);
+      if (!normalized) return;
+      const flat = flattenProfile(normalized);
+      setProfile(flat);
+    } catch (err) {
+      console.error("❌ Failed to hydrate profile from login payload:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Initial load
+  useEffect(() => {
+    refreshProfile();
+  }, []);
+
+  // Listen for auth events so we can hydrate immediately on sign-in,
+  // and clear state on sign-out.
+  useEffect(() => {
+    const onLogin = (e) => {
+      // Accept either CustomEvent<{user:...}> or raw user/me-shape in detail
+      const payload = e?.detail?.user ?? e?.detail ?? null;
+      if (payload) {
+        hydrateFromLogin(payload);
+      } else {
+        setLoading(true);
+        refreshProfile();
+      }
+    };
+    const onLogout = () => {
+      setProfile({});
+      setLoading(false);
+    };
+
+    window.addEventListener("auth:login", onLogin);
+    window.addEventListener("auth:profile", onLogin); // optional: direct profile push
+    window.addEventListener("auth:logout", onLogout);
+
+    return () => {
+      window.removeEventListener("auth:login", onLogin);
+      window.removeEventListener("auth:profile", onLogin);
+      window.removeEventListener("auth:logout", onLogout);
+    };
+  }, []);
 
   // Register global 401→Arm handler
   useEffect(() => {
@@ -107,6 +209,7 @@ const flat = {
       value={{
         ...profile,
         refreshProfile,
+        hydrateFromLogin, // 🆕 allow callers (login flow) to push profile directly
         loading,
         // expose a manual opener if you want to trigger from settings
         openArm: setArmPrompt,

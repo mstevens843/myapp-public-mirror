@@ -9,12 +9,12 @@
 // Attempt to load environment variables only if dotenv is available. This avoids runtime
 // errors if the module is missing in certain deployments.
 try {
-  require("dotenv").config({ path: __dirname + "/../../../.env" });
+require("dotenv").config({ path: __dirname + "/../../../../.env" });
 } catch (_) {
   /* no‑op */
 }
-const CU_TABLE = require("./cuTable");
-const { birdeyeCUCounter } = require("./birdeyeCUCounter");
+const CU_TABLE = require("../cuTable");
+const { birdeyeCUCounter } = require("../birdeyeCUCounter");
 
 // V3 token list endpoint
 const URL = "https://public-api.birdeye.so/defi/v3/token/list";

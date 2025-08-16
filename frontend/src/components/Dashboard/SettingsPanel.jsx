@@ -1,8 +1,11 @@
+// SettingsPanel.jsx
 import React, { useState, useEffect } from "react";
 import * as Switch from "@radix-ui/react-switch";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { useUserPrefs } from "@/contexts/UserPrefsContext";
+import { getPrefs, savePrefs } from "@/utils/api"; // ✅ ADDED
+
 import {
   Info,
   Settings,
@@ -16,7 +19,7 @@ import {
 
 /* ───────────────────────────────── CONFIG ────────────────────────────── */
 const PREF_KEY = "userPrefs";
-const CHAT_ID  = "default";          // 🔁 swap for real chat‑id in multi‑user mode
+const CHAT_ID  = "default";          // 🔁 swap for real chat-id in multi-user mode
 
 const defaults = {
   confirmManual:         true,
@@ -59,15 +62,15 @@ function SettingsTooltip({ name, text }) {
       "If ON, bot will instantly buy any token that passes your filters without asking.",
     /* numeric */
     autoBuyAmount:
-      "Typical: 0.05 – 0.2 SOL for test snipes.\nLeave 0 to disable when Auto‑Buy is off.",
+      "Typical: 0.05 – 0.2 SOL for test snipes.\nLeave 0 to disable when Auto-Buy is off.",
     defaultSlippage:
-      "Default % slippage to send to Jupiter.\n1 % is safe; veterans use 0.5 % on majors.",
+      "Default % slippage to send to Jupiter.\n1 % is safe; veterans use 0.5 % on majors.",
     defaultMaxSlippage:
-      "Hard ceiling: quotes above this (%) are refused.\n3 – 5 % is common anti‑rug limit.",
+      "Hard ceiling: quotes above this (%) are refused.\n3 – 5 % is common anti-rug limit.",
     defaultPriorityFee:
-      "Extra μLAM paid for compute priority.\n Boost compute unit priority on the Solana network.\n Normal traffic: 1 000 – 5 000.\nHeavy congestion: 10 000 +.",
+      "Extra μLAM paid for compute priority.\n Boost compute unit priority on the Solana network.\n Normal traffic: 1 000 – 5 000.\nHeavy congestion: 10 000 +.",
     validatorBribe:
-      "Direct validator tip (MEV-style bribe)\n Lamports sent straight to validators (tipLamports).\n0.001 – 0.01 SOL helps during MEV wars.",
+      "Direct validator tip (MEV-style bribe)\n Lamports sent straight to validators (tipLamports).\n0.001 – 0.01 SOL helps during MEV wars.",
     /* MEV */
 mevMode: `"Fast" = normal route (fast UX, no shielding).\n"Secure" = enables MEV protection: shared accounts, adaptive compute, bribes, and shielding.\nJupiter uses private routes to prevent frontrunning.`,
 
@@ -226,13 +229,13 @@ export default function SettingsPanel() {
         {[
           { label: "Confirm Before Trade", path: "confirmBeforeTrade" },
           { label: "Telegram Alerts",      path: "alertsEnabled"      },
-          { label: "Auto‑Buy Enabled",     path: "autoBuy.enabled"    },
+          { label: "Auto-Buy Enabled",     path: "autoBuy.enabled"    },
         ].map(({ label, path }) => {
           const [root, sub] = path.split(".");
           const val = sub ? prefs[root][sub] : prefs[root];
           const onToggle = v => {
             if (path === "autoBuy.enabled" && !v) {
-              /* turn OFF auto‑buy → zero amount & clear input */
+              /* turn OFF auto-buy → zero amount & clear input */
               persist({
                 ...prefs,
                 autoBuy: { enabled: false, amount: 0 },
@@ -276,7 +279,7 @@ export default function SettingsPanel() {
 
         <NumericInput
           id="autoBuyAmount"
-          label="Auto‑Buy Amount (SOL)"
+          label="Auto-Buy Amount (SOL)"
           value={draftAuto}
           onChange={setDraftAuto}
           showCheck={autoChanged}
