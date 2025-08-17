@@ -12,8 +12,6 @@
 
 const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
-const { Keypair } = require("@solana/web3.js");
-const bs58 = require("bs58");
 const { executeSwap }       = require("../../../utils/swap");
 const { getMintDecimals }   = require("../../../utils/tokenAccounts");
 const getTokenPriceModule   = require("../paid_api/getTokenPrice");
@@ -21,12 +19,8 @@ const getSolPrice           = getTokenPriceModule.getSolPrice;
 const { sendAlert }         = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 
-// 🔐 Arm session + envelope decrypt
-const { getDEK } = require("../../../armEncryption/sessionKeyCache");
-const { decryptPrivateKeyWithDEK } = require("../../../armEncryption/envelopeCrypto");
-
-// 🔐 Legacy env-key encrypt/decrypt
-const { decrypt } = require("../../../middleware/auth/encryption");
+// 🔁 Unified resolver for protected/unprotected wallets
+const { getKeypairForTrade } = require("../../../armEncryption/resolveKeypair");
 
 /* ======== ADD: zero-cost execution helpers (ported from Turbo) ======== */
 const crypto = require("crypto");
@@ -89,70 +83,10 @@ async function getPriceCached(userId, mint) {
 const toNum = (v) => (v === undefined || v === null ? null : Number(v));
 
 /**
- * 🔑 Arm-aware wallet loader
- * Priority:
- *  1) If wallet.encrypted (envelope v1) exists:
- *      - require an armed session (DEK present in memory) if wallet.isProtected = true
- *      - use decryptPrivateKeyWithDEK(blob, DEK, aad) (zero latency)
- *  2) Else (legacy path):
- *      - decrypt(row.privateKey) → base58 → Keypair
+ * 🔑 Arm-aware wallet loader (delegates to unified resolver)
  */
 async function loadWalletKeypairArmAware(userId, walletId) {
-  const wallet = await prisma.wallet.findUnique({
-    where: { id: walletId },
-    select: { id: true, encrypted: true, isProtected: true, privateKey: true }
-  });
-  if (!wallet) throw new Error("Wallet not found in DB.");
-
-  const aad = `user:${userId}:wallet:${walletId}`;
-
-  // Envelope path
-  if (wallet.encrypted && wallet.encrypted.v === 1) {
-    const dek = getDEK(userId, walletId); // in-memory from Arm session
-    if (!dek) {
-      // If wallet is protected OR user requires Arm -> block trading with 401
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { requireArmToTrade: true }
-      });
-      if (wallet.isProtected || user?.requireArmToTrade) {
-        const err = new Error("Automation not armed");
-        err.status = 401;
-        err.code = "AUTOMATION_NOT_ARMED";
-        throw err;
-      }
-      // Not protected & not required -> still cannot decrypt envelope without KEK.
-      const err = new Error("Protected wallet requires an armed session");
-      err.status = 401;
-      err.code = "AUTOMATION_NOT_ARMED";
-      throw err;
-    }
-
-    // Fast path: decrypt with DEK (no network/KMS)
-    const pkBuf = decryptPrivateKeyWithDEK(wallet.encrypted, dek, aad);
-    try {
-      if (pkBuf.length !== 64) {
-        throw new Error(`Unexpected secret key length: ${pkBuf.length}`);
-      }
-      return Keypair.fromSecretKey(new Uint8Array(pkBuf));
-    } finally {
-      pkBuf.fill(0); // zeroize
-    }
-  }
-
-  // Legacy path (string ciphertext -> plaintext base58 -> bytes)
-  if (wallet.privateKey) {
-    const secretBase58 = decrypt(wallet.privateKey, { aad });
-    try {
-      const secretBytes = bs58.decode(secretBase58.trim());
-      if (secretBytes.length !== 64) throw new Error("Invalid secret key length after legacy decryption");
-      return Keypair.fromSecretKey(secretBytes);
-    } finally {
-      try { secretBase58.fill?.(0); } catch {}
-    }
-  }
-
-  throw new Error("Wallet has no usable key material");
+  return getKeypairForTrade(userId, walletId);
 }
 
 async function execTrade({ quote, mint, meta, simulated = false }) {
@@ -453,11 +387,11 @@ const simulateBuy = (o) => execTrade({ ...o, simulated: true  });
  */
 
 async function executeTWAP(opts) {
-  // Perform a simple time‑weighted execution by breaking the quote
+  // Perform a simple time-weighted execution by breaking the quote
   // into several smaller chunks.  We reference a preferred ladder
   // from the risk policy when available or default to a 20/30/50
   // split.  After each slice we invoke the configured risk hooks
-  // (if present) and introduce a short non‑blocking delay.  No
+  // (if present) and introduce a short non-blocking delay.  No
   // additional network or database calls are made in this loop.
   const { quote, mint, meta } = opts || {};
   const slices = (meta && meta.riskPolicy && Array.isArray(meta.riskPolicy.twapSlices))

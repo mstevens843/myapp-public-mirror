@@ -73,10 +73,76 @@ async function httpJsonTry(paths, init = {}) {
 }
 
 export async function getArmStatus(walletId) {
-  return httpJson(`/api/arm-encryption/status/${walletId}`, {
-    method: "GET",
+  const DEFAULT = {
+    walletId: walletId ?? null,
+    armed: false,
+    msLeft: 0,
+    autoReturnTriggered: false,
+    guardian: { hasActionables: false, counts: { tpSl: 0, dca: 0, limit: 0 } },
+  };
+  if (!walletId) return DEFAULT;
+
+  let raw;
+  try {
+    // hit your real route and ask for guardian snapshot
+    raw = await httpJson(`/api/arm-encryption/status/${walletId}?guardian=1`, {
+      method: "GET",
+    });
+  } catch {
+    return DEFAULT;
+  }
+
+  const msLeft = Math.max(0, Number(raw?.msLeft ?? 0) || 0);
+  const armed = !!(raw?.armed && msLeft > 0);
+  const autoReturnTriggered = !!raw?.autoReturnTriggered;
+
+  // Map backend → normalized shape
+  const rg = raw?.guardian || null;
+  const limit = Number(rg?.limitOpen || 0);
+  const dca   = Number(rg?.dcaActive || 0);
+  const tpSl  = Number(rg?.tpSlActive || 0);
+  const hasActionables = tpSl + dca + limit > 0;
+
+  return {
+    walletId: raw?.walletId ?? walletId,
+    armed,
+    msLeft,
+    autoReturnTriggered,
+    guardian: {
+      hasActionables,
+      counts: { tpSl, dca, limit },
+    },
+  };
+}
+
+
+
+export async function getAllArmStatuses() {
+  const raw = await httpJson(`/api/arm-encryption/overview?guardian=1`, { method: "GET" });
+  const list = Array.isArray(raw?.wallets) ? raw.wallets : [];
+  return list.map((it) => {
+    const msLeft = Math.max(0, Number(it?.msLeft ?? 0) || 0);
+    const armed = !!(it?.armed && msLeft > 0);
+
+    const g = it?.guardian || {};
+    const limit = Number(g?.limitOpen || 0);
+    const dca   = Number(g?.dcaActive || 0);
+    const tpSl  = Number(g?.tpSlActive || 0);
+
+    return {
+      walletId: Number(it.walletId),
+      label: it.label || "Wallet",
+      armed,
+      msLeft,
+      guardian: {
+        hasActionables: tpSl + dca + limit > 0,
+        counts: { tpSl, dca, limit },
+      },
+    };
   });
 }
+
+
 
 export async function armEncryptedWallet({
   walletId,

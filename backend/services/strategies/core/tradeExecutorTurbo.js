@@ -31,8 +31,7 @@
 const crypto = require('crypto');
 const prisma = require("../../../prisma/prisma");
 const { v4: uuid } = require("uuid");
-const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
-const bs58 = require("bs58");
+const { Connection, PublicKey } = require("@solana/web3.js");
 
 // Blockhash prewarm & cache
 const { startBlockhashPrewarm, getCachedBlockhash } = require("../../execution/blockhashPrewarm");
@@ -136,12 +135,8 @@ const CoreIdemStore = require('./idempotencyStore');                 // crash-sa
 const { sizeTrade } = require('./liquiditySizer');                   // liquidity-aware sizing
 // const { performProbe } = require('./probeBuyer');                    // micro-buy then scale
 
-//   Arm / envelope-crypto helpers
-const { getDEK } = require("../../../armEncryption/sessionKeyCache");
-const {
-  decryptPrivateKeyWithDEK,
-} = require("../../../armEncryption/envelopeCrypto");
-const { decrypt } = require("../../../middleware/auth/encryption");
+// 🔁 Unified resolver for protected/unprotected wallets
+const { getKeypairForTrade } = require("../../../armEncryption/resolveKeypair");
 const sleep = (ms)=> new Promise(r=>setTimeout(r, ms));
 
 //   Ghost utilities
@@ -246,59 +241,10 @@ function getLeaderScheduler(conn, validatorIdentity) {
 }
 
 /* ──────────────────────────────────────────────
- *  Arm-aware key loader
+ *  Arm-aware key loader (delegates to unified resolver)
  * ──────────────────────────────────────────── */
 async function loadWalletKeypairArmAware(userId, walletId) {
-  const row = await prisma.wallet.findUnique({
-    where: { id: walletId },
-    select: {
-      encrypted: true,
-      isProtected: true,
-      privateKey: true,
-    },
-  });
-  if (!row) throw new Error("Wallet not found in DB.");
-
-  const aad = `user:${userId}:wallet:${walletId}`;
-
-  /* Envelope path */
-  if (row.encrypted?.v === 1) {
-    const dek = getDEK(userId, walletId);
-    if (!dek) {
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { requireArmToTrade: true },
-      });
-      if (row.isProtected || user?.requireArmToTrade) {
-        const err = new Error("Automation not armed");
-        err.status = 401;
-        err.code = "AUTOMATION_NOT_ARMED";
-        throw err;
-      }
-      throw new Error("Protected wallet requires an armed session");
-    }
-    const pkBuf = decryptPrivateKeyWithDEK(row.encrypted, dek, aad);
-    try {
-      if (pkBuf.length !== 64)
-        throw new Error(
-          `Unexpected secret key length: ${pkBuf.length}`
-        );
-      return Keypair.fromSecretKey(new Uint8Array(pkBuf));
-    } finally {
-      pkBuf.fill(0);
-    }
-  }
-
-  /* Legacy path */
-  if (row.privateKey) {
-    const secretBase58 = decrypt(row.privateKey, { aad });
-    const secretBytes = bs58.decode(secretBase58.trim());
-    if (secretBytes.length !== 64)
-      throw new Error("Invalid secret key length after legacy decryption");
-    return Keypair.fromSecretKey(secretBytes);
-  }
-
-  throw new Error("Wallet has no usable key material");
+  return getKeypairForTrade(userId, walletId);
 }
 
 /* ──────────────────────────────────────────────

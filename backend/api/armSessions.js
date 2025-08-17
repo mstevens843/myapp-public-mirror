@@ -19,7 +19,7 @@ const requireAuth = require("../middleware/requireAuth");
 const check2FA = require("../middleware/auth/check2FA");
 
 // ⚠️ Paths as in your repo layout
-const { arm, extend, disarm, status } = require("../armEncryption/sessionKeyCache");
+const { arm, extend, disarm, status } = require("../armEncryption/armGuardian");
 const {
   unwrapDEKWithPassphrase,
   encryptPrivateKey,
@@ -660,6 +660,10 @@ router.post("/disarm", requireAuth, check2FA, async (req, res) => {
 
 router.get("/status/:walletId", requireAuth, async (req, res) => {
   const { walletId } = req.params;
+  const includeGuardian =
+    String(req.query.guardian || "").toLowerCase() === "1" ||
+    String(req.query.guardian || "").toLowerCase() === "true";
+
   const s = status(req.user.id, walletId);
 
   // Normalise to milliseconds if your cache exposes seconds under an alt key.
@@ -676,11 +680,51 @@ router.get("/status/:walletId", requireAuth, async (req, res) => {
   const recent = autoReturn.consumeRecentTrigger(req.user.id, walletId);
   const autoReturnTriggered = !!recent;
 
+  // 🔍 Optional guardian snapshot (counts) – only when explicitly requested
+  let guardian = null;
+  if (includeGuardian) {
+    const wid = Number(walletId);
+    try {
+      const [limitOpen, dcaActive, tpSlActive] = await Promise.all([
+        prisma.limitOrder.count({
+          where: { userId: req.user.id, walletId: wid, status: "open" },
+        }),
+        prisma.dcaOrder.count({
+          where: { userId: req.user.id, walletId: wid, status: "active" },
+        }),
+        prisma.tpSlRule.count({
+          where: {
+            userId: req.user.id,
+            walletId: wid,
+            enabled: true,
+            status: "active",
+          },
+        }),
+      ]);
+      guardian = {
+        limitOpen,
+        dcaActive,
+        tpSlActive,
+        hasBlocking: limitOpen + dcaActive + tpSlActive > 0,
+      };
+    } catch (e) {
+      console.warn("⚠️ guardian count failed:", e.message || e);
+      guardian = {
+        limitOpen: 0,
+        dcaActive: 0,
+        tpSlActive: 0,
+        hasBlocking: false,
+        error: true,
+      };
+    }
+  }
+
   return res.json({
     walletId,
     armed: !!(s && s.armed && msLeft > 0),
     msLeft,
     autoReturnTriggered,
+    ...(guardian ? { guardian } : {}),
   });
 });
 
@@ -934,6 +978,66 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
     console.error("🔥 remove-protection error:", err.stack || err);
     return res.status(500).json({ error: "Failed to remove protection" });
   }
+});
+
+
+
+// GET /api/arm-encryption/overview?guardian=1
+router.get("/overview", requireAuth, async (req, res) => {
+  const includeGuardian =
+    String(req.query.guardian || "").toLowerCase() === "1" ||
+    String(req.query.guardian || "").toLowerCase() === "true";
+
+  // Get all wallets for the user (IDs + labels)
+  const wallets = await prisma.wallet.findMany({
+    where: { userId: req.user.id },
+    select: { id: true, label: true },
+  });
+
+  const items = [];
+  for (const w of wallets) {
+    const s = status(req.user.id, String(w.id));
+
+    // Normalize msLeft exactly like /status/:walletId
+    let msLeft = 0;
+    if (s && typeof s.msLeft === "number") {
+      msLeft = s.msLeft;
+    } else if (s && typeof s.msLeftSec === "number") {
+      msLeft = Math.max(0, Math.floor(s.msLeftSec * 1000));
+    } else if (s && typeof s.secondsLeft === "number") {
+      msLeft = Math.max(0, Math.floor(s.secondsLeft * 1000));
+    }
+
+    let guardian = null;
+    if (includeGuardian) {
+      try {
+        const [limitOpen, dcaActive, tpSlActive] = await Promise.all([
+          prisma.limitOrder.count({
+            where: { userId: req.user.id, walletId: w.id, status: "open" },
+          }),
+          prisma.dcaOrder.count({
+            where: { userId: req.user.id, walletId: w.id, status: "active" },
+          }),
+          prisma.tpSlRule.count({
+            where: { userId: req.user.id, walletId: w.id, enabled: true, status: "active" },
+          }),
+        ]);
+        guardian = { limitOpen, dcaActive, tpSlActive };
+      } catch (e) {
+        guardian = { limitOpen: 0, dcaActive: 0, tpSlActive: 0, error: true };
+      }
+    }
+
+    items.push({
+      walletId: w.id,
+      label: w.label,
+      armed: !!(s && s.armed && msLeft > 0),
+      msLeft,
+      ...(guardian ? { guardian } : {}),
+    });
+  }
+
+  return res.json({ wallets: items });
 });
 
 

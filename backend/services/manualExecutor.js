@@ -13,14 +13,13 @@ const { getMintDecimals } = require("../utils/tokenAccounts.js");
 // const { getUserPreferences } = require("../telegram/services/userPrefs");
 const { addOrUpdateOpenTrade } = require("./utils/analytics/openTrades");
 const prisma = require("../prisma/prisma");           // NEW
-const { Keypair }                      = require("@solana/web3.js");
-const bs58                             = require("bs58");
-const { decrypt }                      = require("../middleware/auth/encryption");
 const { getUserPreferencesByUserId } = require("./userPrefs"); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const API_BASE = process.env.API_BASE; 
-const { getDEK } = require("../armEncryption/sessionKeyCache");
-const { decryptPrivateKeyWithDEK } = require("../armEncryption/envelopeCrypto");
+
+// 🔁 Unified resolver for protected/unprotected wallets
+const { getKeypairForTrade } = require("../armEncryption/resolveKeypair");
+
 // ------------------------------------------------------------------
 // restore missing log-file constant (dashboard still reads this file)
 const { closePositionFIFO } = require("./utils/analytics/fifoReducer")
@@ -111,7 +110,7 @@ function shortMint(m) {
 
 
 function tsUTC() {
-  return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+  return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
 }
 
 function fmt(x, d = 4) {
@@ -131,38 +130,10 @@ function fmt(x, d = 4) {
 //   return kp;
 // }
 // REPLACE with Arm-aware loader (envelope + in-memory DEK; legacy fallback)
+// REPLACE your current loadWalletKeypairArmAware() with this version
 async function loadWalletKeypairArmAware(userId, walletId) {
-  const row = await prisma.wallet.findUnique({
-    where: { id: walletId },
-    select: { encrypted: true, isProtected: true, privateKey: true },
-  });
-  if (!row) throw new Error("Wallet not found in DB.");
-
-  const aad = `user:${userId}:wallet:${walletId}`; // DO compute AAD from context
-
-  // Envelope path (preferred)
-  if (row.encrypted && row.encrypted.v === 1) {
-    const dek = getDEK(userId, walletId);
-    if (!dek) {
-      const err = new Error("Automation not armed");
-      err.status = 401;               // let API layer map to 401
-      err.code = "AUTOMATION_NOT_ARMED";
-      throw err;
-    }
-    const pkBuf = decryptPrivateKeyWithDEK(row.encrypted, dek, aad);
-    try {
-      return Keypair.fromSecretKey(new Uint8Array(pkBuf));
-    } finally { pkBuf.fill(0); }
-  }
-
-  // Legacy fallback (string -> base58)
-  if (row.privateKey) {
-    // IMPORTANT: pass AAD here too
-    const secret = decrypt(row.privateKey, { aad });
-    return Keypair.fromSecretKey(bs58.decode(secret.trim()));
-  }
-
-  throw new Error("Wallet has no usable key material");
+  // Delegate to the unified resolver so both protected (armed) and unprotected wallets work.
+  return getKeypairForTrade(userId, walletId);
 }
 
 // let prefs = null;
@@ -481,12 +452,12 @@ async function performManualSell(opts) {
   /* 🔕  Skip duplicate “Sell” alert if TP/SL already sent one */
   const skipAlert = triggerType === "tp" || triggerType === "sl";
 
-  /* ── Paper‑Trader short‑circuit ─────────────────── */
+  /* ── Paper-Trader short-circuit ─────────────────── */
   /* ───────────── HELPERS & NORMALISATION ───────────── */
   const norm = (strategy || "").replace(/\s+/g, "").toLowerCase();
   const isPaperTrader = norm === "papertrader";
 
-  /* ── Paper‑Trader short‑circuit ─────────────────── */
+  /* ── Paper-Trader short-circuit ─────────────────── */
   if (isPaperTrader) {
     const dbWallet = await prisma.wallet.findUnique({
       where : { id: walletId },
@@ -501,9 +472,9 @@ async function performManualSell(opts) {
       },
       orderBy:{ timestamp:"asc" }
     });
-    if (!rows.length) throw new Error("No paper‑trader rows for this mint.");
+    if (!rows.length) throw new Error("No paper-trader rows for this mint.");
 
-    /* same percent‑to‑raw logic as before */
+    /* same percent-to-raw logic as before */
     const totalRaw = rows.reduce((s,r)=>s+BigInt(r.outAmount),0n);
     if (percent > 1) percent /= 100;
     let sellRaw = (totalRaw * BigInt(Math.round(percent*1e6))) / 1_000_000n;
@@ -702,7 +673,7 @@ async function performManualSell(opts) {
 
 🧾 *Mint:* \`${short}\`
 🔗 [View Token on Birdeye](${tokenUrl})
-💸 *Received:* ${gotSOL} SOL  ≈ \`$${gotUSD}\`
+💸 *Received:* ${gotSOL} SOL  ≈ \`$${gotUSD}\`
 📈 *Exit*: \`$${exitPriceUSD ?? "N/A"}\`
 🔖 *Trigger:* \`${finalTrig ?? "manual"}\`
 👤 *Wallet:* \`${walletLabel}\`
@@ -883,7 +854,7 @@ async function performManualSellByAmount(opts) {
 
 🧾 *Mint:* \`${short}\`
 🔗 [View Token on Birdeye](${tokenUrl})
-💸 *Received:* ${gotSOL} SOL  ≈ \`$${gotUSD}\`
+💸 *Received:* ${gotSOL} SOL  ≈ \`$${gotUSD}\`
 📈 *Exit*: \`$${exitPriceUSD ?? "N/A"}\`
 🔖 *Trigger:* \`${finalTrig ?? "manual"}\`
 👤 *Wallet:* \`${walletLabel}\`

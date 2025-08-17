@@ -23,6 +23,7 @@ import ArmEndModal from "./ArmEndModal";
 import { toast } from "sonner";
 import {
   getArmStatus,
+  getAllArmStatuses,   // ← batch overview
   extendEncryptedWallet,
   disarmEncryptedWallet,
   formatCountdown,
@@ -89,12 +90,15 @@ function LayoutInner() {
   // 🔔 End-of-session modal state
   const [showEndModal, setShowEndModal] = useState(false);
   const [endModalAutoReturn, setEndModalAutoReturn] = useState(false);
+  const [armGuardian, setArmGuardian] = useState(null);
+  const [modalWalletLabel, setModalWalletLabel] = useState(null); // ← label shown in modal
 
   // Guards/refs
   const prevArmedRef = useRef(false);
   const suppressNextEndModalRef = useRef(false); // avoid modal on manual disarm
   const endModalShownOnceRef = useRef(false); // prevent duplicates from poll + event
   const lastWalletRef = useRef(activeWalletId);
+  const armedByWalletRef = useRef(new Map()); // ← per-wallet last-known armed state
 
   const running = runningBots.length > 0;
 
@@ -125,27 +129,32 @@ function LayoutInner() {
       endModalShownOnceRef.current = false;
       suppressNextEndModalRef.current = false;
       prevArmedRef.current = false;
+      setArmGuardian(null);
+      setModalWalletLabel(null);
       lastWalletRef.current = activeWalletId;
     }
   }, [activeWalletId]);
 
-  /* 🔁 Poll arm status every 20s */
+  /* 🔁 Poll arm status (ACTIVE wallet) every 20s */
   useEffect(() => {
     let timer;
     async function poll() {
       try {
         if (activeWalletId) {
-          // expects backend to include { armed, msLeft, autoReturnTriggered? }
+          // expects backend to include { armed, msLeft, autoReturnTriggered?, guardian? }
           const s = await getArmStatus(activeWalletId);
           const next = { armed: !!s.armed, msLeft: Number(s.msLeft || 0) };
           const wasArmed = prevArmedRef.current;
 
           setArmStatus(next);
+          setArmGuardian(s.guardian || null);
 
           // Detect automatic end (TTL expiry) → show modal once
           if (wasArmed && !next.armed) {
             if (!suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
               setEndModalAutoReturn(!!s.autoReturnTriggered);
+              setArmGuardian(s.guardian || null);
+              setModalWalletLabel(activeWalletInfo?.label || null);
               setShowEndModal(true);
               endModalShownOnceRef.current = true;
             }
@@ -155,6 +164,8 @@ function LayoutInner() {
           // If page loaded after expiry, still surface the one-shot autoReturn flag
           if (!wasArmed && !next.armed && s.autoReturnTriggered && !endModalShownOnceRef.current) {
             setEndModalAutoReturn(true);
+            setArmGuardian(s.guardian || null);
+            setModalWalletLabel(activeWalletInfo?.label || null);
             setShowEndModal(true);
             endModalShownOnceRef.current = true;
           }
@@ -165,6 +176,7 @@ function LayoutInner() {
       } catch {
         setArmStatus({ armed: false, msLeft: 0 });
         setWarned(false);
+        setArmGuardian(null);
         prevArmedRef.current = false;
       } finally {
         timer = setTimeout(poll, 20000);
@@ -173,6 +185,62 @@ function LayoutInner() {
     if (activeWalletId) poll();
     return () => timer && clearTimeout(timer);
   }, [activeWalletId]);
+
+  /* 🌐 Use getAllArmStatuses to catch expiries on NON-active wallets (and fetch autoReturn flag) */
+  useEffect(() => {
+    let timer;
+    async function sweep() {
+      try {
+        if (!wallets.length) return;
+
+        // batch fetch
+        const all = await getAllArmStatuses(); // [{ walletId, label, armed, msLeft, guardian }]
+        const byId = new Map();
+        for (const s of all || []) {
+          const wid = typeof s.walletId === "string" ? Number(s.walletId) : s.walletId;
+          byId.set(wid, s);
+        }
+
+        const prevMap = armedByWalletRef.current;
+        const nextMap = new Map();
+
+        for (const w of wallets) {
+          const wid = w.id;
+          const s = byId.get(wid);
+          const nowArmed = !!(s && s.armed && Number(s.msLeft || 0) > 0);
+          const wasArmed = !!prevMap.get(wid);
+          nextMap.set(wid, nowArmed);
+
+          // Only surface expiries for wallets that are NOT the current active
+          if (wid !== activeWalletId && wasArmed && !nowArmed) {
+            if (!suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
+              try {
+                // Pull fresh single-wallet status to capture autoReturnTriggered
+                const sFull = await getArmStatus(wid);
+                setEndModalAutoReturn(!!sFull.autoReturnTriggered);
+                setArmGuardian(sFull.guardian || (s && s.guardian) || null);
+              } catch {
+                setEndModalAutoReturn(false);
+                setArmGuardian((s && s.guardian) || null);
+              }
+              setModalWalletLabel(s?.label || w.label || null);
+              setShowEndModal(true);
+              endModalShownOnceRef.current = true;
+            }
+          }
+        }
+
+        armedByWalletRef.current = nextMap;
+      } catch {
+        // no-op: on error we keep prior map; next sweep will try again
+      } finally {
+        timer = setTimeout(sweep, 20000);
+      }
+    }
+
+    sweep();
+    return () => timer && clearTimeout(timer);
+  }, [wallets, activeWalletId]);
 
   /* 🔊 Cross-tab/local broadcast for arm/disarm events */
   const ARM_EVENT = "arm:state";
@@ -183,25 +251,51 @@ function LayoutInner() {
   };
 
   useEffect(() => {
-    const onArm = (e) => {
+    let mounted = true;
+
+    const onArm = async (e) => {
       const { walletId, armed, msLeft } = e.detail || {};
       if (!activeWalletId || walletId !== activeWalletId) return;
+
       const wasArmed = prevArmedRef.current;
       const nextArmed = !!armed;
+
       setArmStatus({ armed: nextArmed, msLeft: Number(msLeft || 0) });
 
       // Manual disarm should not show modal (guarded by suppress flag in handleDisarm)
-      if (wasArmed && !nextArmed && !suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
+      if (
+        wasArmed &&
+        !nextArmed &&
+        !suppressNextEndModalRef.current &&
+        !endModalShownOnceRef.current
+      ) {
         setEndModalAutoReturn(false);
-        setShowEndModal(true);
-        endModalShownOnceRef.current = true;
+
+        // grab guardian snapshot so the warning appears immediately
+        try {
+          const s = await getArmStatus(activeWalletId); // includes guardian
+          if (mounted) setArmGuardian(s.guardian || null);
+        } catch {
+          /* noop */
+        }
+
+        if (mounted) {
+          setModalWalletLabel(activeWalletInfo?.label || null);
+          setShowEndModal(true);
+          endModalShownOnceRef.current = true;
+        }
       }
+
       if (!nextArmed) setWarned(false);
       prevArmedRef.current = nextArmed;
       suppressNextEndModalRef.current = false;
     };
+
     window.addEventListener(ARM_EVENT, onArm);
-    return () => window.removeEventListener(ARM_EVENT, onArm);
+    return () => {
+      mounted = false;
+      window.removeEventListener(ARM_EVENT, onArm);
+    };
   }, [activeWalletId]);
 
   /* ⏱️ Local 1s countdown between polls */
@@ -280,9 +374,15 @@ function LayoutInner() {
     toast.info("Open the Arm modal to start a secure session.");
   };
 
-  const handleCloseEndModal = () => setShowEndModal(false);
+  const handleCloseEndModal = () => {
+    setShowEndModal(false);
+    endModalShownOnceRef.current = false; // allow next expiry to surface
+    setModalWalletLabel(null);
+  };
+
   const handleReArmNow = () => {
     setShowEndModal(false);
+    endModalShownOnceRef.current = false; // allow next expiry to surface
     setActiveTab("account");
     navigate("/account", { state: { openArm: true } });
   };
@@ -417,12 +517,10 @@ function LayoutInner() {
       <ArmEndModal
         open={showEndModal}
         autoReturn={endModalAutoReturn}
-        onClose={() => setShowEndModal(false)}
-        onReArm={() => {
-          setShowEndModal(false);
-          setActiveTab("account");
-          navigate("/account", { state: { openArm: true } });
-        }}
+        guardian={armGuardian}
+        walletLabel={modalWalletLabel}
+        onClose={handleCloseEndModal}
+        onReArm={handleReArmNow}
       />
 
       {/* What's New modal */}

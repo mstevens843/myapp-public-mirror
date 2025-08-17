@@ -1,7 +1,7 @@
 // backend/utils/secureSigner.js
 const nacl = require('tweetnacl');
-const sessionMgr = require('../services/armSessionManager');
-const { decryptPrivateKey } = require('../utils/encryption/armEncryption');
+const sessionMgr = require('./armSessionManager');
+const { decryptPrivateKey } = require('./armEncryption');
 
 module.exports = function secureSign(userId, walletId, walletBlob, message) {
   const dek = sessionMgr.getDEK(userId, walletId);

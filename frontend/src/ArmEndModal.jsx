@@ -2,11 +2,13 @@ import { useEffect } from "react";
 import { ShieldOff, X } from "lucide-react";
 
 export default function ArmEndModal({
-  open,
-  autoReturn = false,
-  onClose,
-  onReArm,
-}) {
+   open,
+   autoReturn = false,
+   guardian = null,    // ← NEW: { hasActionables, counts:{tpSl,dca,limit}, message? }
+   onClose,
+   onReArm,
+   walletLabel = null,
+ }) {
   // Close on ESC
   useEffect(() => {
     if (!open) return;
@@ -16,6 +18,22 @@ export default function ArmEndModal({
   }, [open, onClose]);
 
   if (!open) return null;
+
+  const hasGuardianWarn =
+    !!guardian &&
+    (guardian.hasActionables ||
+      (guardian.counts &&
+        (guardian.counts.tpSl > 0 || guardian.counts.dca > 0 || guardian.counts.limit > 0)));
+
+  const pieces = [];
+  if (guardian?.counts?.tpSl)  pieces.push(`${guardian.counts.tpSl} TP/SL`);
+  if (guardian?.counts?.dca)   pieces.push(`${guardian.counts.dca} DCA`);
+  if (guardian?.counts?.limit) pieces.push(`${guardian.counts.limit} Limit`);
+  const detailList = pieces.join(" • ");
+
+
+
+
 
   return (
     <div className="fixed inset-0 z-[9999]">
@@ -42,9 +60,21 @@ export default function ArmEndModal({
                 <h2 className="text-xl font-semibold tracking-tight">
                   Wallet arm session ended
                 </h2>
+                {walletLabel ? (
+                 <div className="mt-0.5 text-xs text-zinc-400">
+                   Wallet: <span className="text-zinc-200 font-medium">{walletLabel}</span>
+                 </div>
+               ) : null}
                 <p className="mt-1 text-sm text-zinc-300">
                   Please re-enable in your <span className="font-semibold text-white">Account</span> tab to continue trading.
                 </p>
+                {hasGuardianWarn && (
+                  <div className="mt-3 text-sm rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2">
+                    <span className="font-medium text-amber-300">Heads up:</span>{" "}
+                    You have active orders that require an armed wallet{detailList ? <> — <span className="text-amber-200">{detailList}</span></> : null}.{" "}
+                    These won’t trigger while disarmed. Re-arm to keep them active.
+                  </div>
+                )}
                 {autoReturn ? (
                   <div className="mt-3 text-sm rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2">
                     <span className="font-medium text-emerald-300">Auto-send triggered.</span>{" "}
