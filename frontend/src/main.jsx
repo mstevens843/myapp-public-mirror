@@ -144,7 +144,11 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                       </Routes>
 
                       {/* Global toaster */}
-                      <Toaster position="top-right" richColors />
+                    <Toaster
+                      position="top-right"
+                      richColors
+                      style={{ right: "200px" }}  
+                    />                    
                     </ErrorBoundary>
                   </WalletModalProvider>
                 </WalletProvider>

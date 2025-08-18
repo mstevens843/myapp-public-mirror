@@ -15,6 +15,7 @@ const prisma = require("../prisma/prisma");
 const { sendAlert } = require("../telegram/alerts");
 const cache = require("./sessionKeyCache"); // arm/extend/disarm/getDEK/status/getSession
 const { audit } = require("./audit");
+const { pauseBotsByWallet } = require("../services/utils/strategy_utils/strategyLauncher");
 
 // Optional UI bridge (websocket/pusher/etc.)
 let uiEvents = { publish: () => {} };
@@ -50,11 +51,20 @@ async function _scanDependents({ userId, walletId }) {
     prisma.dcaOrder.count({ where: { userId, walletId, status: "active" } }),
     prisma.limitOrder.count({ where: { userId, walletId, status: "open" } }),
     prisma.scheduledStrategy.count({ where: { userId, walletId, status: { in: ["pending", "running"] } } }),
+    // Running bots = has row, not paused, not stopped, with config.walletId = walletId
+    prisma.strategyRunStatus.count({
+      where: {
+        userId,
+        isPaused: false,
+        stoppedAt: null,
+        config: { path: ["walletId"], equals: walletId },
+      },
+    }),
   ]);
   return {
     needsArm,
     walletLabel: wallet.label || "Wallet",
-    counts: { tpSl, dca, limit: lim, scheduled: sched },
+    counts: { tpSl, dca, limit: lim, scheduled: sched, bots },
   };
 }
 
@@ -86,6 +96,7 @@ function _fmtCounts(c) {
   if (c.dca) parts.push(`${c.dca} DCA`);
   if (c.limit) parts.push(`${c.limit} Limit`);
   if (c.scheduled) parts.push(`${c.scheduled} Scheduled`);
+  if (c.bots) parts.push(`${c.bots} Bot${c.bots > 1 ? "s" : ""}`);
   return parts.length ? parts.join(", ") : "no dependent rules";
 }
 
@@ -124,8 +135,7 @@ async function _handleExpired(userId, walletId, reason) {
   const { needsArm, counts, walletLabel } = await _scanDependents({ userId, walletId });
   await audit(userId, "ARM_EXPIRED", { walletId, reason, counts }); // :contentReference[oaicite:4]{index=4}
 
-  if (needsArm && (counts.tpSl || counts.dca || counts.limit || counts.scheduled)) {
-    // Optional: auto-pause rules for hard safety
+if (needsArm && (counts.tpSl || counts.dca || counts.limit || counts.scheduled || counts.bots)) {    // Optional: auto-pause rules for hard safety
     if (AUTO_DISABLE) {
       await Promise.allSettled([
         prisma.tpSlRule.updateMany({ where: { userId, walletId, enabled: true, status: "active" }, data: { enabled: false, status: "paused_arm" } }),
@@ -135,20 +145,37 @@ async function _handleExpired(userId, walletId, reason) {
       ]);
     }
 
+    // 🔒 Always pause *running* bots tied to this wallet (only if any exist).
+    let botIds = [];
+    if (counts.bots > 0) {
+      try { botIds = await pauseBotsByWallet(userId, walletId); } catch {}
+    }
+
+
+
     const summary = _fmtCounts(counts);
 
     // UI popup + Telegram
     await _notifyUI(userId, "arm:expired", {
       walletId, walletLabel,
-      counts, autoPaused: AUTO_DISABLE,
-      message: `Arm session for "${walletLabel}" has ended; ${summary} ${(AUTO_DISABLE ? "were paused" : "won't trigger")} until you re-Arm.`,
+      counts,
+      autoPaused: AUTO_DISABLE,
+      bots: { paused: botIds.length, botIds },
+      message:
+        `Arm session for "${walletLabel}" has ended; ${summary}` +
+        `${botIds.length ? `; ${botIds.length} bot${botIds.length>1?"s":""} paused` : ""}. ` +
+        `${AUTO_DISABLE ? "Rules were paused. " : ""}` +
+        `Re-Arm to resume.`,
     });
     try {
       await sendAlert(
         userId,
-        `🔒 *Arm ended*\n*Wallet:* ${walletLabel}\n*Status:* ${(AUTO_DISABLE ? "Rules paused" : "Automations inactive")}\n*Depends:* ${summary}\n\nTap *Arm Wallet* to resume.`,
+      `🔒 *Arm ended*\n*Wallet:* ${walletLabel}` +
+        `\n*Bots:* ${counts.bots ? (botIds.length ? `paused ${botIds.length}` : "none running") : "none"}` +
+        `\n*Status:* ${(AUTO_DISABLE ? "Rules paused" : "Automations inactive")}` +
+        `\n*Depends:* ${summary}\n\nTap *Arm Wallet* to resume.`,        
         "ARM"
-      );
+     );
     } catch {}
   }
 }

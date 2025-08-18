@@ -30,7 +30,9 @@ export default function ArmEndModal({
   if (guardian?.counts?.dca)   pieces.push(`${guardian.counts.dca} DCA`);
   if (guardian?.counts?.limit) pieces.push(`${guardian.counts.limit} Limit`);
   const detailList = pieces.join(" • ");
-
+  const botsPaused = Number(guardian?.botsPaused || 0);
+  const botsPausedText =
+    botsPaused > 1 ? `${botsPaused} bots` : botsPaused === 1 ? `1 bot` : null;
 
 
 
@@ -68,6 +70,15 @@ export default function ArmEndModal({
                 <p className="mt-1 text-sm text-zinc-300">
                   Please re-enable in your <span className="font-semibold text-white">Account</span> tab to continue trading.
                 </p>
+                {/* Bot Strategy alert (only when bots were actually paused at expiry) */}
+                {botsPaused > 0 && (
+                  <div className="mt-3 text-sm rounded-lg border border-emerald-400/40 bg-emerald-500/10 px-3 py-2">
+                    <span className="font-medium text-emerald-300">Bot Strategy:</span>{" "}
+                    {botsPausedText} paused when the arm session ended.{" "}
+                    <span className="text-emerald-200">Re-arm the session to resume.</span>
+                  </div>
+                )}
+
                 {hasGuardianWarn && (
                   <div className="mt-3 text-sm rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2">
                     <span className="font-medium text-amber-300">Heads up:</span>{" "}

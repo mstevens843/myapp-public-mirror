@@ -70,31 +70,31 @@ export default function ManualTradeCard({
     })();
   }, [targetMint]);
 
-  useEffect(() => {
-    const fetchPreview = async () => {
-      if (!targetMint || !manualBuyAmount || isNaN(parseFloat(manualBuyAmount))) {
-        setQuotePreview(null);
-        return;
-      }
-      try {
-        const lamports = Math.floor(parseFloat(manualBuyAmount) * 1e9); // convert SOL to lamports
-        const slippage = swapOpts.slippage || 1;
-        const res = await authFetch(
-          `/api/quote?inputMint=${SOL_MINT}&outputMint=${targetMint}&amount=${lamports}&slippage=${slippage}`
-        );
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        setQuotePreview({
-          outAmount: data.outAmount,
-          outToken: data.outToken,
-          priceImpact: data.priceImpact,
-        });
-      } catch {
-        setQuotePreview(null);
-      }
-    };
-    fetchPreview();
-  }, [manualBuyAmount, targetMint, swapOpts.slippage]);
+  // useEffect(() => {
+  //   const fetchPreview = async () => {
+  //     if (!targetMint || !manualBuyAmount || isNaN(parseFloat(manualBuyAmount))) {
+  //       setQuotePreview(null);
+  //       return;
+  //     }
+  //     try {
+  //       const lamports = Math.floor(parseFloat(manualBuyAmount) * 1e9); // convert SOL to lamports
+  //       const slippage = swapOpts.slippage || 1;
+  //       const res = await authFetch(
+  //         `/api/quote?inputMint=${SOL_MINT}&outputMint=${targetMint}&amount=${lamports}&slippage=${slippage}`
+  //       );
+  //       const data = await res.json();
+  //       if (data.error) throw new Error(data.error);
+  //       setQuotePreview({
+  //         outAmount: data.outAmount,
+  //         outToken: data.outToken,
+  //         priceImpact: data.priceImpact,
+  //       });
+  //     } catch {
+  //       setQuotePreview(null);
+  //     }
+  //   };
+  //   fetchPreview();
+  // }, [manualBuyAmount, targetMint, swapOpts.slippage]);
 
   return (
     <motion.div

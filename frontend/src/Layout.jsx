@@ -99,6 +99,7 @@ function LayoutInner() {
   const endModalShownOnceRef = useRef(false); // prevent duplicates from poll + event
   const lastWalletRef = useRef(activeWalletId);
   const armedByWalletRef = useRef(new Map()); // ← per-wallet last-known armed state
+  const lastBotsByWalletRef = useRef(new Map()); 
 
   const running = runningBots.length > 0;
 
@@ -128,6 +129,7 @@ function LayoutInner() {
       setEndModalAutoReturn(false);
       endModalShownOnceRef.current = false;
       suppressNextEndModalRef.current = false;
+      lastBotsByWalletRef.current.set(lastWalletRef.current, 0);
       prevArmedRef.current = false;
       setArmGuardian(null);
       setModalWalletLabel(null);
@@ -149,25 +151,37 @@ function LayoutInner() {
           setArmStatus(next);
           setArmGuardian(s.guardian || null);
 
+          // While armed, remember current botsRunning for this wallet
+          if (next.armed) {
+            const botsRunning = Number(s?.guardian?.botsRunning || 0);
+            lastBotsByWalletRef.current.set(activeWalletId, botsRunning);
+          }
+
           // Detect automatic end (TTL expiry) → show modal once
           if (wasArmed && !next.armed) {
             if (!suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
+              const lastBots = Number(lastBotsByWalletRef.current.get(activeWalletId) || 0);
               setEndModalAutoReturn(!!s.autoReturnTriggered);
-              setArmGuardian(s.guardian || null);
-              setModalWalletLabel(activeWalletInfo?.label || null);
+              // Pass botsPaused into guardian snapshot so modal can show Bot Strategy alert
+              setArmGuardian({ ...(s.guardian || {}), botsPaused: lastBots });
+             setModalWalletLabel(activeWalletInfo?.label || null);
               setShowEndModal(true);
               endModalShownOnceRef.current = true;
+              // reset last-bots for this wallet after surfacing
+              lastBotsByWalletRef.current.set(activeWalletId, 0);
             }
             suppressNextEndModalRef.current = false; // reset guard
           }
 
           // If page loaded after expiry, still surface the one-shot autoReturn flag
           if (!wasArmed && !next.armed && s.autoReturnTriggered && !endModalShownOnceRef.current) {
+            const lastBots = Number(lastBotsByWalletRef.current.get(activeWalletId) || 0);
             setEndModalAutoReturn(true);
-            setArmGuardian(s.guardian || null);
+            setArmGuardian({ ...(s.guardian || {}), botsPaused: lastBots });
             setModalWalletLabel(activeWalletInfo?.label || null);
             setShowEndModal(true);
             endModalShownOnceRef.current = true;
+            lastBotsByWalletRef.current.set(activeWalletId, 0);
           }
 
           if (!next.armed) setWarned(false);
@@ -211,17 +225,28 @@ function LayoutInner() {
           const wasArmed = !!prevMap.get(wid);
           nextMap.set(wid, nowArmed);
 
+          // Track botsRunning while armed for each wallet
+          if (nowArmed) {
+            const botsRunning = Number(s?.guardian?.botsRunning || 0);
+            lastBotsByWalletRef.current.set(wid, botsRunning);
+          }
+
           // Only surface expiries for wallets that are NOT the current active
           if (wid !== activeWalletId && wasArmed && !nowArmed) {
             if (!suppressNextEndModalRef.current && !endModalShownOnceRef.current) {
               try {
                 // Pull fresh single-wallet status to capture autoReturnTriggered
                 const sFull = await getArmStatus(wid);
+                const lastBots = Number(lastBotsByWalletRef.current.get(wid) || 0);
                 setEndModalAutoReturn(!!sFull.autoReturnTriggered);
-                setArmGuardian(sFull.guardian || (s && s.guardian) || null);
+                setArmGuardian({ ...(sFull.guardian || (s && s.guardian) || {}), botsPaused: lastBots });
+                lastBotsByWalletRef.current.set(wid, 0);
               } catch {
                 setEndModalAutoReturn(false);
-                setArmGuardian((s && s.guardian) || null);
+                const lastBots = Number(lastBotsByWalletRef.current.get(wid) || 0);
+                setArmGuardian({ ...((s && s.guardian) || {}), botsPaused: lastBots });
+                lastBotsByWalletRef.current.set(wid, 0);
+                
               }
               setModalWalletLabel(s?.label || w.label || null);
               setShowEndModal(true);
@@ -274,7 +299,9 @@ function LayoutInner() {
         // grab guardian snapshot so the warning appears immediately
         try {
           const s = await getArmStatus(activeWalletId); // includes guardian
-          if (mounted) setArmGuardian(s.guardian || null);
+          const lastBots = Number(lastBotsByWalletRef.current.get(activeWalletId) || 0);
+          if (mounted) setArmGuardian({ ...(s.guardian || {}), botsPaused: lastBots });
+          lastBotsByWalletRef.current.set(activeWalletId, 0);
         } catch {
           /* noop */
         }

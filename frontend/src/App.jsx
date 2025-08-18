@@ -1321,23 +1321,21 @@ onResume={async (id) => {
     </Suspense>
 
     {/* global toasts */}
-
+{/* 
 <Toaster
   position="top-right"
   toastOptions={{
     classNames: {
-      toast: "bg-zinc-900 text-white border border-zinc-700",
+      toast: "bg-zinc-900 text-white border border-zinc-700 mr-[200px]",
       actionButton: "text-white hover:text-red-400",
     },
     duration: 5000,
     action: {
       label: <X size={16} />,
-      onClick: (_toast) => {
-        toast.dismiss(_toast.id); // manual close
-      },
+      onClick: (_toast) => toast.dismiss(_toast.id),
     },
   }}
-/>
+/> */}
   </div>
 );
 }

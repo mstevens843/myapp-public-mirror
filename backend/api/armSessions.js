@@ -28,6 +28,7 @@ const {
 const legacy = require("../middleware/auth/encryption"); // your legacy (iv:tag:cipher) helper
 const { encrypt } = require("../middleware/auth/encryption");
 const autoReturn = require("../armEncryption/returnBalanceAfterSession/autoReturnScheduler");
+const { decryptEnvelope, encryptEnvelope, buildEnvelopeJson, } = require("../armEncryption/envelopeCryptoUnprotected");
 
 // ── Pagination helper (idempotent) ───────────────────────────────────────────
 function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
@@ -64,7 +65,6 @@ function preview(data, len = 120) {
 
 router.post("/arm", requireAuth, check2FA, async (req, res) => {
   /* ───── 1. Input validation ───── */
-  // Log invocation without echoing sensitive body contents
   console.log("🟢 /arm hit", { walletId: req.body && req.body.walletId });
   const {
     walletId,
@@ -93,6 +93,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
         requireArmToTrade: true,
         defaultPassphraseHash: true,
         passphraseHint: true,
+        // ⬅️ add stable userId for HKDF + AAD
+        userId: true,
       },
     }),
     prisma.wallet.findFirst({
@@ -113,8 +115,8 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     return res.status(404).json({ error: "Wallet not found" });
   }
 
-  // prepare AAD for encryption/decryption
-  const aad = `user:${userId}:wallet:${walletId}`;
+  // ⬅️ AAD must use stable user.userId (not req.user.id)
+  const aad = `user:${user.userId}:wallet:${walletId}`;
 
   let blob = wallet.encrypted;
   let migrating = false;
@@ -135,7 +137,17 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     else pkStringForDetect = null;
   }
   const isBase58PK = !!pkStringForDetect && !pkStringForDetect.includes(":");
-  const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK;
+
+  // ⬅️ NEW: detect unprotected HKDF envelope stored in encrypted column
+  const isEnvelope =
+    !!blob &&
+    typeof blob === "object" &&
+    (
+      (blob.data && blob.data.wrapped && blob.data.kekWrappedDek) ||
+      (blob.wrapped && blob.kekWrappedDek)
+    );
+
+  const needsMigration = !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK || isEnvelope;
 
   // Emit debug information without leaking key material.
   console.log("🔍 arm debug", {
@@ -143,6 +155,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
     isLegacyString,
     isLegacyPK,
     isBase58PK,
+    isEnvelope,
     isProtected: wallet.isProtected,
     pkType: Buffer.isBuffer(pkVal) ? "Buffer" : typeof pkVal,
   });
@@ -159,6 +172,14 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
       } else if (isLegacyString) {
         console.log("🔑 Decrypting legacy blob…");
         pkBuf = legacy.decrypt(blob, { aad });
+      } else if (isEnvelope) {
+        console.log("🔑 Unwrapping HKDF envelope…");
+        const core = blob.data || blob;
+        pkBuf = decryptEnvelope({
+          envelope: core,
+          userId: user.userId,                 // HKDF salt
+          serverSecret: process.env.ENCRYPTION_SECRET,
+        });
       } else if (!wallet.isProtected || isBase58PK) {
         const raw = (() => {
           if (!pkVal) return null;
@@ -216,17 +237,36 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
 
           for (const w of toUpgrade) {
             if (w.id === walletId) continue;
-            const upgradeAad = `user:${userId}:wallet:${w.id}`;
+            // ⬅️ use stable user.userId for AAD
+            const upgradeAad = `user:${user.userId}:wallet:${w.id}`;
             let pk;
             const enc = w.encrypted;
             const strLegacy = typeof enc === "string" && enc.includes(":");
-            if (w.privateKey) {
+
+            // ⬅️ NEW: detect HKDF envelope during bulk upgrade
+            const encIsEnvelope =
+              !!enc &&
+              typeof enc === "object" &&
+              (
+                (enc.data && enc.data.wrapped && enc.data.kekWrappedDek) ||
+                (enc.wrapped && enc.kekWrappedDek)
+              );
+
+            if (encIsEnvelope) {
+              const core2 = enc.data || enc;
+              pk = decryptEnvelope({
+                envelope: core2,
+                userId: user.userId,
+                serverSecret: process.env.ENCRYPTION_SECRET,
+              });
+            } else if (w.privateKey) {
               pk = legacy.decrypt(w.privateKey, { aad: upgradeAad });
             } else if (strLegacy) {
               pk = legacy.decrypt(enc, { aad: upgradeAad });
             } else {
               continue;
             }
+
             const newWrap = await encryptPrivateKey(pk, {
               passphrase,
               aad: upgradeAad,
@@ -336,12 +376,10 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   }
 
   /* ───── 7. Cache session and respond ───── */
-  // Default to 240 minutes if missing/invalid, but allow any integer ≥1
   const ttlMin = ttlNormalize(ttlMinutes, 240);
   arm(userId, walletId, DEK, ttlMin * 60_000);
   console.log(`🛡️ ARMED wallet ${walletId} for ${ttlMin} min`);
 
-  // ── ALWAYS call schedule; scheduler will reconcile defaults vs overrides.
   try {
     const ar = req.body?.autoReturn || {};
     const enabledOverride =
@@ -376,6 +414,7 @@ router.post("/arm", requireAuth, check2FA, async (req, res) => {
   });
 });
 
+
 /*
  * Route: POST /setup-protection
  *
@@ -392,15 +431,16 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "walletId & passphrase required" });
   }
 
-  const userId = req.user.id;
+  const dbUserId = req.user.id;
 
   const [user, wallet] = await Promise.all([
     prisma.user.findUnique({
-      where: { id: userId },
-      select: { defaultPassphraseHash: true, passphraseHint: true },
+      where: { id: dbUserId },
+      // ⬅️ need user.userId for HKDF salt + AAD (stable across auth sessions)
+      select: { id: true, userId: true, defaultPassphraseHash: true, passphraseHint: true },
     }),
     prisma.wallet.findFirst({
-      where: { id: walletId, userId },
+      where: { id: walletId, userId: dbUserId },
       select: {
         id: true,
         label: true,
@@ -413,12 +453,13 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     }),
   ]);
 
-  if (!wallet) {
+  if (!user || !wallet) {
     console.warn("⛔ Wallet not found");
     return res.status(404).json({ error: "Wallet not found" });
   }
 
-  const aad = `user:${userId}:wallet:${walletId}`;
+  // IMPORTANT: AAD must use the stable user.userId (not req.user.id)
+  const aad = `user:${user.userId}:wallet:${walletId}`;
   let blob = wallet.encrypted;
   let migrating = false;
 
@@ -429,22 +470,31 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     !Buffer.isBuffer(pkVal) &&
     ((typeof pkVal === "object" && pkVal.ct) || (typeof pkVal === "string" && pkVal.includes(":")));
 
-  let pkStringForDetect;
+  let pkStringForDetect = null;
   if (pkVal) {
     if (Buffer.isBuffer(pkVal)) pkStringForDetect = pkVal.toString();
     else if (typeof pkVal === "string") pkStringForDetect = pkVal;
-    else pkStringForDetect = null;
   }
   const isBase58PK = !!pkStringForDetect && !pkStringForDetect.includes(":");
 
+  // NEW: detect new unarmed HKDF envelope stored in encrypted column
+  const isEnvelope =
+    !!blob &&
+    typeof blob === "object" &&
+    (
+      (blob.data && blob.data.wrapped && blob.data.kekWrappedDek) || // { data: { wrapped, kekWrappedDek } }
+      (blob.wrapped && blob.kekWrappedDek) // { wrapped, kekWrappedDek }
+    );
+
   const needsMigration =
-    !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK || forceOverwrite;
+    !wallet.isProtected || isLegacyString || isLegacyPK || isBase58PK || isEnvelope || forceOverwrite;
 
   console.log("🔍 setup-protection debug", {
     walletId,
     isLegacyString,
     isLegacyPK,
     isBase58PK,
+    isEnvelope,
     isProtected: wallet.isProtected,
     forceOverwrite,
     pkType: Buffer.isBuffer(pkVal) ? "Buffer" : typeof pkVal,
@@ -457,17 +507,23 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
   migrating = true;
   try {
     let pkBuf;
+
     if (isLegacyPK) {
       pkBuf = legacy.decrypt(pkVal, { aad });
     } else if (isLegacyString) {
       pkBuf = legacy.decrypt(blob, { aad });
+    } else if (isEnvelope) {
+      // unwrap using server-secret HKDF + user.userId
+      const core = blob.data || blob;
+      pkBuf = decryptEnvelope({
+        envelope: core,
+        userId: user.userId,
+        serverSecret: process.env.ENCRYPTION_SECRET,
+      });
     } else if (!wallet.isProtected || isBase58PK) {
-      const raw = (() => {
-        if (!pkVal) return null;
-        if (Buffer.isBuffer(pkVal)) return pkVal.toString();
-        if (typeof pkVal === "string") return pkVal;
-        return null;
-      })();
+      const raw =
+        Buffer.isBuffer(pkVal) ? pkVal.toString() :
+        (typeof pkVal === "string" ? pkVal : null);
       if (!raw || typeof raw !== "string") {
         throw new Error("Unsupported unprotected wallet format");
       }
@@ -483,16 +539,15 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
     }
 
     const wrapped = await encryptPrivateKey(pkBuf, { passphrase, aad });
-    try {
-      pkBuf.fill(0);
-    } catch {}
+    try { pkBuf.fill(0); } catch {}
 
     const passHash = await argon2.hash(passphrase);
 
     if (applyToAll) {
       await prisma.$transaction(async (tx) => {
+        // set defaults on user
         await tx.user.update({
-          where: { id: userId },
+          where: { id: dbUserId },
           data: {
             defaultPassphraseHash: passHash,
             passphraseHint: passphraseHint || null,
@@ -501,7 +556,7 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
 
         const toUpgrade = await tx.wallet.findMany({
           where: {
-            userId,
+            userId: dbUserId,
             OR: [{ privateKey: { not: null } }, { isProtected: false }],
           },
           select: { id: true, encrypted: true, isProtected: true, privateKey: true },
@@ -509,46 +564,46 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
 
         for (const w of toUpgrade) {
           if (w.id === walletId) continue;
-          const upgradeAad = `user:${userId}:wallet:${w.id}`;
-          let pk;
+
+          const upgradeAad = `user:${user.userId}:wallet:${w.id}`;
           const enc = w.encrypted;
-          const strLegacy = typeof enc === "string" && enc.includes(":");
-          const pkVal = w.privateKey;
 
-          const isLegacyPK =
-            !!pkVal &&
-            !Buffer.isBuffer(pkVal) &&
-            ((typeof pkVal === "object" && pkVal.ct) ||
-              (typeof pkVal === "string" && pkVal.includes(":")));
+          const encIsEnvelope =
+            !!enc &&
+            typeof enc === "object" &&
+            (
+              (enc.data && enc.data.wrapped && enc.data.kekWrappedDek) ||
+              (enc.wrapped && enc.kekWrappedDek)
+            );
 
-          let base58ForDetect;
-          if (pkVal) {
-            if (Buffer.isBuffer(pkVal)) base58ForDetect = pkVal.toString();
-            else if (typeof pkVal === "string") base58ForDetect = pkVal;
-          }
-          const isBase58PK = !!base58ForDetect && !base58ForDetect.includes(":");
+          let pk = null;
 
-          if (isLegacyPK) {
-            pk = legacy.decrypt(pkVal, { aad: upgradeAad });
-          } else if (isBase58PK) {
+          if (encIsEnvelope) {
+            const core2 = enc.data || enc;
             try {
-              const raw = base58ForDetect.trim();
-              const decoded = bs58.decode(raw);
-              if (decoded.length !== 64) throw new Error();
-              pk = Buffer.from(decoded);
-            } catch {
-              continue;
+              pk = decryptEnvelope({
+                envelope: core2,
+                userId: user.userId,
+                serverSecret: process.env.ENCRYPTION_SECRET,
+              });
+            } catch { pk = null; }
+          } else if (typeof enc === "string" && enc.includes(":")) {
+            try { pk = legacy.decrypt(enc, { aad: upgradeAad }); } catch { pk = null; }
+          } else if (w.privateKey) {
+            const s = Buffer.isBuffer(w.privateKey) ? w.privateKey.toString() :
+                      (typeof w.privateKey === "string" ? w.privateKey : null);
+            if (s && !s.includes(":")) {
+              try {
+                const d = bs58.decode(s.trim());
+                if (d.length === 64) pk = Buffer.from(d);
+              } catch { /* skip */ }
             }
-          } else if (strLegacy) {
-            pk = legacy.decrypt(enc, { aad: upgradeAad });
-          } else {
-            continue;
           }
+
+          if (!pk) continue;
 
           const newWrap = await encryptPrivateKey(pk, { passphrase, aad: upgradeAad });
-          try {
-            pk.fill(0);
-          } catch {}
+          try { pk.fill(0); } catch {}
 
           await tx.wallet.update({
             where: { id: w.id },
@@ -575,9 +630,6 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
       });
 
       blob = wrapped;
-      wallet.isProtected = true;
-      wallet.passphraseHash = null;
-      wallet.privateKey = null;
     } else {
       await prisma.wallet.update({
         where: { id: walletId },
@@ -590,9 +642,6 @@ router.post("/setup-protection", requireAuth, async (req, res) => {
         },
       });
       blob = wrapped;
-      wallet.isProtected = true;
-      wallet.passphraseHash = passHash;
-      wallet.privateKey = null;
     }
 
     console.log("✅ Wallet protection setup complete");
@@ -685,7 +734,7 @@ router.get("/status/:walletId", requireAuth, async (req, res) => {
   if (includeGuardian) {
     const wid = Number(walletId);
     try {
-      const [limitOpen, dcaActive, tpSlActive] = await Promise.all([
+      const [limitOpen, dcaActive, tpSlActive, botsRunning] = await Promise.all([
         prisma.limitOrder.count({
           where: { userId: req.user.id, walletId: wid, status: "open" },
         }),
@@ -700,12 +749,25 @@ router.get("/status/:walletId", requireAuth, async (req, res) => {
             status: "active",
           },
         }),
+        prisma.strategyRunStatus.count({
+          where: {
+            userId: req.user.id,
+            isPaused: false,
+            stoppedAt: null,
+            OR: [
+              { config: { path: ["walletId"], equals: wid } },          // numeric
+              { config: { path: ["walletId"], equals: String(wid) } },  // string
+            ],
+          },
+        }),
       ]);
       guardian = {
         limitOpen,
         dcaActive,
         tpSlActive,
-        hasBlocking: limitOpen + dcaActive + tpSlActive > 0,
+        botsRunning: 0,
+        botsRunning,
+        hasBlocking: limitOpen + dcaActive + tpSlActive + botsRunning > 0,
       };
     } catch (e) {
       console.warn("⚠️ guardian count failed:", e.message || e);
@@ -863,16 +925,6 @@ router.post("/auto-return/settings", requireAuth, async (req, res) => {
 
 /*
  * Route: POST /remove-protection
- *
- * Remove pass‑phrase protection from an existing wallet.  This operation
- * requires the caller to provide the current pass‑phrase for the wallet
- * (or the user’s default pass‑phrase if the wallet uses that).  The server
- * will verify the pass‑phrase, unwrap the DEK and secret key, then
- * re‑encrypt the key using the legacy helper and store it in the
- * `privateKey` field.  The envelope (`encrypted`) and pass‑phrase
- * metadata are cleared, and `isProtected` is set to false.  Any active
- * arm session for the wallet is terminated.  After removal the wallet
- * behaves as an unprotected legacy wallet.
  */
 router.post("/remove-protection", requireAuth, async (req, res) => {
   // Log invocation without echoing the passphrase or full body
@@ -888,7 +940,8 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
     const [user, wallet] = await Promise.all([
       prisma.user.findUnique({
         where: { id: userId },
-        select: { defaultPassphraseHash: true },
+        // ⬅️ need stable user.userId for AAD and HKDF salt
+        select: { defaultPassphraseHash: true, userId: true },
       }),
       prisma.wallet.findFirst({
         where: { id: walletId, userId },
@@ -909,7 +962,7 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
       console.warn("⚠️ Wallet not protected, nothing to remove");
       return res.status(400).json({ error: "Wallet is not protected" });
     }
-    // Verify pass‑phrase against per‑wallet or global hash
+    // Verify pass-phrase against per-wallet or global hash
     let validPass = false;
     if (wallet.passphraseHash) {
       try {
@@ -929,8 +982,9 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
       console.warn("⛔ Invalid passphrase on remove-protection");
       return res.status(401).json({ error: "Invalid passphrase" });
     }
-    // Derive secret key from envelope
-    const aad = `user:${userId}:wallet:${walletId}`;
+    // Derive secret key from protected envelope
+    // ⬅️ AAD must use stable user.userId, not req.user.id
+    const aad = `user:${user.userId}:wallet:${walletId}`;
     let DEK;
     try {
       DEK = await unwrapDEKWithPassphrase(wallet.encrypted, passphrase, aad);
@@ -945,31 +999,35 @@ router.post("/remove-protection", requireAuth, async (req, res) => {
       console.error("❌ Failed to decrypt private key on remove-protection:", err.message);
       return res.status(500).json({ error: "Failed to decrypt wallet key" });
     }
-    // Encode to base58
-    const pkBase58 = bs58.encode(Buffer.from(pkBuf));
-    // Clear sensitive buffers
+
+    // ⬅️ NEW: store as modern UNPROTECTED HKDF envelope (encrypted JSON), not legacy privateKey
+    const core = encryptEnvelope({
+      walletKey: pkBuf,
+      userId: user.userId,                 // HKDF salt
+      serverSecret: process.env.ENCRYPTION_SECRET,
+    });
+    const envelope = buildEnvelopeJson(core);
+
+    // Zeroize sensitive buffers
     try { pkBuf.fill(0); } catch {}
     try { DEK.fill(0); } catch {}
-    const legacyEnc = encrypt(pkBase58, { aad });
-    const ivHex  = Buffer.from(legacyEnc.iv,  'base64').toString('hex');
-    const tagHex = Buffer.from(legacyEnc.tag, 'base64').toString('hex');
-    const ctHex  = Buffer.from(legacyEnc.ct,  'base64').toString('hex');
-    const legacyString = `${ivHex}:${tagHex}:${ctHex}`;
+
     // Remove any active session
     try {
       disarm(userId, walletId);
     } catch (e) {
       console.warn("⚠️ Error disarming during remove-protection:", e.message);
     }
-    // Persist changes: clear envelope & passphrase, set privateKey
+
+    // Persist changes: keep encrypted envelope, clear passphrase & legacy fields
     await prisma.wallet.update({
       where: { id: walletId },
       data: {
-        encrypted: null,
+        encrypted: envelope,   // ← new unarmed HKDF envelope
         isProtected: false,
         passphraseHash: null,
         passphraseHint: null,
-        privateKey: legacyString,
+        privateKey: null,      // ← no legacy storage
       },
     });
     console.log(`✅ Removed protection for wallet ${walletId}`);

@@ -189,11 +189,11 @@ model Trade {
   // ADD ↓↓↓
   userId          String
   createdAt       DateTime  @default(now())
-  user            User      @relation("UserTrades", fields: [userId], references: [id])
+  user     User   @relation("UserTrades", fields: [userId], references: [id], onDelete: Cascade)
   // ADD ↑↑↑
 
   walletId        Int
-  wallet          Wallet    @relation("WalletTrades", fields: [walletId], references: [id])
+  wallet   Wallet @relation("WalletTrades", fields: [walletId], references: [id], onDelete: Cascade)
   config          SavedConfigs[] @relation("TradeConfig")
   mevMode         String?
   priorityFee     Int?  
@@ -429,6 +429,7 @@ model DcaOrder {
   tokenMint     String
   amount        Float
   unit          String
+  firstBuyNow   Boolean  @default(false) 
   numBuys       Int
   totalBuys     Int
   frequency     Float

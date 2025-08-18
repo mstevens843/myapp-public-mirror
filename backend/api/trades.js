@@ -512,52 +512,120 @@ router.get("/open", async (req, res) => {
 
 /* ───────────────────────────── 6. LOG NEW OPEN TRADE (IDEMPOTENT) ──────────────── */
 router.post("/open", async (req, res) => {
-  const idKey = req.get('Idempotency-Key') || req.headers['idempotency-key'] || null;
+  const idKey =
+    req.get("Idempotency-Key") || req.headers["idempotency-key"] || null;
+
+  const toBig = (v, def = 0n) => {
+    try {
+      if (v === null || v === undefined || v === "") return def;
+      if (typeof v === "bigint") return v;
+      if (typeof v === "number") {
+        if (!Number.isFinite(v)) return def;
+        return BigInt(Math.trunc(v));
+      }
+      if (typeof v === "string") {
+        const s = v.trim();
+        if (s === "") return def;
+        // strip decimals if someone passed a float string
+        return BigInt(s.includes(".") ? s.split(".")[0] : s);
+      }
+      return def;
+    } catch {
+      return def;
+    }
+  };
 
   const doWork = async () => {
     const {
-      mint, entryPrice, entryPriceUSD, inAmount, outAmount,
-      unit = "sol", decimals = 9, strategy = "manual",
-      slippage = 1, walletLabel = ""
+      mint,
+      entryPrice,
+      entryPriceUSD,
+      inAmount,
+      outAmount,
+      unit = "sol",
+      decimals = 9,
+      strategy = "manual",
+      slippage = 1,
+      walletLabel = "",
+      walletId: bodyWalletId, // NEW: allow direct walletId
     } = req.body || {};
 
-    if (!mint || !entryPrice || !inAmount) {
+    if (!mint || entryPrice == null || inAmount == null) {
       return { status: 400, response: { error: "Missing data" } };
     }
 
-    const wallet = await prisma.wallet.findFirst({
-      where: { userId: req.user.id, label: walletLabel }
-    });
+    // Resolve target wallet:
+    // 1) explicit walletId, 2) walletLabel, 3) user's activeWalletId
+    let wallet = null;
+
+    if (bodyWalletId != null) {
+      wallet = await prisma.wallet.findFirst({
+        where: { id: Number(bodyWalletId), userId: req.user.id },
+      });
+    } else if (walletLabel) {
+      wallet = await prisma.wallet.findFirst({
+        where: { userId: req.user.id, label: walletLabel },
+      });
+    } else {
+      const user = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { activeWalletId: true },
+      });
+      if (user?.activeWalletId != null) {
+        wallet = await prisma.wallet.findFirst({
+          where: { id: user.activeWalletId, userId: req.user.id },
+        });
+      }
+    }
+
     if (!wallet) {
       return { status: 404, response: { error: "Wallet not found." } };
     }
 
-    await prisma.trade.create({
-      data: {
-        mint, tokenName: await getTokenName(mint),
-        entryPrice, entryPriceUSD,
-        inAmount: BigInt(inAmount),       // schema uses BigInt
-        outAmount: BigInt(outAmount),
-        closedOutAmount: BigInt(0),
-        unit, decimals, strategy, slippage,
-        walletId: wallet.id, walletLabel,
-        type:"buy", side:"buy", botId:strategy
-      }
-    });
-    return { status: 200, response: { message:"Open trade logged." } };
+    const data = {
+      mint,
+      tokenName: await getTokenName(mint),
+      entryPrice: Number(entryPrice),
+      entryPriceUSD:
+        entryPriceUSD == null ? null : Number(entryPriceUSD),
+      inAmount: toBig(inAmount),             // BigInt
+      outAmount: toBig(outAmount, 0n),       // BigInt
+      closedOutAmount: 0n,                   // BigInt
+      unit,
+      decimals: Number(decimals) || 9,
+      strategy,
+      slippage: Number(slippage) || 1,
+      walletId: wallet.id,
+      walletLabel: wallet.label,             // keep label for convenience
+      type: "buy",
+      side: "buy",
+      botId: strategy,
+      userId: req.user.id,                   // ✅ required by schema
+      // optional fields left null: exitPrice, exitPriceUSD, usdValue, etc.
+    };
+
+    await prisma.trade.create({ data });
+
+    return { status: 200, response: { message: "Open trade logged." } };
   };
 
   try {
     if (idKey) {
       const jobResult = await runJob(idKey, doWork);
-      return res.status(jobResult.status || 200).json(jobResult.response || {});
+      return res
+        .status(jobResult.status || 200)
+        .json(jobResult.response || {});
     } else {
       const direct = await doWork();
-      return res.status(direct.status || 200).json(direct.response || {});
+      return res
+        .status(direct.status || 200)
+        .json(direct.response || {});
     }
   } catch (err) {
     console.error("❌ POST /open error:", err);
-    res.status(500).json({ error: err.message || "Failed to log open trade." });
+    res
+      .status(500)
+      .json({ error: err.message || "Failed to log open trade." });
   }
 });
 
@@ -629,48 +697,74 @@ router.delete("/open/:mint", async (req,res)=>{
 //    remaining token amount is 0   as exited (triggerType = “dust”)
 // ──────────────────────────────────────────────────────────────
 router.post("/clear-dust", requireAuth, async (req, res) => {
-  const userId       = req.user.id;
-  const { walletId } = req.body || {};
-  const MIN_DUST_USD = 0.25;
+  const userId = req.user.id;
+  const { walletId, hardDelete = true, minDustUsd = 0.25 } = req.body ?? {};
 
-  const where = {
-    exitedAt: null,
-    wallet: {
-      userId
-    }
-  };
-
+  // only OPEN trades are considered dust-candidates
+  const where = { exitedAt: null, wallet: { userId } };
   if (walletId) {
-    where.walletId = walletId; // ✅ this works — direct filter
-    delete where.wallet;       // ✅ remove nested wallet filter
+    where.walletId = walletId;
+    delete where.wallet;
   }
 
   const openTrades = await prisma.trade.findMany({ where });
+  let deleted = 0, closed = 0;
+
+  // batch ops for speed/atomicity
+  const tx = [];
 
   for (const t of openTrades) {
-    const remaining = t.outAmount - t.closedOutAmount;
+    const remaining = t.outAmount - t.closedOutAmount; // BigInt
     if (remaining <= 0n) continue;
 
-    const priceUsd = await getCachedPrice(t.mint)
-                    ?? await getTokenPrice(userId, t.mint);
+    const priceUsdRaw =
+      (await getCachedPrice(t.mint)) ?? (await getTokenPrice(userId, t.mint));
+    const priceUsd = Number(priceUsdRaw ?? 0); // if price unknown, treat as 0 (pure dust)
+
     const remTokens = Number(remaining) / 10 ** (t.decimals ?? 0);
     const remUsd = remTokens * priceUsd;
 
-    if (remUsd <= MIN_DUST_USD) {
-      await prisma.trade.update({
-        where: { id: t.id },
-        data: {
-          closedOutAmount: t.outAmount,
-          exitPrice: priceUsd,
-          exitPriceUSD: priceUsd,
-          triggerType: "dust",
-          exitedAt: new Date()
-        }
-      });
+    if (remUsd <= minDustUsd) {
+      if (hardDelete) {
+        // try to hard-delete first
+        tx.push(
+          prisma.trade.delete({ where: { id: t.id } })
+            .then(() => { deleted++; })
+            .catch(() => {
+              // FK blocked → soft-close instead
+              return prisma.trade.update({
+                where: { id: t.id },
+                data: {
+                  closedOutAmount: t.outAmount,
+                  exitPrice: priceUsd || undefined,
+                  exitPriceUSD: priceUsd || undefined,
+                  triggerType: "dust",
+                  exitedAt: new Date(),
+                },
+              }).then(() => { closed++; });
+            })
+        );
+      } else {
+        // legacy behavior: just mark closed
+        tx.push(
+          prisma.trade.update({
+            where: { id: t.id },
+            data: {
+              closedOutAmount: t.outAmount,
+              exitPrice: priceUsd || undefined,
+              exitPriceUSD: priceUsd || undefined,
+              triggerType: "dust",
+              exitedAt: new Date(),
+            },
+          }).then(() => { closed++; })
+        );
+      }
     }
   }
 
-  res.json({ message: "Dust trades cleared." });
+  if (tx.length) await prisma.$transaction(tx);
+
+  res.json({ message: "Dust trades cleared.", deleted, closed });
 });
 
 /*─────────────────────────── 9-b. BULK DELETE SELECTED MINTS ─────────────────*/

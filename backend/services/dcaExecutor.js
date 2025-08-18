@@ -1,3 +1,4 @@
+// backend/services/dcaExecutor.js
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
 const prisma                   = require("../prisma/prisma");
@@ -5,16 +6,18 @@ const axios                    = require("axios");
 const { prepareBuyLogFields }  = require("./utils/analytics/tradeFormatter");
 const { logTrade }             = require("./utils/analytics/logTrade");
 const { addOrUpdateOpenTrade } = require("./utils/analytics/openTrades");
-const { sendBotAlert }         = require("../telegram/botAlerts");
+const { sendBotAlert }         = require("../telegram/botAlerts"); // kept for compatibility
 const { sendAlert }            = require("../telegram/alerts");
 
 const API_BASE = process.env.API_BASE || "http://localhost:5001";
 
 /* ────────────────────────────── helpers ───────────────────────────── */
 function shortMint(m) { return `${m.slice(0, 4)}…${m.slice(-4)}`; }
-function tsUTC() { return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC"; }
+function tsUTC() { return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC"; }
 function fmt(x, d = 4) { return (+x).toFixed(d).replace(/\.?0+$/, ""); }
+function pick(...vals) { return vals.find(v => v !== undefined && v !== null); }
 
+// // Legacy split between UI and bot users—preserved for reference.
 // function isAppUser(userId) {
 //   return userId === "ui" || userId === "web";
 // }
@@ -23,35 +26,81 @@ function fmt(x, d = 4) { return (+x).toFixed(d).replace(/\.?0+$/, ""); }
 //   else                    await sendBotAlert(userId, message, category);
 // }
 
+/** Unified alert (respects user prefs + chat resolution in sendAlert). */
 async function alertUser(userId, msg, tag = "DCA") {
   try {
-    await sendAlert(userId, msg, tag);  // will handle prefs + chatId
+    await sendAlert(userId, msg, tag);
   } catch (err) {
-    console.error("❌ Telegram alert failed:", err.message);
+    console.error("❌ Telegram alert failed:", err?.message || err);
   }
 }
 
+/** Derive a safe, numeric per-buy amount if not precomputed. */
+function deriveAmountPerBuy(order) {
+  if (order?.amountPerBuy != null) return Number(order.amountPerBuy);
+  const total = Number(order?.amount ?? 0);
+  const n     = Number(pick(order?.numBuys, order?.totalBuys));
+  if (!total || !n) return null;
+  return total / n;
+}
+
+/** Normalize unit and input mint. */
+function unitInfo(unitRaw) {
+  const unit = String(unitRaw || "usdc").toLowerCase();
+  if (unit === "sol") {
+    return {
+      unit: "sol",
+      inputMint: "So11111111111111111111111111111111111111112",
+      amountField: "amountInSOL",
+      fmtDigits: 3,
+    };
+  }
+  return {
+    unit: "usdc",
+    inputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    amountField: "amountInUSDC",
+    fmtDigits: 2,
+  };
+}
+
 /* ────────────────────────────── MAIN BUY ──────────────────────────── */
+/**
+ * Executes a single DCA buy chunk.
+ * NOTE: This function updates the DCA row (completedBuys/executedCount/lastBuyAt/tx)
+ * on success. Callers (monitors, schedulers) should NOT increment again.
+ */
 async function performDcaBuy(userId, order, authHeader = "") {
+  if (!order?.tokenMint) {
+    throw new Error("DCA order missing tokenMint");
+  }
+
+  const { unit, inputMint, amountField, fmtDigits } = unitInfo(order.unit);
+  const amountPerBuy = deriveAmountPerBuy(order);
+  if (!amountPerBuy) {
+    throw new Error("DCA order missing amountPerBuy and cannot derive from amount/numBuys");
+  }
+
   const buyPayload = {
-    mint        : order.tokenMint,
+    mint        : order.tokenMint,                          // target token
     walletLabel : order.walletLabel || "default",
     slippage    : order.slippage ?? 1.0,
     force       : true,
     strategy    : "dca",
-    skipLog     : true,
-    amountInUSDC: order.unit === "usdc" ? order.amountPerBuy : undefined,
-    amountInSOL : order.unit === "sol"  ? order.amountPerBuy : undefined
+    skipLog     : true,                                     // we log manually below
+    amountInUSDC: unit === "usdc" ? amountPerBuy : undefined,
+    amountInSOL : unit === "sol"  ? amountPerBuy : undefined,
   };
 
   try {
     /* ── swap call ───────────────────────────────── */
     const res = await axios.post(`${API_BASE}/api/internalJobs/buy`, buyPayload, {
-      headers: { Authorization: authHeader }
+      headers: authHeader ? { Authorization: authHeader } : {},
+      timeout: 60_000,
     });
-    const src = res.data.result || res.data || {};
+
+    const src = res?.data?.result || res?.data || {};
     const { tx, inAmount, outAmount } = src;
-    if (!tx) throw new Error("No transaction returned");
+    if (!tx) throw new Error("No transaction returned from swap");
 
     /* ── update DCA order row ───────────────────── */
     await prisma.dcaOrder.update({
@@ -60,25 +109,24 @@ async function performDcaBuy(userId, order, authHeader = "") {
         completedBuys: { increment: 1 },
         executedCount: { increment: 1 },
         lastBuyAt    : new Date(),
-        tx
-      }
+        tx,
+      },
     });
 
-    /* ── analytics: log + open‑trade ────────────── */
+    /* ── analytics: log + open-trade ────────────── */
     const logPayload = await prepareBuyLogFields({
       strategy   : "dca",
-      inputMint  : buyPayload.amountInSOL
-        ? "So11111111111111111111111111111111111111112"
-        : "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      inputMint,
       outputMint : order.tokenMint,
       inAmount,
       outAmount,
       walletLabel: buyPayload.walletLabel,
       slippage   : buyPayload.slippage,
-      txHash     : tx
+      txHash     : tx,
     });
 
     await logTrade(logPayload);
+
     await addOrUpdateOpenTrade({
       mint         : order.tokenMint,
       entryPrice   : logPayload.entryPrice,
@@ -92,51 +140,68 @@ async function performDcaBuy(userId, order, authHeader = "") {
       usdValue     : logPayload.usdValue,
       txHash       : tx,
       type         : "buy",
-      unit         : order.unit || "usdc"
+      unit,
     });
 
     /* ── rich Telegram alert ─────────────────────── */
-    const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
-    const tokenUrl = `https://birdeye.so/token/${order.tokenMint}`;
-    const short    = shortMint(order.tokenMint);
-    const time     = tsUTC();
-    const amountIn = order.unit === "usdc"
-      ? `${fmt(order.amountPerBuy, 2)} USDC`
-      : `${fmt(order.amountPerBuy, 3)} SOL`;
+    const totalBuys = Number(pick(order?.numBuys, order?.totalBuys)) || 0;
+    const doneNext  = Number(order?.completedBuys || 0) + 1; // pre-increment view
+    const explorer  = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
+    const tokenUrl  = `https://birdeye.so/token/${order.tokenMint}`;
+    const short     = shortMint(order.tokenMint);
+    const time      = tsUTC();
+    const amountInS = unit === "usdc"
+      ? `${fmt(amountPerBuy, fmtDigits)} USDC`
+      : `${fmt(amountPerBuy, fmtDigits)} SOL`;
 
     const lines = `
-📉 *DCA Buy Executed* ${order.completedBuys + 1} / ${order.totalBuys}
+📉 *DCA Buy Executed* ${doneNext} / ${totalBuys}
 
 🧾 *Mint:* \`${short}\`
 🔗 [View Token on Birdeye](${tokenUrl})
-💸 *In:* ${amountIn}
+💸 *In:* ${amountInS}
 👤 *Wallet:* \`${order.walletLabel || "default"}\`
 🕒 *Time:* ${time}
 📡 [View Transaction](${explorer})
     `.trim();
 
     await alertUser(userId, lines, "DCA");
-    return { tx };
+    return { tx, inAmount, outAmount };
 
   } catch (err) {
-    console.error(`❌ DCA buy failed for order ${order.id}:`, err.message);
+    const msg =
+      err?.response?.data?.message ||
+      err?.response?.data?.error ||
+      err?.message ||
+      String(err);
 
-    await prisma.dcaOrder.update({
-      where: { id: order.id },
-      data : { missedCount: { increment: 1 } }
-    });
+    console.error(`❌ DCA buy failed for order ${order?.id || "?"}:`, msg);
 
-    const failMsg = `❌ *DCA Buy ${order.completedBuys + 1} / ${order.totalBuys} Failed*\n${err.message}`;
+    try {
+      await prisma.dcaOrder.update({
+        where: { id: order.id },
+        data : { missedCount: { increment: 1 } },
+      });
+    } catch (dbErr) {
+      console.error("❌ Failed to bump missedCount:", dbErr?.message || dbErr);
+    }
+
+    const totalBuys = Number(pick(order?.numBuys, order?.totalBuys)) || 0;
+    const failIdx   = Number(order?.completedBuys || 0) + 1;
+
+    const failMsg = `❌ *DCA Buy ${failIdx} / ${totalBuys} Failed*\n${msg}`;
     await alertUser(userId, failMsg, "DCA");
+
     return { tx: null };
   }
 }
 
-async function executeImmediateDcaBuy(userId, order) {
-  return await performDcaBuy(userId, order);
+/** Convenience wrapper when the caller conceptually wants “now”. */
+async function executeImmediateDcaBuy(userId, order, authHeader = "") {
+  return await performDcaBuy(userId, order, authHeader);
 }
 
 module.exports = {
   performDcaBuy,
-  executeImmediateDcaBuy
+  executeImmediateDcaBuy,
 };

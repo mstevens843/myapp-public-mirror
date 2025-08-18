@@ -34,7 +34,23 @@ const crypto = require("crypto");
 // in-memory guards
 const _idemCache = new Map();      // idKey -> { res:any, exp:number }
 const _idTtlGate = new Map();      // idKey -> expiresAtMs
-const _coolOffByMint = Object.create(null);  // mint -> ts
+// Cooloff keyed per user+wallet+mint to avoid cross-user interference
+const _coolOff = new Map(); // key -> untilEpochMs
+const coKey = (userId, walletId, mint) => `${userId}:${walletId}:${mint}`;
+function coGet(userId, walletId, mint) {
+  const t = _coolOff.get(coKey(userId, walletId, mint));
+  return t && t > Date.now() ? t : null;
+}
+function coStart(userId, walletId, mint, ms) {
+  if (ms <= 0) return;
+  const until = Date.now() + ms;
+  const k = coKey(userId, walletId, mint);
+  _coolOff.set(k, until);
+  setTimeout(() => _coolOff.delete(k), ms + 1_000).unref?.();
+}
+function coClear(userId, walletId, mint) {
+  _coolOff.delete(coKey(userId, walletId, mint));
+}
 let __KILLED = String(process.env.KILL_SWITCH || '').trim() === '1';
 
 function requireAlive() { if (__KILLED) { const e = new Error("KILL_SWITCH_ACTIVE"); e.code = "KILL"; throw e; } }
@@ -76,7 +92,6 @@ setInterval(() => {
   const now = Date.now();
   for (const [k, v] of _idTtlGate.entries()) if (v <= now) _idTtlGate.delete(k);
   for (const [k, v] of _idemCache.entries()) if (v?.exp && v.exp <= now) _idemCache.delete(k);
-  for (const [m, ts] of Object.entries(_coolOffByMint)) if (now - ts > 10*60_000) delete _coolOffByMint[m];
 }, 60_000).unref?.();
 
 /* stable keys (no new UI): time-bucketed for manual clicks */
@@ -177,10 +192,18 @@ async function performManualBuy(opts) {
     }
   }
 
-  // ===== Guards =====
-  requireAlive();
-  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
-    throw new Error(`coolOff active for mint ${mint}`);
+  // Micro debounce per user+wallet+mint (2s) to catch true double clicks only
+  {
+    const until = coGet(userId, walletId, mint);
+    if (until) {
+      const e = new Error(`coolOff active for mint ${mint}`);
+      e.code = "COOL_OFF";
+      e.cooldownEndsAt = until;
+      e.seconds = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+      throw e;
+    }
+    // Start a very short guard; will be extended only on USER errors
+    coStart(userId, walletId, mint, 2000);
   }
 
   /* ── wallet & prefs ──────────────────────────────────────────────────────── */
@@ -282,8 +305,16 @@ async function performManualBuy(opts) {
       briberyAmount,                          // lamports
     });
   } catch (err) {
-    _coolOffByMint[mint] = Date.now(); // start cool-off on any failure
     const msg = err?.message || "";
+    // Classify and only cool off on USER-caused errors (slippage/insufficient funds)
+    const kind = classifyError(msg);
+    if (kind === "USER") {
+      // extend to 7s to avoid hammering the same invalid route/amount
+      coStart(userId, walletId, mint, 7000);
+    } else {
+      // NET/UNKNOWN: don’t punish the user; clear the tiny debounce
+      coClear(userId, walletId, mint);
+    }
     if (msg.includes("insufficient lamports") || msg.includes("custom program error: 0x1")) {
       throw new Error("Not enough SOL.");
     }
@@ -293,6 +324,8 @@ async function performManualBuy(opts) {
     throw new Error("Swap failed: " + msg);
   }
   if (!tx) throw new Error("❌ Swap transaction failed or returned null");
+  // Buy succeeded – remove any pending guard for this key
+  coClear(userId, walletId, mint);
 
   /* price math --------------------------------------------------------------- */
   const decimals       = await getDecimalsCached(mint);
@@ -445,9 +478,10 @@ async function performManualSell(opts) {
 
   // ===== Guards =====
   requireAlive();
-  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
-    throw new Error(`coolOff active for mint ${mint}`);
-  }
+  // ⛔️ removed coolOff guard for manual sell
+  // if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
+  //   throw new Error(`coolOff active for mint ${mint}`);
+  // }
 
   /* 🔕  Skip duplicate “Sell” alert if TP/SL already sent one */
   const skipAlert = triggerType === "tp" || triggerType === "sl";
@@ -598,14 +632,14 @@ async function performManualSell(opts) {
   try {
     tx = await executeSwap({ quote, wallet, priorityFee: priorityFeeToUse, briberyAmount, shared, });
   } catch (err) {
-    _coolOffByMint[mint] = Date.now();
+    // ⛔️ removed coolOff setter for manual sell
+    // _coolOffByMint[mint] = Date.now();
     throw err;
   }
   if (!tx) {
     await alertUser(userId, "❌ Sell failed", "Sell");
-    return;
-  }
-
+    throw new Error("Swap execution returned no transaction.");
+     }
   const exitPriceSOL = (Number(quote.outAmount) * 10 ** decimals) / (Number(sellRaw) * 1e9);
   const solUSD       = await getPxCached(SOL_MINT);
   const exitPriceUSD = solUSD ? +(exitPriceSOL * solUSD).toFixed(6) : null;
@@ -684,8 +718,9 @@ async function performManualSell(opts) {
   if (!skipAlert) {
     await alertUser(userId, alertMsg, "Sell");
   }
+  // ✅ Ensure API returns a proper object with tx for the client
+  return { tx, message: "Sell complete" };
 }
-
 
 /* ================================================================
  * 2)  AMOUNT-BASED SELL → performManualSellByAmount()
@@ -706,9 +741,10 @@ async function performManualSellByAmount(opts) {
 
   // ===== Guards =====
   requireAlive();
-  if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
-    throw new Error(`coolOff active for mint ${mint}`);
-  }
+  // ⛔️ removed coolOff guard for manual sell-by-amount
+  // if (_coolOffByMint[mint] && Date.now() - _coolOffByMint[mint] < 7_000) {
+  //   throw new Error(`coolOff active for mint ${mint}`);
+  // }
 
   const skipAlert = triggerType === "tp" || triggerType === "sl";
 
@@ -804,7 +840,8 @@ async function performManualSellByAmount(opts) {
       briberyAmount,
     });
   } catch (err) {
-    _coolOffByMint[mint] = Date.now();
+    // ⛔️ removed coolOff setter for manual sell-by-amount
+    // _coolOffByMint[mint] = Date.now();
     throw new Error("Sell-amount tx failed.");
   }
   if (!tx) throw new Error("Sell-amount tx failed.");
@@ -866,6 +903,7 @@ async function performManualSellByAmount(opts) {
     await alertUser(userId, alertMsg,  "Sell");
   }
 }
+
 
 
 module.exports = {

@@ -3,6 +3,9 @@
 // - Proactively ensure CSRF before any NON-GET request (once).
 // - Handle CSRF failure as 403 OR 419 (your backend uses 403), then bootstrap once and retry.
 // - After 401 refresh success, re-ensure CSRF (it may rotate) before replay.
+// - NEW: Single-flight dedupe for UNSAFE authFetch calls (prevents duplicate DELETE/POST/PUT/PATCH
+//        from hammering the backend and tripping global limiters).
+// - NEW: Auto Idempotency-Key for UNSAFE methods (server can swallow accidental dupes).
 // - Everything else (exports, return type = Response, body/headers, 429/network handling)
 //   remains exactly as before to avoid breaking other flows.
 
@@ -89,8 +92,21 @@ async function ensureCsrfOnce(baseUrlOrigin) {
 
 // ----- Utilities -----
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function jitter(base) { return base + Math.random() * 150 | 0; }
+function jitter(base) { return base + (Math.random() * 150) | 0; }
 const isUnsafe = (m) => !["GET","HEAD","OPTIONS"].includes((m || "GET").toUpperCase());
+
+// Tiny UUID without import; good enough for idempotency keys.
+function makeIdempotencyKey() {
+  try {
+    if (typeof crypto !== "undefined") {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      const a = new Uint8Array(16);
+      crypto.getRandomValues?.(a);
+      return Array.from(a, b => b.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {}
+  return String(Date.now()) + Math.random().toString(16).slice(2);
+}
 
 function normalizeBody(body, headers) {
   if (body == null) return null;
@@ -135,13 +151,35 @@ function resolveUrl(path) {
   return joinUrl(baseString(), path);
 }
 
+function readCookie(name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('(?:^|;\\s*)' + escaped + '\\s*=\\s*([^;]+)');
+  const m = document.cookie.match(re);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function getCsrfTokenFromCookie() {
+  // Your server sets __Host-csrf; fall back to common names
+  return (
+    readCookie("__Host-csrf") ||
+    readCookie("csrf") ||
+    readCookie("XSRF-TOKEN") ||
+    ""
+  );
+}
+
 async function refreshSession(baseUrlOrigin) {
   try {
     const url = joinUrl(baseUrlOrigin, "/api/auth/refresh");
-    if (DEBUG) console.debug("[authFetch] POST refresh →", url);
+    const csrf = getCsrfTokenFromCookie();
+    if (DEBUG) console.debug("[authFetch] POST refresh →", url, "(csrf:", csrf ? "present" : "missing", ")");
     const res = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        ...(csrf ? { "X-CSRF-Token": csrf } : {}),
+      },
       credentials: "include",
       body: JSON.stringify({}),
     });
@@ -251,15 +289,10 @@ async function doRequest(originalUrl, init, {
         }
       }
 
-      // 429 backoff (bounded)
-      if (res.status === 429 && attempts429 < retry429) {
-        const backoffs = [10000, 20000, 40000];
-        const waitMs = (backoffs[attempts429] || 4000) + jitter(50);
-        attempts429++;
-        try { toast.info("Rate limited; retrying…"); } catch {}
-        if (DEBUG) console.warn("[authFetch] 429, backing off", waitMs, "ms");
-        await sleep(waitMs);
-        continue;
+      // 429: bail out (no retries here)
+      if (res.status === 429) {
+        clearTimeout(timeout);
+        return res;
       }
 
       clearTimeout(timeout);
@@ -293,6 +326,22 @@ async function doRequest(originalUrl, init, {
   }
 }
 
+/* ────────────────────────────────────────────────────────────────────
+   Single-flight dedupe for UNSAFE authFetch calls
+   - Prevents double clicks / StrictMode replays from issuing duplicate
+     DELETE/POST/PUT/PATCH. We key by method+url+shortBody.
+   - We return a Response.clone() to each waiter so bodies can be read independently.
+   ──────────────────────────────────────────────────────────────────── */
+const inflightUnsafeAuth = new Map(); // key -> Promise<Response>
+function shortBodyKey(b) {
+  if (b == null) return "";
+  if (typeof b === "string") return b.length > 128 ? b.slice(0,128) : b;
+  try { return JSON.stringify(b).slice(0,128); } catch { return "[[body]]"; }
+}
+function unsafeKey(method, url, body) {
+  return `${method}:${url}:${shortBodyKey(body)}`;
+}
+
 // ----- Public API -----
 export async function authFetch(path, options = {}) {
   const token = tokenGetter();
@@ -315,6 +364,11 @@ export async function authFetch(path, options = {}) {
     }
     const tok = getCsrfToken();
     if (tok) headers.set("X-CSRF-Token", tok);
+
+    // **NEW** Auto Idempotency-Key (server can ignore accidental dupes)
+    if (!headers.has("Idempotency-Key")) {
+      headers.set("Idempotency-Key", makeIdempotencyKey());
+    }
   }
 
   if (method === "GET" && !headers.has("Cache-Control")) {
@@ -337,6 +391,28 @@ export async function authFetch(path, options = {}) {
     console.info("[authFetch] REQUEST:", init.method, url);
   }
 
+  // **NEW** single-flight dedupe only for UNSAFE methods
+  if (isUnsafe(method)) {
+    const k = unsafeKey(method, url, init.body);
+    if (inflightUnsafeAuth.has(k)) {
+      // Return a clone so each consumer can read the body
+      return inflightUnsafeAuth.get(k).then((r) => r.clone());
+    }
+    const p = doRequest(
+      url,
+      init,
+      {
+        retry429: typeof options.retry === "number" ? options.retry : 3,
+        retryNetwork: typeof options.retryNetwork === "number" ? options.retryNetwork : 1,
+        needsArmEnabled: options.needsArmEnabled !== undefined ? !!options.needsArmEnabled : true,
+      }
+    ).finally(() => inflightUnsafeAuth.delete(k));
+    inflightUnsafeAuth.set(k, p);
+    // First caller gets the original Response; others get .clone()
+    return p;
+  }
+
+  // Safe methods unchanged
   return doRequest(
     url,
     init,
@@ -377,6 +453,11 @@ export async function apiFetch(urlOrPath, opts = {}) {
     if (!existing) await ensureCsrfOnce(base);
     const tok = getCsrfToken();
     if (tok) headers.set("X-CSRF-Token", tok);
+
+    // Match Idempotency-Key behavior for apiFetch too
+    if (!headers.has("Idempotency-Key")) {
+      headers.set("Idempotency-Key", makeIdempotencyKey());
+    }
   }
 
   const init = {

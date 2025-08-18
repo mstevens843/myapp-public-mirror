@@ -113,14 +113,15 @@ async function checkAndTriggerTpSl(rule) {
     });
 
     /* retire rule & clean up */
-    await prisma.tpSlRule.delete({ where: { id } });
-    const stillOpen = await prisma.trade.findMany({
-      where: { walletId, mint, strategy, outAmount: { gt: 0 } }
-    });
-    if (stillOpen.length === 0) {
-      console.log(`🧹 No open trades left for ${mint}, deleting remaining TP/SL rules…`);
-      await prisma.tpSlRule.deleteMany({ where: { userId, walletId, mint, strategy } });
-    }
+    // await prisma.tpSlRule.delete({ where: { id } });
+    // const stillOpen = await prisma.trade.findMany({
+    //   where: { walletId, mint, strategy, outAmount: { gt: 0 } }
+    // });
+    // if (stillOpen.length === 0) {
+    //   console.log(`🧹 No open trades left for ${mint}, deleting remaining TP/SL rules…`);
+    //   await prisma.tpSlRule.deleteMany({ where: { userId, walletId, mint, strategy } });
+    // }
+    await prisma.tpSlRule.deleteMany({ where: { id } });
 
     /* 5️⃣ Alert */
     const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;

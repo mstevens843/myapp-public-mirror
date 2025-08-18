@@ -105,42 +105,66 @@ export async function getPositions() {
 }
 
 /** GET /api/trades/open — active open trades */
-export async function getOpenTrades({ take = 100, skip = 0 } = {}) {
+export async function getOpenTrades({ take = 100, skip = 0, walletId, walletLabel } = {}) {
   const qs = new URLSearchParams({ take: String(take), skip: String(skip) });
-  const res = await authFetch(`/api/trades/open?${qs.toString()}`);
+  if (walletId != null) qs.append("walletId", String(walletId));
+  if (walletLabel)      qs.append("walletLabel", walletLabel);
+
+  const res  = await authFetch(`/api/trades/open?${qs.toString()}`);
   const text = await res.text();
   let data; try { data = JSON.parse(text); } catch { throw new Error("Failed to parse open trades response."); }
   if (!res.ok) throw new Error(data?.error || "Failed to fetch open trades.");
   return Array.isArray(data) ? data : (data.trades ?? []);
 }
 
+
 /** POST /api/trades/open — Log a new open trade */
-export async function addOpenTrade(trade) {
+export async function addOpenTrade(trade, { idempotencyKey } = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+
   const res = await authFetch("/api/trades/open", {
     method: "POST",
-    body: JSON.stringify(trade),
+    headers,
+    body: JSON.stringify(trade), // may include { walletId } or { walletLabel }
   });
-  if (!res.ok) throw new Error((await res.text()) || "Failed to add open trade");
-  return res.json();
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to add open trade");
+  return JSON.parse(text);
 }
+
+/** PA
 
 /** PATCH /api/trades/open/:mint — Update open trade (partial sell) */
-export async function updateOpenTrade(mint, updateData) {
+export async function updateOpenTrade(mint, updateData, { walletId, walletLabel } = {}) {
+  const body = { ...updateData };
+  if (walletId != null) body.walletId = Number(walletId);
+  if (walletLabel)      body.walletLabel = walletLabel;
+
   const res = await authFetch(`/api/trades/open/${mint}`, {
     method: "PATCH",
-    body: JSON.stringify(updateData),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error((await res.text()) || "Failed to update open trade");
-  return res.json();
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to update open trade");
+  return JSON.parse(text);
 }
-
 /** DELETE /api/trades/open/:mint — Remove open trade after full sell */
-export async function deleteOpenTrade(mint) {
-  const res = await authFetch(`/api/trades/open/${mint}`, { method: "DELETE" });
-  if (!res.ok) throw new Error((await res.text()) || "Failed to delete open trade");
-  return res.json();
-}
+export async function deleteOpenTrade(mint, { walletId, walletLabel } = {}) {
+  const body = {};
+  if (walletId != null) body.walletId = Number(walletId);
+  if (walletLabel)      body.walletLabel = walletLabel;
 
+  const res = await authFetch(`/api/trades/open/${mint}`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to delete open trade");
+  return JSON.parse(text);
+}
 /** GET /api/portfolio — full simulated equity curve & stats */
 export async function getPortfolioSummary() {
   const res = await authFetch("/api/portfolio");

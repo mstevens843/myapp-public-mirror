@@ -73,8 +73,7 @@ function saveLocalFlags(flags) {
  */
 async function fetchRemoteFlags() {
   try {
-    const res = await authFetch("/api/flags");
-    if (res && res.ok) {
+const res = await fetch("/api/flags", { credentials: "include" });    if (res && res.ok) {
       const data = await res.json();
       return data || {};
     }

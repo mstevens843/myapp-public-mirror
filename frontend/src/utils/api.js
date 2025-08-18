@@ -398,11 +398,21 @@ export const createLimitOrder = (body) => {
   }).then(r => r.json());
 };
 
-export const createDcaOrder = (body) =>
-  authFetch("/api/orders/dca", {
+export const createDcaOrder = async (body) => {
+  const r = await authFetch("/api/orders/dca", {
     method: "POST",
     body: JSON.stringify(body),
-  }).then(r => r.json());
+  });
+  let data = null;
+  try { data = await r.json(); } catch (_) { data = {}; }
+  if (!r.ok) {
+    const msg = data?.error || data?.message || `HTTP ${r.status}`;
+    throw new Error(msg);
+  }
+  return data;
+};
+
+
 
 export const cancelOrder = (id) =>
   authFetch(`/api/orders/cancel/${id}`, { method: "DELETE" })
@@ -418,11 +428,20 @@ export const fetchPendingOrders = async () => {
   return [...dca, ...limit];
 };
 
-/* ----- TP / SL ----- */
+
+
 export const updateTpSl = (mint, body) => {
   const combinedSellPct = (body.tpPercent || 0) + (body.slPercent || 0);
+  const idemKey =
+    (typeof window !== "undefined" &&
+      window.crypto &&
+      typeof window.crypto.randomUUID === "function")
+      ? window.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
   return authFetch(`/api/tpsl/${mint}`, {
     method: "PUT",
+    headers: { "Idempotency-Key": idemKey },
     body: JSON.stringify({
       mint,
       walletId: Number(body.walletId),
@@ -438,6 +457,25 @@ export const updateTpSl = (mint, body) => {
     if (!r.ok) {
       const err = await r.text();
       throw new Error(err || "Failed to update TP/SL");
+    }
+    return r.json();
+  });
+};
+
+export const updateTpSlById = (id, body) => {
+  return authFetch(`/api/tpsl/by-id/${id}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      tp: body.tp,
+      sl: body.sl,
+      tpPercent: body.tpPercent,
+      slPercent: body.slPercent,
+      strategy: body.strategy || "manual",
+    }),
+  }).then(async (r) => {
+    if (!r.ok) {
+      const err = await r.text();
+      throw new Error(err || "Failed to update TP/SL by id");
     }
     return r.json();
   });

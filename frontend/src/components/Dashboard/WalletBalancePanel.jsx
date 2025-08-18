@@ -1,6 +1,6 @@
 // frontend/components/WalletBalancePanel.jsx
 import React, { useEffect, useState } from "react";
-import { toast } from "react-toastify";
+import { toast } from "sonner";
 import {
   RefreshCw,
   DollarSign,
@@ -22,7 +22,7 @@ import { manualBuy } from "../../utils/api";
 import { fetchCurrentPrice, getOpenTrades } from "../../utils/trades_positions";
 import { getWalletNetworth } from "../../utils/api";
 
-// 🔥 NEW: pull wallet APIs so we can switch from here
+// Wallet APIs
 import {
   loadWallet,
   fetchActiveWallet,
@@ -40,8 +40,9 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
   const [showSwap, setShowSwap] = useState(false);
   const [direction, setDirection] = useState("solToUsdc");
   const [amount, setAmount] = useState("");
+  const [swapping, setSwapping] = useState(false);
 
-  // 🔥 NEW: wallets + active wallet
+  // wallets + active wallet
   const [wallets, setWallets] = useState([]);
   const [activeWalletId, setActiveWalletId] = useState(null);
   const [switching, setSwitching] = useState(false);
@@ -59,8 +60,7 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
       try {
         const ws = (await loadWallet()) || [];
         setWallets(ws);
-        const id =
-          (await fetchActiveWallet()) || (ws[0] && ws[0].id) || null;
+        const id = (await fetchActiveWallet()) || (ws[0] && ws[0].id) || null;
         setActiveWalletId(id);
       } catch (e) {
         console.error("wallet bootstrap failed:", e);
@@ -69,60 +69,59 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
   }, []);
 
   /* ---------------- Balances / open trades ---------------- */
-const fetchNetAndOpen = async () => {
-  setLoading(true);
-  try {
-    // Run both in parallel, but don't let trades failure kill the panel
-    const [netRes, openRes] = await Promise.allSettled([
-      getWalletNetworth(),
-      getOpenTrades({ take: 100, skip: 0 }),
-    ]);
-
-    if (netRes.status === "fulfilled") {
-      setNet(netRes.value);
-    } else {
-      console.error("❌ networth fetch failed:", netRes.reason);
-      toast.error("Could not refresh net worth.");
-    }
-
-    if (openRes.status === "fulfilled") {
-      const STABLE_MINTS = new Set([
-        USDC_MINT,
-        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-        "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",
-        "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT",
+  const fetchNetAndOpen = async () => {
+    setLoading(true);
+    try {
+      const [netRes, openRes] = await Promise.allSettled([
+        getWalletNetworth(),
+        getOpenTrades({ take: 100, skip: 0, walletId: activeWalletId }),
       ]);
-      const trades = openRes.value.filter((t) => !STABLE_MINTS.has(t.mint));
 
-      let totalUSD = 0;
-      await Promise.all(
-        trades.map(async (t) => {
-          let usd = t.usdValue;
-          if (typeof usd !== "number") {
-            try {
-              const price = await fetchCurrentPrice(t.mint);
-              usd = price * Number(t.outAmount ?? 0) / 10 ** (t.decimals ?? 9);
-            } catch { usd = 0; }
-          }
-          totalUSD += usd;
-        })
-      );
-      setOpen({ count: trades.length, value: +totalUSD.toFixed(2) });
-    } else {
-      console.warn("⚠️ open trades fetch failed:", openRes.reason);
-      setOpen({ count: 0, value: 0 }); // don't block the panel
+      if (netRes.status === "fulfilled") {
+        setNet(netRes.value);
+      } else {
+        console.error("❌ networth fetch failed:", netRes.reason);
+        toast.error("Could not refresh net worth.");
+      }
+
+      if (openRes.status === "fulfilled") {
+        const STABLE_MINTS = new Set([
+          USDC_MINT,
+          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",
+          "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT",
+        ]);
+        const scoped = (openRes.value || []).filter(t => t.walletId === activeWalletId);
+        const trades = scoped.filter((t) => !STABLE_MINTS.has(t.mint));
+
+        let totalUSD = 0;
+        await Promise.all(
+          trades.map(async (t) => {
+            let usd = t.usdValue;
+            if (typeof usd !== "number") {
+              try {
+                const price = await fetchCurrentPrice(t.mint);
+                usd = price * Number(t.outAmount ?? 0) / 10 ** (t.decimals ?? 9);
+              } catch { usd = 0; }
+            }
+            totalUSD += usd;
+          })
+        );
+        setOpen({ count: trades.length, value: +totalUSD.toFixed(2) });
+      } else {
+        console.warn("⚠️ open trades fetch failed:", openRes.reason);
+        setOpen({ count: 0, value: 0 });
+      }
+    } finally {
+      setLoading(false);
     }
-  } finally {
-    setLoading(false);
-  }
-};
+  };
 
-  // initial + whenever wallet changes
   useEffect(() => {
     if (activeWalletId != null) fetchNetAndOpen();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeWalletId]);
- 
+
   /* ---------------- Wallet switch handler ---------------- */
   const handleSwitchWallet = async (id) => {
     if (id === activeWalletId) return;
@@ -131,22 +130,21 @@ const fetchNetAndOpen = async () => {
       const res = await setActiveWalletApi(id);
       if (res?.activeWalletId === id) {
         setActiveWalletId(id);
-        const label =
-          wallets.find((w) => w.id === id)?.label || `Wallet ${id}`;
+        const label = wallets.find((w) => w.id === id)?.label || `Wallet ${id}`;
         toast.success(`Active wallet: ${label}`);
-       // 🔁 Notify parent with the new pubkey so App.jsx updates selectedWallets
-       let pk = wallets.find((w) => w.id === id)?.publicKey;
-       if (!pk) {
-         // fallback: refresh wallet list and try again
-         try {
-           const ws = (await loadWallet()) || [];
-           setWallets(ws);
-           pk = ws.find((w) => w.id === id)?.publicKey;
-         } catch {}
-       }
-       if (pk && typeof onWalletSwitched === "function") {
-         onWalletSwitched(pk);
-       }
+        window.dispatchEvent(new CustomEvent("user:activeWalletChanged", { detail: { walletId: id } }));
+        // Notify parent with new pubkey
+        let pk = wallets.find((w) => w.id === id)?.publicKey;
+        if (!pk) {
+          try {
+            const ws = (await loadWallet()) || [];
+            setWallets(ws);
+            pk = ws.find((w) => w.id === id)?.publicKey;
+          } catch {}
+        }
+        if (pk && typeof onWalletSwitched === "function") {
+          onWalletSwitched(pk);
+        }
       } else {
         toast.error("Failed to set active wallet.");
       }
@@ -170,48 +168,70 @@ const fetchNetAndOpen = async () => {
       setAmount(max.toFixed(6));
     } else {
       const usable = (sol.amount ?? 0) - 0.02;
-      if (usable <= 0) return toast.warn("Need ≥0.03 SOL");
+      if (usable <= 0) return toast.warning("Need ≥0.03 SOL");
       setAmount(usable.toFixed(3));
     }
   };
 
   const runSwap = async () => {
     const val = parseFloat(amount);
-    if (!val) return toast.warn("Enter amount");
+    if (!val) return toast.warning("Enter amount");
 
-    const userPrefs = JSON.parse(localStorage.getItem("userPrefs") || "{}");
+    const userPrefs = (() => {
+      try {
+        const raw = localStorage.getItem("userPrefs");
+        if (!raw || raw === "undefined") return {};
+        return JSON.parse(raw);
+      } catch {
+        return {};
+      }
+    })();
+
     const opts = { slippage: userPrefs.slippage ?? 1.0 };
-
     const label = direction === "solToUsdc" ? "SOL → USDC" : "USDC → SOL";
+
+    setSwapping(true);
+
     const promise =
       direction === "solToUsdc"
         ? manualBuy(val, USDC_MINT, { ...opts, skipLog: true })
-        : manualBuy(undefined, SOL_MINT, {
-            ...opts,
-            amountInUSDC: val,
-            skipLog: true,
-          });
+        : manualBuy(undefined, SOL_MINT, { ...opts, amountInUSDC: val, skipLog: true });
 
     toast.promise(
       promise,
       {
-        pending: `🔁 Swapping ${label}…`,
-        success: "✅ Swap confirmed",
-        error: { render: ({ data }) => `❌ ${data.message || "Swap failed"}` },
-      },
-      { position: "bottom-right", theme: "dark" }
+        loading: `🔁 Swapping ${label}…`,
+        success: (res) => {
+          const tx = res?.tx;
+          if (!tx) return "✅ Swap confirmed";
+          const url = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
+          return (
+            <span>
+              ✅ Swap confirmed ·{" "}
+              <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2"
+              >
+                View tx
+              </a>
+            </span>
+          );
+        },
+        error: (err) => `❌ ${err?.message || "Swap failed"}`,
+      }
     );
 
     try {
       await promise;
       await fetchNetAndOpen();
     } finally {
+      setSwapping(false);
       setShowSwap(false);
       setAmount("");
     }
   };
-
-  const targetToken = localStorage.getItem("targetToken") || "";
 
   const activeWalletLabel =
     wallets.find((w) => w.id === activeWalletId)?.label || "Select wallet";
@@ -222,12 +242,10 @@ const fetchNetAndOpen = async () => {
       <div className="flex items-center justify-between mb-4">
         <h3 className="flex items-center gap-2 text-xl font-bold text-white">
           <DollarSign size={20} className="text-emerald-400" /> Wallet Balances
-          
         </h3>
-        
 
         <div className="flex items-center gap-3">
-          {/* 🔥 NEW: Wallet selector */}
+          {/* Wallet selector */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -241,9 +259,7 @@ const fetchNetAndOpen = async () => {
             </DropdownMenuTrigger>
             <DropdownMenuContent className="min-w-[220px] bg-zinc-900 border border-zinc-700">
               {wallets.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-zinc-400">
-                  No wallets found
-                </div>
+                <div className="px-3 py-2 text-sm text-zinc-400">No wallets found</div>
               ) : (
                 wallets.map((w) => (
                   <DropdownMenuItem
@@ -252,9 +268,7 @@ const fetchNetAndOpen = async () => {
                     className="flex items-center justify-between text-sm"
                   >
                     <span>{w.label}</span>
-                    {w.id === activeWalletId && (
-                      <Check size={16} className="text-emerald-400" />
-                    )}
+                    {w.id === activeWalletId && <Check size={16} className="text-emerald-400" />}
                   </DropdownMenuItem>
                 ))
               )}
@@ -288,33 +302,25 @@ const fetchNetAndOpen = async () => {
               <span>SOL</span>
             </div>
             <div className="text-right">
-              <div className="text-white font-semibold">
-                {sol.amount?.toFixed(3) ?? 0}
-              </div>
-              <div className="text-emerald-300 text-xs">
-                ${sol.valueUSD?.toFixed(2) ?? 0}
-              </div>
+              <div className="text-white font-semibold">{sol.amount?.toFixed(3) ?? 0}</div>
+              <div className="text-emerald-300 text-xs">${sol.valueUSD?.toFixed(2) ?? 0}</div>
             </div>
           </div>
 
           <div className="flex items-center justify-between bg-zinc-800/60 border border-zinc-700 p-4 rounded-lg">
-          <div className="flex items-center gap-2">
-            <img
-              src="https://assets.coingecko.com/coins/images/6319/small/USD_Coin_icon.png"
-              alt="USDC"
-              className="w-5 h-5"
-            />
-            <span>USDC</span>
-          </div>
-          <div className="text-right">
-            <div className="text-white font-semibold">
-              {usdc.amount?.toFixed(2) ?? 0}
+            <div className="flex items-center gap-2">
+              <img
+                src="https://assets.coingecko.com/coins/images/6319/small/USD_Coin_icon.png"
+                alt="USDC"
+                className="w-5 h-5"
+              />
+              <span>USDC</span>
             </div>
-            <div className="text-emerald-300 text-xs">
-              ${usdc.valueUSD?.toFixed(2) ?? 0}
+            <div className="text-right">
+              <div className="text-white font-semibold">{usdc.amount?.toFixed(2) ?? 0}</div>
+              <div className="text-emerald-300 text-xs">${usdc.valueUSD?.toFixed(2) ?? 0}</div>
             </div>
           </div>
-        </div>
 
           <div className="flex items-center justify-between bg-zinc-800/60 border border-zinc-700 p-4 rounded-lg">
             <div className="flex items-center gap-2">
@@ -323,9 +329,7 @@ const fetchNetAndOpen = async () => {
             </div>
             <div className="text-right">
               <div className="text-white font-semibold">{open.count}</div>
-              <div className="text-emerald-300 text-xs">
-                ${open.value.toFixed(2)}
-              </div>
+              <div className="text-emerald-300 text-xs">${open.value.toFixed(2)}</div>
             </div>
           </div>
 
@@ -340,93 +344,93 @@ const fetchNetAndOpen = async () => {
       )}
 
       {/* Swap buttons */}
-<div className="flex flex-col md:flex-row items-start md:items-center gap-3 mt-4 w-full">
-  {/* Left: Quick Links */}
-  {/* <div className="flex items-center gap-2 text-xs text-zinc-400 flex-wrap">
-    <span className="italic">Links:</span>
-    <a
-      href={`https://birdeye.so/token/${targetToken}`}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-blue-400 hover:underline"
-    >
-      Birdeye
-    </a>
-    <span>|</span>
-    <a
-      href={`https://dexscreener.com/solana/${targetToken}`}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-blue-400 hover:underline"
-    >
-      DEX Screener
-    </a>
-  </div> */}
+      <div className="flex flex-col md:flex-row items-start md:items-center gap-3 mt-4 w-full">
+        <div className="flex justify-end w-full">
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setDirection("solToUsdc");
+                setShowSwap(true);
+              }}
+              className="bg-gradient-to-r from-teal-500 to-emerald-600 px-5 py-2 rounded-full text-sm font-semibold shadow hover:scale-105 transition"
+            >
+              SOL → USDC
+            </button>
+            <button
+              onClick={() => {
+                setDirection("usdcToSol");
+                setShowSwap(true);
+              }}
+              className="bg-gradient-to-r from-emerald-600 to-teal-500 px-5 py-2 rounded-full text-sm font-semibold shadow hover:scale-105 transition"
+            >
+              USDC → SOL
+            </button>
+          </div>
+        </div>
+      </div>
 
-  {/* Right: Swap Buttons */}
-<div className="flex justify-end w-full">
-  <div className="flex gap-3">
-    <button
-      onClick={() => {
-        setDirection("solToUsdc");
-        setShowSwap(true);
-      }}
-      className="bg-gradient-to-r from-teal-500 to-emerald-600 px-5 py-2 rounded-full text-sm font-semibold shadow hover:scale-105 transition"
-    >
-      SOL → USDC
-    </button>
-    <button
-      onClick={() => {
-        setDirection("usdcToSol");
-        setShowSwap(true);
-      }}
-      className="bg-gradient-to-r from-emerald-600 to-teal-500 px-5 py-2 rounded-full text-sm font-semibold shadow hover:scale-105 transition"
-    >
-      USDC → SOL
-    </button>
-  </div>
-    </div>
-</div>
-
-      {/* Modal unchanged */}
+      {/* Swap Modal — styled like DCA/Limit modals */}
       {showSwap && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-zinc-800 w-80 rounded-xl p-6 shadow-lg border border-zinc-700">
-            <h3 className="text-lg font-semibold mb-4 text-center">
-              {direction === "solToUsdc"
-                ? "Convert SOL → USDC"
-                : "Convert USDC → SOL"}
-            </h3>
-            <div className="relative mb-6">
-              <input
-                type="number"
-                min="0"
-                step="any"
-                autoFocus
-                placeholder="Amount"
-                className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-600 focus:outline-none text-white pr-16"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-              <button
-                onClick={setMax}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 bg-zinc-700 hover:bg-zinc-600 text-xs px-2 py-0.5 rounded"
-              >
-                Max
-              </button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="relative w-[400px] space-y-3 rounded-2xl border border-zinc-700 bg-zinc-900 p-6 text-white shadow-xl">
+            {/* Close (top-right) */}
+            <div
+              className="absolute top-3 right-3 cursor-pointer text-zinc-400 hover:text-red-400 transition-colors"
+              onClick={() => !swapping && setShowSwap(false)}
+            >
+              ✕
             </div>
-            <div className="flex gap-3">
+
+            {/* Title */}
+            <h3 className="flex items-center justify-center gap-2 text-lg font-bold text-emerald-400">
+              <RefreshCw size={18} className="text-cyan-400" />
+              {direction === "solToUsdc" ? "Convert SOL → USDC" : "Convert USDC → SOL"}
+            </h3>
+
+            {/* Form (match DCA inputs) */}
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              {/* Amount (span 2) */}
+              <label className="col-span-2 flex items-center">
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  autoFocus
+                  placeholder="Amount"
+                  className="flex-1 rounded bg-zinc-800 px-2 py-1"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                />
+                <button
+                  onClick={setMax}
+                  disabled={swapping}
+                  className="ml-2 bg-zinc-700 hover:bg-zinc-600 disabled:opacity-50 text-xs px-2 py-0.5 rounded"
+                >
+                  Max
+                </button>
+              </label>
+
+              {/* Direction (readonly display for consistency) */}
+              <div className="col-span-2 text-center text-[11px] text-zinc-400">
+                {direction === "solToUsdc" ? "Swap SOL for USDC" : "Swap USDC for SOL"}
+              </div>
+            </div>
+
+            {/* Footer (text Cancel + emerald Save) */}
+            <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 onClick={() => setShowSwap(false)}
-                className="flex-1 bg-zinc-700 hover:bg-zinc-600 rounded py-2"
+                disabled={swapping}
+                className="text-xs text-zinc-400 hover:text-white disabled:opacity-50"
               >
                 Cancel
               </button>
               <button
                 onClick={runSwap}
-                className="flex-1 bg-green-600 hover:bg-green-700 rounded py-2 font-semibold"
+                disabled={swapping}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm hover:bg-emerald-700 disabled:opacity-60"
               >
-                Confirm
+                {swapping ? "Swapping…" : "Confirm"}
               </button>
             </div>
           </div>

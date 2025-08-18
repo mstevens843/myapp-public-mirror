@@ -78,7 +78,11 @@ export async function getArmStatus(walletId) {
     armed: false,
     msLeft: 0,
     autoReturnTriggered: false,
-    guardian: { hasActionables: false, counts: { tpSl: 0, dca: 0, limit: 0 } },
+    guardian: {
+      hasActionables: false,
+      counts: { tpSl: 0, dca: 0, limit: 0, bots: 0 },
+      botsRunning: 0,
+    },
   };
   if (!walletId) return DEFAULT;
 
@@ -101,7 +105,8 @@ export async function getArmStatus(walletId) {
   const limit = Number(rg?.limitOpen || 0);
   const dca   = Number(rg?.dcaActive || 0);
   const tpSl  = Number(rg?.tpSlActive || 0);
-  const hasActionables = tpSl + dca + limit > 0;
+  const bots  = Number(rg?.botsRunning || 0);
+  const hasActionables = tpSl + dca + limit + bots > 0;
 
   return {
     walletId: raw?.walletId ?? walletId,
@@ -110,7 +115,8 @@ export async function getArmStatus(walletId) {
     autoReturnTriggered,
     guardian: {
       hasActionables,
-      counts: { tpSl, dca, limit },
+      counts: { tpSl, dca, limit, bots },
+      botsRunning: bots,
     },
   };
 }
@@ -128,6 +134,7 @@ export async function getAllArmStatuses() {
     const limit = Number(g?.limitOpen || 0);
     const dca   = Number(g?.dcaActive || 0);
     const tpSl  = Number(g?.tpSlActive || 0);
+    const bots  = Number(g?.botsRunning || 0);
 
     return {
       walletId: Number(it.walletId),
@@ -135,8 +142,9 @@ export async function getAllArmStatuses() {
       armed,
       msLeft,
       guardian: {
-        hasActionables: tpSl + dca + limit > 0,
-        counts: { tpSl, dca, limit },
+        hasActionables: tpSl + dca + limit + bots > 0,
+        counts: { tpSl, dca, limit, bots },
+        botsRunning: bots,
       },
     };
   });

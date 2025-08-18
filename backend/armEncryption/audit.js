@@ -1,5 +1,5 @@
 // backend/utils/audit.js
-const prisma = require("../prisma");
+const prisma = require("../prisma/prisma");
 
 async function audit(userId, event, meta) {
   try {

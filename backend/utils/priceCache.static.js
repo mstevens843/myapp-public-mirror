@@ -4,7 +4,7 @@
 // • 5-min TTL (since user refreshes are rare)
 // • Pulls from getTokenPriceApp()
 // ─────────────────────────────────────────────────────────────
-const { getTokenPriceApp } = require("./marketData");
+const { getTokenPrice } = require("./marketData");
 
 const TTL   = 15_000;  // 15 seconds
 const cache = new Map();
@@ -15,7 +15,7 @@ async function getCachedPrice(mint) {
 
   if (entry && now - entry.ts < TTL) return entry.price;
 
-  const price = await getTokenPriceApp(mint);
+  const price = await getTokenPrice(mint);
   cache.set(mint, { price, ts: now });
   return price;
 }

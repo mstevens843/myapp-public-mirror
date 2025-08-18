@@ -34,13 +34,13 @@ const ForceToggle = ({ value, onChange }) => (
       className="h-4 w-7"
       aria-label="Force queue"
     />
-    <Tooltip text="Force‑queue lets you save the order even if you don’t yet have the token or funds." />
+    <Tooltip text="Force-queue lets you save the order even if you don’t yet have the token or funds." />
   </div>
 );
 
 /* live preview */
 const buildPreview = ({
-  side, amount, unit, numBuys, freq, stopAbove, stopBelow,
+  side, amount, unit, numBuys, freq, stopAbove, stopBelow, firstBuyNow,
 }) => {
   if (!amount || !numBuys || !freq) return null;
   const chunk = (Number(amount) / Number(numBuys)).toFixed(2);
@@ -58,36 +58,42 @@ const buildPreview = ({
       </span>{" "}
       •{" "}
       <span className="text-yellow-300 font-semibold">{numBuys}</span>{" "}
-      rounds{hi}{lo}
+      rounds{hi}{lo}{" "}
+      <span className="text-xs text-zinc-400">
+        ({firstBuyNow ? "first buy now" : "first buy after 1 interval"})
+      </span>
     </>
   );
 };
 
 /* ───────────────────────── component ──────────────────────── */
 export default function DcaModal({ open, onClose, tokenMint }) {
-  const [mint, setMint]         = useState("");
-  const [side, setSide]         = useState("buy");
-  const [amount, setAmount]     = useState("");
-  const [unit, setUnit]         = useState("usdc");
-  const [numBuys, setNumBuys]   = useState("");
-  const [freq, setFreq]         = useState("");
+  const [mint, setMint]           = useState("");
+  const [side, setSide]           = useState("buy");
+  const [amount, setAmount]       = useState("");
+  const [unit, setUnit]           = useState("usdc");
+  const [numBuys, setNumBuys]     = useState("");
+  const [freq, setFreq]           = useState("");
   const [stopAbove, setStopAbove] = useState("");
   const [stopBelow, setStopBelow] = useState("");
-  const [force, setForce]       = useState(false);
+  const [force, setForce]         = useState(false);
+  const [firstBuyNow, setFirstBuyNow] = useState(true);
 
-useEffect(() => {
-  if (open) {
-    setMint(tokenMint || "");
-    setSide("buy");
-    setAmount("");
-    setUnit("usdc");
-    setNumBuys("");
-    setFreq("");
-    setStopAbove("");
-    setStopBelow("");
-    setForce(false);
-  }
-}, [open, tokenMint]);
+  useEffect(() => {
+    if (open) {
+      setMint(tokenMint || "");
+      setSide("buy");
+      setAmount("");
+      setUnit("usdc");
+      setNumBuys("");
+      setFreq("");
+      setStopAbove("");
+      setStopBelow("");
+      setForce(false);
+      setFirstBuyNow(true);
+    }
+  }, [open, tokenMint]);
+
   const handleSave = async () => {
     try {
       if (!mint.trim())                     return toast.error("Token mint required");
@@ -96,7 +102,8 @@ useEffect(() => {
       if (!freq || freq <= 0)               return toast.error("Frequency required");
 
       const res = await createDcaOrder({
-        mint: mint.trim(),
+        tokenMint: mint.trim(),
+        mint: mint.trim(), // legacy key for older backends
         side,
         amount: Number(amount),
         unit,
@@ -105,11 +112,12 @@ useEffect(() => {
         stopAbove: stopAbove ? Number(stopAbove) : null,
         stopBelow: stopBelow ? Number(stopBelow) : null,
         force,
+        firstBuyNow,
       });
 
       if (res?.success === false) return toast.error(res.message || "Save failed");
       toast.success("✅ DCA order queued");
-      if (res.warn) toast(res.warn, { icon: "⚠️" });
+      if (res?.warn) toast(res.warn, { icon: "⚠️" });
       onClose();
     } catch (e) {
       if (e?.needForce) { setForce(true); return toast.error(e.error); }
@@ -119,23 +127,25 @@ useEffect(() => {
 
   if (!open) return null;
 
-  const preview = buildPreview({ side, amount, unit, numBuys, freq, stopAbove, stopBelow });
+  const preview = buildPreview({
+    side, amount, unit, numBuys, freq, stopAbove, stopBelow, firstBuyNow
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div className="relative w-[400px] space-y-3 rounded-2xl border border-zinc-700 bg-zinc-900 p-6 text-white shadow-xl">
         <div 
-  className="absolute top-3 right-3 cursor-pointer text-zinc-400 hover:text-red-400 transition-colors"
-  onClick={onClose}
->
-  ✕
-</div>
-<h3 className="flex items-center justify-center gap-2 text-lg font-bold text-emerald-400">
-   <Recycle size={18} className="text-red-500" />Set DCA Order
-</h3>
+          className="absolute top-3 right-3 cursor-pointer text-zinc-400 hover:text-red-400 transition-colors"
+          onClick={onClose}
+        >
+          ✕
+        </div>
+        <h3 className="flex items-center justify-center gap-2 text-lg font-bold text-emerald-400">
+          <Recycle size={18} className="text-red-500" />Set DCA Order
+        </h3>
+
         {/* form */}
         <div className="grid grid-cols-2 gap-3 text-xs">
-          {/* side */}
           <label className="col-span-2 flex items-center">
             <select
               value={side}
@@ -148,7 +158,6 @@ useEffect(() => {
             <Tooltip text='Side: "Buy" DCA accumulates token; "Sell" distributes holdings over time.' />
           </label>
 
-          {/* mint */}
           <label className="col-span-2 flex items-center">
             <input
               value={mint}
@@ -159,7 +168,6 @@ useEffect(() => {
             <Tooltip text="Token mint address (base58) of the SPL token." />
           </label>
 
-          {/* amount */}
           <label className="flex items-center">
             <input
               type="number"
@@ -173,7 +181,6 @@ useEffect(() => {
             <Tooltip text="Total budget to split across all buys/sells." />
           </label>
 
-          {/* unit */}
           <label className="flex items-center">
             <select
               value={unit}
@@ -186,7 +193,6 @@ useEffect(() => {
             <Tooltip text="Currency unit. Only USDC and SOL supported." />
           </label>
 
-          {/* numBuys */}
           <label className="flex items-center">
             <input
               type="number"
@@ -199,7 +205,6 @@ useEffect(() => {
             <Tooltip text="Number of chunks to split the order into." />
           </label>
 
-          {/* freq */}
           <label className="flex items-center">
             <input
               type="number"
@@ -210,10 +215,9 @@ useEffect(() => {
               placeholder="Freq (hrs)"
               className="flex-1 rounded bg-zinc-800 px-2 py-1"
             />
-           <Tooltip text="Hours between each buy/sell. Use decimals for minutes (0.5 = 30 min)." />
+            <Tooltip text="Hours between each buy/sell. Use decimals for minutes (0.5 = 30 min)." />
           </label>
 
-          {/* stops */}
           <label className="flex items-center">
             <input
               type="number"
@@ -223,7 +227,7 @@ useEffect(() => {
               placeholder="Stop ≥ $"
               className="flex-1 rounded bg-zinc-800 px-2 py-1"
             />
-           <Tooltip text="Optional: skip if price rises above this level." />
+            <Tooltip text="Optional: skip if price rises above this level." />
           </label>
 
           <label className="flex items-center">
@@ -235,8 +239,17 @@ useEffect(() => {
               placeholder="Stop ≤ $"
               className="flex-1 rounded bg-zinc-800 px-2 py-1"
             />
-          <Tooltip text="Optional: skip if price falls below this level." />
+            <Tooltip text="Optional: skip if price falls below this level." />
           </label>
+        </div>
+
+        {/* first buy now toggle */}
+        <div className="flex items-center justify-between text-xs">
+          <div className="flex items-center gap-2">
+            <span>First buy now</span>
+            <Tooltip text="If on, the first DCA chunk executes immediately after saving. If off, the first buy happens after one full interval." />
+          </div>
+          <Switch checked={firstBuyNow} onCheckedChange={setFirstBuyNow} className="h-4 w-7" />
         </div>
 
         {/* footer */}

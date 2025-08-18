@@ -3,8 +3,7 @@ import React, { useState, useEffect } from "react";
 import { toast } from "sonner";
 import { createLimitOrder } from "@/utils/api";
 import { Switch } from "@/components/ui/switch";
-import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { HelpCircle , X, Target } from "lucide-react";
+import { HelpCircle, X, Target } from "lucide-react";
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -27,6 +26,14 @@ function Tooltip({ text }) {
   );
 }
 
+/** Local, zero-dep shortener so the toast never explodes again */
+function shortMint(m) {
+  if (!m || typeof m !== "string") return "";
+  const s = m.trim();
+  if (s.length <= 10) return s;
+  return `${s.slice(0, 4)}…${s.slice(-4)}`;
+}
+
 const ForceToggle = ({ value, onChange }) => (
   <div className="flex items-center gap-1">
     <Switch
@@ -35,23 +42,25 @@ const ForceToggle = ({ value, onChange }) => (
       className="h-4 w-7"
       aria-label="Force queue"
     />
-    <Tooltip text="Force‑queue lets you save the order even if you don’t yet have the token or funds." />
+    <Tooltip text="Force-queue lets you save the order even if you don’t yet have the token or funds." />
   </div>
 );
 
 /* live preview */
 const buildPreview = ({ side, targetPrice, amount }) => {
-  if (!amount || !targetPrice) return null;
-  const verb     = side === "buy" ? "Buy" : "Sell";
-  const symbol   = side === "buy" ? "≤"  : "≥";
-  const color    = side === "buy" ? "text-emerald-400" : "text-red-400";
+  const tp = Number(targetPrice);
+  const amt = Number(amount);
+  if (!amt || !tp) return null;
+  const verb  = side === "buy" ? "Buy" : "Sell";
+  const symbol = side === "buy" ? "≤" : "≥";
+  const color = side === "buy" ? "text-emerald-400" : "text-red-400";
   return (
     <>
       <span className={`font-semibold ${color}`}>{verb}</span>{" "}
       {symbol}{" "}
-      <span className="text-purple-400 font-semibold">${Number(targetPrice)}</span>{" "}
+      <span className="text-purple-400 font-semibold">${tp}</span>{" "}
       •{" "}
-      <span className="text-yellow-300 font-semibold">${Number(amount)}</span>{" "}
+      <span className="text-yellow-300 font-semibold">${amt}</span>{" "}
       USDC
     </>
   );
@@ -64,6 +73,7 @@ export default function LimitModal({ open, onClose, tokenMint }) {
   const [targetPrice, setTargetPrice] = useState("");
   const [amount, setAmount]           = useState("");
   const [force, setForce]             = useState(false);
+  const [saving, setSaving]           = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -72,29 +82,48 @@ export default function LimitModal({ open, onClose, tokenMint }) {
       setTargetPrice("");
       setAmount("");
       setForce(false);
+      setSaving(false);
     }
   }, [open, tokenMint]);
 
   const handleSave = async () => {
-    try {
-      if (!mint.trim())                   return toast.error("Token mint required");
-      if (!targetPrice || targetPrice <= 0) return toast.error("Target price required");
-      if (!amount || amount <= 0)         return toast.error("Amount required");
+    const tp  = Number(targetPrice);
+    const amt = Number(amount);
 
+    if (!mint.trim())                 return toast.error("Token mint required");
+    if (!tp || tp <= 0)               return toast.error("Target price required");
+    if (!amt || amt <= 0)             return toast.error("Amount required");
+
+    setSaving(true);
+    try {
       const res = await createLimitOrder({
         mint: mint.trim(),
         side,
-        targetPrice: Number(targetPrice),
-        amount: Number(amount),
+        targetPrice: tp,
+        amount: amt,
         force,
       });
 
-      if (res?.success === false) return toast.error(res.message || "Save failed");
-      toast.success(`✅ Set limit for ${shortMint(mint)} at $${targetPrice} — view in Pending tab.`);
-      onClose();
+      if (res?.success === false || res?.error) {
+        // Backend-style error surfaces here
+        const msg = res?.message || res?.error || "Save failed";
+        // If backend hints to force, flip it for convenience
+        if (res?.needForce) setForce(true);
+        setSaving(false);
+        return toast.error(msg);
+      }
+
+      toast.success(`✅ Set limit for ${shortMint(mint)} at $${tp} — view in Pending tab.`);
+      onClose?.();
     } catch (e) {
-      if (e?.needForce) { setForce(true); return toast.error(e.error); }
-      toast.error(e.message || "Save failed");
+      // Preserve special needForce hint if present
+      if (e?.needForce) {
+        setForce(true);
+        toast.error(e.error || "Order needs Force-queue to proceed.");
+      } else {
+        toast.error(e?.message || "Save failed");
+      }
+      setSaving(false);
     }
   };
 
@@ -105,15 +134,19 @@ export default function LimitModal({ open, onClose, tokenMint }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
       <div className="relative w-[380px] space-y-5 rounded-2xl border border-zinc-700 bg-zinc-900 p-6 text-white shadow-xl">
-<h3 className="flex items-center justify-center gap-2 text-lg font-bold text-emerald-400">
-  <Target size={18} className="text-red-500" /> Set Limit Order
-</h3>
-              <div 
-        className="absolute top-3 right-3 cursor-pointer text-zinc-400 hover:text-red-400 transition-colors"
-        onClick={onClose}
-      >
-        ✕
-      </div>
+        <h3 className="flex items-center justify-center gap-2 text-lg font-bold text-emerald-400">
+          <Target size={18} className="text-red-500" /> Set Limit Order
+        </h3>
+
+        <button
+          type="button"
+          className="absolute top-3 right-3 text-zinc-400 hover:text-red-400 transition-colors"
+          onClick={onClose}
+          aria-label="Close"
+        >
+          <X size={16} />
+        </button>
+
         {/* form */}
         <div className="grid grid-cols-2 gap-3 text-xs">
           {/* side */}
@@ -170,16 +203,16 @@ export default function LimitModal({ open, onClose, tokenMint }) {
         {/* footer */}
         <div className="flex items-center justify-between pt-2">
           <ForceToggle value={force} onChange={setForce} />
-
           <div className="flex gap-2">
             <button onClick={onClose} className="text-xs text-zinc-400 hover:text-white">
               Cancel
             </button>
             <button
               onClick={handleSave}
-              className="rounded bg-emerald-600 px-3 py-1 text-sm hover:bg-emerald-700"
+              disabled={saving}
+              className="rounded bg-emerald-600 px-3 py-1 text-sm hover:bg-emerald-700 disabled:opacity-50"
             >
-              Save Limit
+              {saving ? "Saving…" : "Save Limit"}
             </button>
           </div>
         </div>

@@ -193,6 +193,73 @@ router.put("/:mint-old", requireAuth, csrfProtection, validate({ body: ruleSchem
 
 
 
+
+
+
+router.put("/by-id/:id", requireAuth, csrfProtection, async (req, res) => {
+  const { id } = req.params;
+  const { tp, sl, tpPercent, slPercent, strategy } = req.body || {};
+
+  try {
+    const rule = await prisma.tpSlRule.findUnique({ where: { id } });
+    if (!rule) return res.status(404).json({ error: "No TP/SL rule found with this ID." });
+    if (rule.userId !== req.user.id) {
+      return res.status(403).json({ error: "Not authorized to edit this rule." });
+    }
+
+    const newAlloc = Math.max(tpPercent || 0, slPercent || 0);
+    if (newAlloc <= 0 || newAlloc > 100) {
+      return res
+        .status(400)
+        .json({ error: "Must set at least one TP or SL percentage between 1-100." });
+    }
+
+    // Sum allocation of all *other* rules for this (user, wallet, mint, strategy)
+    const otherRules = await prisma.tpSlRule.findMany({
+      where: {
+        userId: req.user.id,
+        walletId: rule.walletId,
+        mint: rule.mint,
+        strategy: strategy || rule.strategy,
+        NOT: { id },
+      },
+      select: { tpPercent: true, slPercent: true, sellPct: true },
+    });
+
+    const allocated = otherRules.reduce((total, r) => {
+      const max = Math.max(r.tpPercent || 0, r.slPercent || 0, r.sellPct || 0);
+      return total + max;
+    }, 0);
+
+    if (allocated + newAlloc > 100) {
+      return res
+        .status(400)
+        .json({ error: `Total TP/SL allocation would exceed 100%. Currently used: ${allocated}%.` });
+    }
+
+    const updated = await prisma.tpSlRule.update({
+      where: { id },
+      data: {
+        tp: tp ?? null,
+        sl: sl ?? null,
+        tpPercent: tpPercent ?? null,
+        slPercent: slPercent ?? null,
+        sellPct: null, // keep explicit; allocation comes from tp/sl percents
+        strategy: strategy || rule.strategy,
+        // entryPrice unchanged
+      },
+    });
+
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    console.error("❌ Failed to edit TP/SL:", err);
+    res.status(500).json({ error: "Failed to edit TP/SL rule." });
+  }
+});
+
+
+
+
 /* ─────────────────────── DELETE /:mint ─────────────────────── */
 /* ───────────────────── DELETE /by-id/:id ───────────────────── */
 router.delete("/by-id/:id", requireAuth, async (req, res) => {

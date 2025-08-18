@@ -326,7 +326,36 @@ function pauseStrategy(botId) {
 }
 
 
-
+/**
+ * Pause all RUNNING (isPaused=false, not stopped) bots for a given user+wallet.
+ * Returns the list of botIds that were actually paused.
+ */
+async function pauseBotsByWallet(userId, walletId) {
+  const wid = Number(walletId);
+  // Find running (not paused, not stopped) rows whose config.walletId == walletId
+  const rows = await prisma.strategyRunStatus.findMany({
+    where: {
+      userId,
+      isPaused: false,
+      stoppedAt: null,
+      // We rely on StrategyRunStatus.config JSON to hold walletId
+      // (exactly how startStrategy writes it).
+      config: { path: ["walletId"], equals: wid },
+    },
+    select: { botId: true },
+  });
+  const paused = [];
+  for (const { botId } of rows) {
+    if (pauseStrategy(botId)) paused.push(botId);
+  }
+  if (paused.length) {
+    await prisma.strategyRunStatus.updateMany({
+      where: { botId: { in: paused } },
+      data: { isPaused: true, pausedAt: new Date() },
+    });
+  }
+  return paused;
+}
 
 
 

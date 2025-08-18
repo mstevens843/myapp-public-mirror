@@ -1,8 +1,9 @@
 // pages/OpenTradesTab.jsx
 // July 2025 — glow pass (neutral pills removed) + Smart-Exit badges
+// Aug 2025 — BigInt-safe remaining calc + post-sell dust auto-sweep
 
 import React, { useEffect, useState } from "react";
-import { toast } from "sonner"; 
+import { toast } from "sonner";
 import {
   getPositions,
   getOpenTrades,
@@ -11,9 +12,9 @@ import {
   deleteOpenTrades,
 } from "@/utils/trades_positions";
 import { manualSell, fetchTpSlSettings } from "@/utils/api";
-import TpSlCell         from "@/components/Dashboard/OpenTrades/TPSLCell";
+import TpSlCell from "@/components/Dashboard/OpenTrades/TPSLCell";
 import PendingOrdersTab from "@/components/Dashboard/OpenTrades/PendingOrdersTab";
-import { formatLocalTimestamp } from "@/utils/timeFormatter";
+// import { formatLocalTimestamp } from "@/utils/timeFormatter"; // (unused)
 import { useUser } from "@/contexts/UserProvider";
 
 import {
@@ -46,9 +47,9 @@ function SmartBadge({ trade }) {
   if (!mode || mode === "none") return null;
 
   let text = MODE_LABELS[mode] || mode;
-  if (mode === "time" && meta.smartExitTimeMins != null)      text += `: ${meta.smartExitTimeMins}m`;
-  if (mode === "volume" && meta.smartVolThreshold != null)    text += `: ${meta.smartVolThreshold}`;
-  if (mode === "liquidity" && meta.smartLiqDropPct != null)   text += `: ${meta.smartLiqDropPct}%`;
+  if (mode === "time" && meta.smartExitTimeMins != null) text += `: ${meta.smartExitTimeMins}m`;
+  if (mode === "volume" && meta.smartVolThreshold != null) text += `: ${meta.smartVolThreshold}`;
+  if (mode === "liquidity" && meta.smartLiqDropPct != null) text += `: ${meta.smartLiqDropPct}%`;
 
   return (
     <span className="inline-flex items-center gap-1 rounded-full px-2 py-[1px] text-[10px] font-semibold bg-emerald-600/20 text-emerald-300 border border-emerald-500">
@@ -62,57 +63,79 @@ function shortAddress(addr) {
 }
 
 export function mergePositionsWithTpSl(positions, tpSlRules) {
-  return positions.map(pos => {
+  return positions.map((pos) => {
     const match = tpSlRules.find(
-      r => r.mint === pos.mint && 
-           r.walletId === pos.walletId &&
-           r.strategy === pos.strategy
+      (r) => r.mint === pos.mint && r.walletId === pos.walletId && r.strategy === pos.strategy
     );
     return {
       ...pos,
-      tp       : match?.tp,
+      tp: match?.tp,
       tpPercent: match?.tpPercent,
-      sl       : match?.sl,
+      sl: match?.sl,
       slPercent: match?.slPercent,
-      sellPct  : match?.sellPct,
-      tpSlId   : match?.id
+      sellPct: match?.sellPct,
+      tpSlId: match?.id,
     };
   });
 }
 
 /* strategy filter list */
 const STRATS = [
-  "manual","limit","dca","sniper","scalper",
-  "breakout","chadMode","dipBuyer", "stealthbot", "rebalancer", 
-  "rotationbot", "delayedsniper", "trendfollower", "paperTrader",  
+  "manual",
+  "limit",
+  "dca",
+  "sniper",
+  "scalper",
+  "breakout",
+  "chadMode",
+  "dipBuyer",
+  "stealthbot",
+  "rebalancer",
+  "rotationbot",
+  "delayedsniper",
+  "trendfollower",
+  "paperTrader",
 ];
 
+const MIN_DUST_USD = 0.25; // keep in sync with backend clear-dust
+
 /* pill helpers (only emerald + red chips now) */
-const pill = (cls = "") =>
-  `px-2 py-[1px] rounded-full text-xs font-semibold border ${cls}`;
+const pill = (cls = "") => `px-2 py-[1px] rounded-full text-xs font-semibold border ${cls}`;
 const emerald = pill("bg-emerald-600/20 text-emerald-300 border-emerald-500");
-const red     = pill("bg-rose-600/20    text-rose-300    border-rose-500");
+const red = pill("bg-rose-600/20    text-rose-300    border-rose-500");
+
+/* -------- BigInt-safe helpers -------- */
+const toBigInt = (v) =>
+  typeof v === "bigint" ? v : BigInt(typeof v === "string" ? v : Math.trunc(Number(v) || 0));
+const biMax0 = (v) => (v < 0n ? 0n : v);
+
+/* -------- Base-currency mints to EXCLUDE from Open Trades --------
+ * - wSOL: So11111111111111111111111111111111111111112
+ * - USDC: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+ * (Extend if you decide to hide other base assets.)
+ */
+const SOL_MINT = "So11111111111111111111111111111111111111112";
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const EXCLUDED_MINTS = new Set([SOL_MINT, USDC_MINT]);
 
 export default function OpenTradesTab({ onRefresh }) {
   const { activeWalletId } = useUser();
 
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [tpSl, setTpSl] = useState({});
-  const [positions, setPositions] = useState([]);
   const [tpSlRules, setTpSlRules] = useState([]);
-  // 🆕 selected rows (rowKey = `${mint}_${strategy}`)
-  const [selected, setSelected]   = useState(new Set());
+  // selected rows (rowKey = `${mint}_${strategy}`)
+  const [selected, setSelected] = useState(new Set());
   const [deleteMode, setDeleteMode] = useState(false);
 
   /* ─── TP/SL loader ─── */
   const loadTpSl = async () => {
-    const arr = await fetchTpSlSettings("web", "default");   
-    setTpSlRules(arr);   // just hold full array
+    const arr = await fetchTpSlSettings("web", "default");
+    setTpSlRules(arr);
   };
 
   const [filter, setFilter] = useState("All");
-  const [tab, setTab] = useState("positions");   // positions | pending
+  const [tab, setTab] = useState("positions"); // positions | pending
   const [customSell, setCustomSell] = useState({});
 
   /* ─── data loader ─── */
@@ -121,8 +144,8 @@ export default function OpenTradesTab({ onRefresh }) {
     try {
       const posSnap = await getPositions();
       if (posSnap?.refetchOpenTrades) {
-        console.log("🔁 Token injection occurred — refreshing trades...");
-        await new Promise(r => setTimeout(r, 300)); // debounce to avoid race
+        // slight debounce to avoid race if backend is still inserting
+        await new Promise((r) => setTimeout(r, 300));
       }
       const openTrades = await getOpenTrades();
 
@@ -131,57 +154,70 @@ export default function OpenTradesTab({ onRefresh }) {
       const snapPrice = {};
       posArr.forEach((p) => (snapPrice[p.mint] = p.price ?? 0));
 
+      // Build bucket per (mint,strategy) using **remaining** amounts only
       const buckets = {};
       for (const t of openTrades) {
-        if (!t?.mint || !t?.outAmount) continue;
+        if (!t?.mint || t.outAmount == null) continue;
+
+        // 🚫 Exclude base currencies (wSOL & USDC) from the Open Trades table
+        if (EXCLUDED_MINTS.has(t.mint)) continue;
+
         const key = `${t.mint}_${t.strategy || "manual"}`;
         buckets[key] ??= { ...t, tokens: 0, spentUSD: 0 };
+
         const dec = t.decimals ?? 9;
-        buckets[key].tokens   += Number(t.outAmount) / 10 ** dec;
-        buckets[key].spentUSD +=
-          t.unit === "sol"
-            ? (Number(t.inAmount) / 1e9) * solUSD
-            : Number(t.inAmount) / 1e6;
+
+        // BigInt-safe remaining calculation
+        const out = toBigInt(t.outAmount);
+        const closed = toBigInt(t.closedOutAmount || 0);
+        const remainingRawBI = biMax0(out - closed);
+        if (remainingRawBI <= 0n) continue;
+
+        const remainingRaw = Number(remainingRawBI);
+        const remTokens = remainingRaw / 10 ** dec;
+        buckets[key].tokens += remTokens;
+
+        // Pro-rate the original cost to the remaining fraction so PnL stays correct
+        const rowCostUSD =
+          t.unit === "sol" ? (Number(t.inAmount) / 1e9) * solUSD : Number(t.inAmount) / 1e6;
+
+        const remFrac = Number(out) > 0 ? remainingRaw / Number(out) : 0;
+        buckets[key].spentUSD += rowCostUSD * remFrac;
       }
 
       const priceCache = { ...snapPrice };
-      const priceFor = async (m) =>
-        priceCache[m] ?? (priceCache[m] = await fetchCurrentPrice(m));
+      const priceFor = async (m) => priceCache[m] ?? (priceCache[m] = await fetchCurrentPrice(m));
 
       const built = await Promise.all(
         Object.values(buckets).map(async (b) => {
           if (b.tokens <= 0) return null;
           const priceUSD = await priceFor(b.mint);
           const valueUSD = b.tokens * priceUSD;
-          const pnlUSD   = +(valueUSD - b.spentUSD).toFixed(2);
-          const pnlPct   = b.spentUSD ? (pnlUSD / b.spentUSD) * 100 : 0;
-          const posMatch =
-            posArr.find(p => p.mint === b.mint) || {};
+          const pnlUSD = +(valueUSD - b.spentUSD).toFixed(2);
+          const pnlPct = b.spentUSD ? (pnlUSD / b.spentUSD) * 100 : 0;
+          const posMatch = posArr.find((p) => p.mint === b.mint) || {};
           const entryUSD = b.spentUSD && b.tokens ? b.spentUSD / b.tokens : null;
 
-          // 🆕 Normalize smart-exit metadata for badge rendering
-          const normalizedSmartExit = (() => {
-            const m = b.smartExit || {};
-            const mode = m.mode ?? b.smartExitMode ?? m.smartExitMode ?? "none";
-            return {
-              mode,
-              smartExitTimeMins   : m.smartExitTimeMins    ?? b.smartExitTimeMins,
-              smartVolLookbackSec : m.smartVolLookbackSec  ?? b.smartVolLookbackSec,
-              smartVolThreshold   : m.smartVolThreshold    ?? b.smartVolThreshold,
-              smartLiqLookbackSec : m.smartLiqLookbackSec  ?? b.smartLiqLookbackSec,
-              smartLiqDropPct     : m.smartLiqDropPct      ?? b.smartLiqDropPct,
-            };
-          })();
+          // Normalize smart-exit metadata for badge rendering
+          const m = b.smartExit || {};
+          const smartExit = {
+            mode: m.mode ?? b.smartExitMode ?? m.smartExitMode ?? "none",
+            smartExitTimeMins: m.smartExitTimeMins ?? b.smartExitTimeMins,
+            smartVolLookbackSec: m.smartVolLookbackSec ?? b.smartVolLookbackSec,
+            smartVolThreshold: m.smartVolThreshold ?? b.smartVolThreshold,
+            smartLiqLookbackSec: m.smartLiqLookbackSec ?? b.smartLiqLookbackSec,
+            smartLiqDropPct: m.smartLiqDropPct ?? b.smartLiqDropPct,
+          };
 
           return {
             mint: b.mint,
-            name : posMatch.name || b.tokenName || "Unknown",
-            symbol: posMatch.symbol || "",        
-            url: posMatch.url || "",  
-            logo: posMatch.logo || "",          
+            name: posMatch.name || b.tokenName || "Unknown",
+            symbol: posMatch.symbol || "",
+            url: posMatch.url || "",
+            logo: posMatch.logo || "",
             strategy: b.strategy,
-            walletId: b.walletId,  
-            entryUSD, // <–– cleanly injected here
+            walletId: b.walletId,
+            entryUSD, // entry per remaining token
             priceUSD,
             spentUSD: b.spentUSD === 0 ? 0 : b.spentUSD,
             valueUSD,
@@ -189,11 +225,9 @@ export default function OpenTradesTab({ onRefresh }) {
             pnlPct,
             tokens: b.tokens,
             timestamp: b.timestamp,
-
-            // 🆕 attach smart-exit meta for UI
-            smartExit: normalizedSmartExit,
+            smartExit,
           };
-        }),
+        })
       );
 
       setRows(built.filter(Boolean));
@@ -203,30 +237,38 @@ export default function OpenTradesTab({ onRefresh }) {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+  }, []);
   const refresh = async () => {
-    await Promise.all([load(), loadTpSl()]);   // rows + TP/SL in parallel
+    await Promise.all([load(), loadTpSl()]); // rows + TP/SL in parallel
     onRefresh?.();
   };
 
   /* TP/SL map */
-  useEffect(() => { loadTpSl(); }, []);
+  useEffect(() => {
+    loadTpSl();
+  }, []);
 
-  /* sell – forward walletLabel **and** walletId */
+  /* sell – forward walletLabel **and** walletId, then auto-sweep dust */
   const sell = async (mint, strategy, frac, walletLabel = "", walletId = null) => {
     const pct = Math.round(frac * 100);
     const id = `sell-${mint}-${pct}`;
     toast.loading(`Selling ${pct}%…`, { id });
     try {
       await manualSell(frac, mint, { strategy, walletLabel, walletId });
+      // Immediately sweep residual dust so rows vanish after 100% sells
+      await clearDustTrades(activeWalletId); // backend is idempotent/no-op if nothing to clear
       toast.success(`Sold ${pct}%`, { id });
       refresh();
-    } catch (e) { toast.error(e.message, { id }); }
+    } catch (e) {
+      toast.error(e?.message || "Sell failed", { id });
+    }
   };
 
   /* ─── selection helpers ─── */
   const toggleRow = (key) => {
-    if (!deleteMode) return;               // only active in delete mode
+    if (!deleteMode) return; // only active in delete mode
     setSelected((prev) => {
       const next = new Set(prev);
       next.has(key) ? next.delete(key) : next.add(key);
@@ -237,20 +279,23 @@ export default function OpenTradesTab({ onRefresh }) {
     setDeleteMode(false);
     setSelected(new Set());
   };
-  const selectedRows = [...selected].map(k => {
-    const [mint, strategy] = k.split("_");
-    const row = rows.find(r => r.mint === mint && r.strategy === strategy);
-    return row ? { mint, walletId: row.walletId } : null;
-  }).filter(Boolean);
+  const selectedRows = [...selected]
+    .map((k) => {
+      const [mint, strategy] = k.split("_");
+      const row = rows.find((r) => r.mint === mint && r.strategy === strategy);
+      return row ? { mint, walletId: row.walletId } : null;
+    })
+    .filter(Boolean);
 
-  const visible  = filter === "All" ? rows : rows.filter(r => r.strategy === filter);
+  const visible = filter === "All" ? rows : rows.filter((r) => r.strategy === filter);
   const merged = mergePositionsWithTpSl(visible, tpSlRules);
-  const hasDust = merged.some(r => (r.tokens <= 0 || r.tokens < 0.000001));
-  const showTpSl = true;
+  // USD-aware dust detection (match backend threshold)
+  const hasDust = merged.some((r) => r.valueUSD > 0 && r.valueUSD <= MIN_DUST_USD);
   const columnCount = 8; // Token | Entry/Cur | PnL | Spent→Value | Strategy | Exit Rule | TP/SL | Sell
   const totalUsd = merged
-    .filter(r => r.strategy !== "paperTrader")   // ← exclude fake capital
-    .reduce((s, r) => s + r.valueUSD, 0).toFixed(2);
+    .filter((r) => r.strategy !== "paperTrader") // exclude fake capital
+    .reduce((s, r) => s + r.valueUSD, 0)
+    .toFixed(2);
 
   /* ─── JSX ─── */
   return (
@@ -264,28 +309,31 @@ export default function OpenTradesTab({ onRefresh }) {
           {/* Refresh */}
           <button
             onClick={refresh}
-            className="inline-flex items-center gap-1 rounded-md bg-zinc-800 px-3 py-1 text-sm hover:bg-zinc-700 ring-1 ring-zinc-700 hover:ring-indigo-500/40 transition">
-            <RefreshCcw size={14}/> Refresh
+            className="inline-flex items-center gap-1 rounded-md bg-zinc-800 px-3 py-1 text-sm hover:bg-zinc-700 ring-1 ring-zinc-700 hover:ring-indigo-500/40 transition"
+          >
+            <RefreshCcw size={14} /> Refresh
           </button>
 
-          {/* Clean Dust – always visible, disabled if none */}
+          {/* Clean Dust – always enabled; styled active if dust exists */}
           <button
-            disabled={!hasDust}
+            disabled={false}
             onClick={async () => {
               try {
-                // pass the wallet id from context
-                await clearDustTrades(activeWalletId);
+                await clearDustTrades(activeWalletId); // backend clears ≤ $0.25 USD per open row
                 toast.success("🧹 Cleared dust trades.");
                 refresh();
               } catch (err) {
-                toast.error(err.message);
+                toast.error(err?.message || "Dust clear failed");
               }
             }}
             className={`inline-flex items-center gap-1 rounded-md px-3 py-1 text-sm border transition
-              ${hasDust
-                ? "bg-rose-600/20 text-rose-300 border-rose-600 hover:bg-rose-600/30"
-                : "bg-zinc-800 text-zinc-500 border-zinc-700 cursor-not-allowed"}`}>
-            <Trash2 size={14}/> Clean Dust
+              ${
+                hasDust
+                  ? "bg-rose-600/20 text-rose-300 border-rose-600 hover:bg-rose-600/30"
+                  : "bg-zinc-800 text-zinc-300 border-zinc-700 hover:bg-zinc-700"
+              }`}
+          >
+            <Trash2 size={14} /> Clean Dust
           </button>
 
           {/* Delete flow */}
@@ -293,8 +341,9 @@ export default function OpenTradesTab({ onRefresh }) {
             /* STEP 1: Enter delete mode */
             <button
               onClick={() => setDeleteMode(true)}
-              className="inline-flex items-center gap-1 rounded-md bg-red-600/20 px-3 py-1 text-sm text-red-300 border border-red-600 hover:bg-red-600/30 transition">
-              <Trash2 size={14}/> Delete
+              className="inline-flex items-center gap-1 rounded-md bg-red-600/20 px-3 py-1 text-sm text-red-300 border border-red-600 hover:bg-red-600/30 transition"
+            >
+              <Trash2 size={14} /> Delete
             </button>
           )}
 
@@ -302,9 +351,7 @@ export default function OpenTradesTab({ onRefresh }) {
             <>
               {/* helper text */}
               <span className="text-xs text-zinc-400 italic mr-2">
-                {selected.size === 0
-                  ? "Select row(s) to delete"
-                  : `${selected.size} selected`}
+                {selected.size === 0 ? "Select row(s) to delete" : `${selected.size} selected`}
               </span>
 
               {/* STEP 2a: Confirm */}
@@ -313,26 +360,36 @@ export default function OpenTradesTab({ onRefresh }) {
                 onClick={async () => {
                   try {
                     // grouped is { walletId: ['mint1','mint2', …] }
+                    const grouped = selectedRows.reduce((acc, { walletId, mint }) => {
+                      (acc[walletId] ??= []).push(mint);
+                      return acc;
+                    }, {});
                     for (const [wid, mints] of Object.entries(grouped)) {
-                      await deleteOpenTrades(mints, false, wid);     // 👈 send wid
+                      await deleteOpenTrades(mints, false, wid); // send wid
                     }
                     toast.success(`Deleted ${selected.size} row(s).`);
                     exitDeleteMode();
                     refresh();
-                  } catch (err) { toast.error(err.message); }
+                  } catch (err) {
+                    toast.error(err?.message || "Delete failed");
+                  }
                 }}
                 className={`inline-flex items-center gap-1 rounded-md px-3 py-1 text-sm border transition
-                  ${selected.size
-                    ? "bg-red-600/20 text-red-300 border-red-600 hover:bg-red-600/30"
-                    : "bg-zinc-800 text-zinc-500 border-zinc-700 cursor-not-allowed"}`}>
-                <Trash2 size={14}/> Confirm
+                  ${
+                    selected.size
+                      ? "bg-red-600/20 text-red-300 border-red-600 hover:bg-red-600/30"
+                      : "bg-zinc-800 text-zinc-500 border-zinc-700 cursor-not-allowed"
+                  }`}
+              >
+                <Trash2 size={14} /> Confirm
               </button>
 
               {/* STEP 2b: Cancel */}
               <button
                 onClick={exitDeleteMode}
-                className="inline-flex items-center gap-1 rounded-md bg-zinc-800 px-3 py-1 text-sm text-zinc-300 border border-zinc-600 hover:bg-zinc-700 transition">
-                <XCircle size={14}/> Cancel
+                className="inline-flex items-center gap-1 rounded-md bg-zinc-800 px-3 py-1 text-sm text-zinc-300 border border-zinc-600 hover:bg-zinc-700 transition"
+              >
+                <XCircle size={14} /> Cancel
               </button>
             </>
           )}
@@ -341,7 +398,7 @@ export default function OpenTradesTab({ onRefresh }) {
 
       {/* filter pills */}
       <nav className="flex flex-wrap gap-2">
-        {["All", ...STRATS].map(k => (
+        {["All", ...STRATS].map((k) => (
           <button
             key={k}
             onClick={() => setFilter(k)}
@@ -349,7 +406,8 @@ export default function OpenTradesTab({ onRefresh }) {
               filter === k
                 ? "bg-emerald-600/20 text-emerald-300 border border-emerald-500"
                 : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-            }`}>
+            }`}
+          >
             {k}
           </button>
         ))}
@@ -357,7 +415,7 @@ export default function OpenTradesTab({ onRefresh }) {
 
       {/* tabs */}
       <div className="flex gap-2">
-        {["positions","pending"].map(t => (
+        {["positions", "pending"].map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -365,8 +423,9 @@ export default function OpenTradesTab({ onRefresh }) {
               tab === t
                 ? "bg-emerald-600/20 text-emerald-300 border border-emerald-500"
                 : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
-            }`}>
-            {t === "positions" ? "Open Positions" : "Pending Orders"}
+            }`}
+          >
+            {t === "positions" ? "Open Positions" : "Pending Limit/DCA Orders"}
           </button>
         ))}
       </div>
@@ -383,9 +442,8 @@ export default function OpenTradesTab({ onRefresh }) {
                 <th className="p-3">PnL</th>
                 <th className="p-3">Spent → Value</th>
                 <th className="p-3">Strategy</th>
-                {/* 🆕 Exit rule (smart-exit badge) */}
+                {/* Exit rule (smart-exit badge) */}
                 <th className="p-3">Exit Rule</th>
-                {/* {showTpSl && <th className="p-3">TP / SL</th>} */}
                 <th className="p-3">TP / SL</th>
                 <th className="p-3">Sell</th>
               </tr>
@@ -394,9 +452,9 @@ export default function OpenTradesTab({ onRefresh }) {
             <tbody className="divide-y divide-zinc-800">
               {loading && (
                 <tr>
-                  <td colSpan={columnCount} className="p-6">
+                  <td colSpan={8} className="p-6">
                     <div className="flex items-center justify-center gap-2 text-zinc-400">
-                      <Loader2 className="animate-spin" size={16}/> Loading…
+                      <Loader2 className="animate-spin" size={16} /> Loading…
                     </div>
                   </td>
                 </tr>
@@ -404,173 +462,182 @@ export default function OpenTradesTab({ onRefresh }) {
 
               {!loading && !visible.length && (
                 <tr>
-                  <td colSpan={columnCount} className="p-6 text-center italic text-zinc-500">
+                  <td colSpan={8} className="p-6 text-center italic text-zinc-500">
                     No open positions.
                   </td>
                 </tr>
               )}
 
-              {!loading && merged.map(r => {
-                const gain = r.pnlPct >= 0;
-                const heavy = Math.abs(r.pnlPct) >= 20;
+              {!loading &&
+                mergePositionsWithTpSl(visible, tpSlRules).map((r) => {
+                  const gain = r.pnlPct >= 0;
+                  const heavy = Math.abs(r.pnlPct) >= 20;
 
-                // 🔥 THIS MUST BE INSIDE MAP TO ACCESS r
-                const rulesForThisRow = tpSlRules.filter(
-                  rule => rule.mint === r.mint &&
-                          rule.walletId === r.walletId &&
-                          rule.strategy === r.strategy
-                );
-                console.log("🖼️ Token logo:", r.name, r.mint, "→", r.logo);
+                  const rulesForThisRow = tpSlRules.filter(
+                    (rule) =>
+                      rule.mint === r.mint &&
+                      rule.walletId === r.walletId &&
+                      rule.strategy === r.strategy
+                  );
 
-                return (
-                  <tr
-                    key={`${r.mint}_${r.strategy}`}
-                    onClick={() => deleteMode && toggleRow(`${r.mint}_${r.strategy}`)}
-                    className={`transition select-none
-                      ${deleteMode ? "cursor-pointer" : ""}
-                      ${selected.has(`${r.mint}_${r.strategy}`) && deleteMode
-                        ? "ring-2 ring-red-500/70 bg-red-500/5"
-                        : "hover:bg-zinc-800/30 hover:ring-1 hover:ring-emerald-500/30"}`}
-                  >
+                  return (
+                    <tr
+                      key={`${r.mint}_${r.strategy}`}
+                      onClick={() => deleteMode && toggleRow(`${r.mint}_${r.strategy}`)}
+                      className={`transition select-none
+                        ${deleteMode ? "cursor-pointer" : ""}
+                        ${
+                          selected.has(`${r.mint}_${r.strategy}`) && deleteMode
+                            ? "ring-2 ring-red-500/70 bg-red-500/5"
+                            : "hover:bg-zinc-800/30 hover:ring-1 hover:ring-emerald-500/30"
+                        }`}
+                    >
+                      {/* token */}
+                      <td className="py-2 px-3 text-left align-top">
+                        <div className="flex flex-col text-xs text-left">
+                          {/* Top row: logo + name */}
+                          <div className="flex items-center gap-2 font-medium text-white">
+                            {!!r.logo && (
+                              <img
+                                src={r.logo}
+                                alt="token"
+                                className="w-7 h-7 rounded-full"
+                                onError={(e) => {
+                                  e.currentTarget.remove();
+                                }}
+                              />
+                            )}
+                            {r.name || "Unknown"} {r.symbol ? `(${r.symbol})` : ""}
+                            {r.entryUSD === null && (
+                              <span className="ml-1 mt-1 text-amber-400 text-[10px]">Imported</span>
+                            )}
+                          </div>
 
-                    {/* token */}
-                    <td className="py-2 px-3 text-left align-top">
-                      <div className="flex flex-col text-xs text-left">
-                        {/* Top row: logo + name */}
-                        <div className="flex items-center gap-2 font-medium text-white">
-                          {!!r.logo && (
-                            <img
-                              src={r.logo}
-                              alt="token"
-                              className="w-7 h-7 rounded-full"
-                              onError={(e) => {
-                                console.log("❌ Image load failed for:", r.logo);
-                                e.target.onerror = null;
-                                e.target.remove();
-                              }}
-                            />
-                          )}
-                          {r.name || "Unknown"} {r.symbol ? `(${r.symbol})` : ""}
-                          {r.entryUSD === null && (
-                            <span className="ml-1 mt-1 text-amber-400 text-[10px]">Imported</span>
-                          )}
+                          {/* Bottom row: mint + link, spaced lower */}
+                          <div className="flex items-center gap-1 text-zinc-400 mt-3">
+                            <span>{shortAddress(r.mint)}</span>
+                            <a
+                              href={`https://birdeye.so/token/${r.mint}?chain=solana`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="hover:text-white transition"
+                            >
+                              <ExternalLink className="w-3.5 h-3.5 inline" />
+                            </a>
+                          </div>
                         </div>
+                      </td>
 
-                        {/* Bottom row: mint + link, spaced lower */}
-                        <div className="flex items-center gap-1 text-zinc-400 mt-3">
-                          <span>{shortAddress(r.mint)}</span>
-                          <a
-                            href={`https://birdeye.so/token/${r.mint}?chain=solana`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="hover:text-white transition"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5 inline" />
-                          </a>
-                        </div>
-                      </div>
-                    </td>
+                      {/* entry / current */}
+                      <td className="py-2 px-3">
+                        <div>{r.entryUSD === null ? "N/A" : `$${r.entryUSD.toFixed(6)}`}</div>
+                        <div className="text-zinc-400">${r.priceUSD.toFixed(6)}</div>
+                      </td>
 
-                    {/* entry / current */}
-                    <td className="py-2 px-3">
-                      <div>{r.entryUSD === null ? "N/A" : `$${r.entryUSD.toFixed(6)}`}</div>
-                      <div className="text-zinc-400">${r.priceUSD.toFixed(6)}</div>
-                    </td>
-
-                    {/* PnL */}
-                    <td className="py-2 px-3">
-                      <span
-                        className={pill(
-                          gain ? emerald : red
-                        ) + ` inline-flex items-center gap-0.5 ${heavy && "animate-pulse"}`}>
-                        {gain ? <ChevronUp size={11}/> : <ChevronDown size={11}/>}
-                        {Math.abs(r.pnlPct).toFixed(2)}%
-                      </span>
-                      <div className="text-zinc-400 text-[10px]">${r.pnlUSD.toFixed(2)}</div>
-                    </td>
-
-                    {/* spent / value */}
-                    <td className="py-2 px-3">
-                      {/* If no cost basis (imported), show “N/A” instead of $0 */}
-                      {r.entryUSD === null
-                        ? "N/A"
-                        : `$${r.spentUSD.toLocaleString(undefined, {
-                            minimumFractionDigits: 2,
-                            maximumFractionDigits: 2,
-                          })}`}
-                      <span className="text-zinc-400"> → </span>
-                      ${r.valueUSD.toFixed(2)}
-                    </td>
-
-                    {/* strategy */}
-                    <td className="py-2 px-3">
-                      <span className={`${emerald} inline-flex items-center gap-1`}>
-                        <DollarSign size={10}/> {r.strategy === "unknown" ? "N/A" : r.strategy}
-                      </span>
-                    </td>
-
-                    {/* 🆕 Exit Rule (Smart-Exit badge) */}
-                    <td className="py-2 px-3">
-                      <SmartBadge trade={r} />
-                    </td>
-
-                    {/* TP / SL */}
-                    <td className="py-2 px-3">
-                      <TpSlCell
-                        mint={r.mint}
-                        strategy={r.strategy}
-                        walletId={r.walletId}
-                        walletLabel={r.walletLabel}
-                        rules={rulesForThisRow}
-                        onSaved={refresh}
-                      />
-                    </td>
-
-                    {/* sell */}
-                    <td className="py-2 px-3">
-                      <div className="flex gap-1 mb-1">
-                        <button
-                          onClick={() => sell(r.mint, r.strategy, 0.5, r.walletLabel, r.walletId)}
-                          className="rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 border border-amber-500 hover:bg-amber-500/30">
-                          50%
-                        </button>
-                        <button
-                          onClick={() => sell(r.mint, r.strategy, 1, r.walletLabel, r.walletId)}
-                          className="rounded bg-rose-600/20 px-2 py-0.5 text-[11px] font-semibold text-rose-300 border border-rose-600 hover:bg-rose-600/30">
-                          100%
-                        </button>
-                      </div>
-
-                      <div className="flex items-center gap-1 mt-1">
-                        <input
-                          type="number"
-                          min="1"
-                          max="99"
-                          value={customSell?.[`${r.mint}_${r.strategy}`] ?? ""}
-                          onChange={(e) =>
-                            setCustomSell((p) => ({ ...p, [`${r.mint}_${r.strategy}`]: e.target.value }))
+                      {/* PnL */}
+                      <td className="py-2 px-3">
+                        <span
+                          className={
+                            (gain ? emerald : red) +
+                            ` inline-flex items-center gap-0.5 ${heavy && "animate-pulse"}`
                           }
-                          placeholder="%"
-                          className="w-12 rounded border border-zinc-600 bg-zinc-800 px-1 py-0.5 text-xs text-white text-center"
+                        >
+                          {gain ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                          {Math.abs(r.pnlPct).toFixed(2)}%
+                        </span>
+                        <div className="text-zinc-400 text-[10px]">${r.pnlUSD.toFixed(2)}</div>
+                      </td>
+
+                      {/* spent / value */}
+                      <td className="py-2 px-3">
+                        {/* If no cost basis (imported), show “N/A” instead of $0 */}
+                        {r.entryUSD === null
+                          ? "N/A"
+                          : `$${r.spentUSD.toLocaleString(undefined, {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}`}
+                        <span className="text-zinc-400"> → </span>${r.valueUSD.toFixed(2)}
+                      </td>
+
+                      {/* strategy */}
+                      <td className="py-2 px-3">
+                        <span className={`${emerald} inline-flex items-center gap-1`}>
+                          <DollarSign size={10} /> {r.strategy === "unknown" ? "N/A" : r.strategy}
+                        </span>
+                      </td>
+
+                      {/* Exit Rule (Smart-Exit badge) */}
+                      <td className="py-2 px-3">
+                        <SmartBadge trade={r} />
+                      </td>
+
+                      {/* TP / SL */}
+                      <td className="py-2 px-3">
+                        <TpSlCell
+                          mint={r.mint}
+                          strategy={r.strategy}
+                          walletId={r.walletId}
+                          walletLabel={r.walletLabel}
+                          rules={rulesForThisRow}
+                          onSaved={refresh}
                         />
-                        <button
-                          onClick={() => {
-                            const raw = parseFloat(customSell?.[`${r.mint}_${r.strategy}`]);
-                            if (isNaN(raw) || raw <= 0 || raw >= 100) {
-                              toast.error("Enter % between 1-99");
-                              return;
+                      </td>
+
+                      {/* sell */}
+                      <td className="py-2 px-3">
+                        <div className="flex gap-1 mb-1">
+                          <button
+                            onClick={() => sell(r.mint, r.strategy, 0.5, r.walletLabel, r.walletId)}
+                            className="rounded bg-amber-500/20 px-2 py-0.5 text-[11px] font-semibold text-amber-200 border border-amber-500 hover:bg-amber-500/30"
+                          >
+                            50%
+                          </button>
+                          <button
+                            onClick={() => sell(r.mint, r.strategy, 1, r.walletLabel, r.walletId)}
+                            className="rounded bg-rose-600/20 px-2 py-0.5 text-[11px] font-semibold text-rose-300 border border-rose-600 hover:bg-rose-600/30"
+                          >
+                            100%
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-1 mt-1">
+                          <input
+                            type="number"
+                            min="1"
+                            max="99"
+                            value={customSell?.[`${r.mint}_${r.strategy}`] ?? ""}
+                            onChange={(e) =>
+                              setCustomSell((p) => ({
+                                ...p,
+                                [`${r.mint}_${r.strategy}`]: e.target.value,
+                              }))
                             }
-                            sell(r.mint, r.strategy, raw / 100, r.walletLabel, r.walletId);
-                            setCustomSell((p) => ({ ...p, [`${r.mint}_${r.strategy}`]: "" }));
-                          }}
-                          className="rounded bg-blue-600/20 px-2 py-0.5 text-[11px] font-semibold text-blue-300 border border-blue-600 hover:bg-blue-600/30">
-                          Sell %
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
+                            placeholder="%"
+                            className="w-12 rounded border border-zinc-600 bg-zinc-800 px-1 py-0.5 text-xs text-white text-center"
+                          />
+                          <button
+                            onClick={() => {
+                              const raw = parseFloat(customSell?.[`${r.mint}_${r.strategy}`]);
+                              if (isNaN(raw) || raw <= 0 || raw >= 100) {
+                                toast.error("Enter % between 1-99");
+                                return;
+                              }
+                              sell(r.mint, r.strategy, raw / 100, r.walletLabel, r.walletId);
+                              setCustomSell((p) => ({
+                                ...p,
+                                [`${r.mint}_${r.strategy}`]: "",
+                              }));
+                            }}
+                            className="rounded bg-blue-600/20 px-2 py-0.5 text-[11px] font-semibold text-blue-300 border border-blue-600 hover:bg-blue-600/30"
+                          >
+                            Sell %
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </div>
@@ -578,8 +645,12 @@ export default function OpenTradesTab({ onRefresh }) {
 
       {!loading && tab === "positions" && visible.length > 0 && (
         <footer className="flex justify-end border-t border-zinc-800 pt-4 text-xs text-zinc-400">
-          <span className="mr-4">Total trades: <strong>{visible.length}</strong></span>
-          <span>Total exposure: <strong>${totalUsd}</strong></span>
+          <span className="mr-4">
+            Total trades: <strong>{visible.length}</strong>
+          </span>
+          <span>
+            Total exposure: <strong>${totalUsd}</strong>
+          </span>
         </footer>
       )}
     </div>

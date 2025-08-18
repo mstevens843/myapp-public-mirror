@@ -136,6 +136,20 @@ export const UserProvider = ({ children }) => {
     refreshProfile();
   }, []);
 
+ // Keep profile in sync when wallet is switched from the balance panel
+ useEffect(() => {
+   const onWalletChanged = (e) => {
+     const id = e?.detail?.walletId ?? null;
+     if (!id) return;
+     // optimistic update so UI flips immediately
+     setProfile((p) => ({ ...p, activeWalletId: id, activeWallet: (p.wallets || []).find(w => w.id === id) || p.activeWallet }));
+     // then refresh canonical data (activeWallet object, counts, etc.)
+     refreshProfile();
+   };
+   window.addEventListener("user:activeWalletChanged", onWalletChanged);
+   return () => window.removeEventListener("user:activeWalletChanged", onWalletChanged);
+ }, []);
+
   // Listen for auth events so we can hydrate immediately on sign-in,
   // and clear state on sign-out.
   useEffect(() => {

@@ -1,8 +1,7 @@
-
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const { Keypair } = require("@solana/web3.js");
+const { Keypair, Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
 const prisma = require("../prisma/prisma");
 const crypto = require("crypto");
 const bs58 = require("bs58");
@@ -14,13 +13,12 @@ const { loadWalletsFromDb } = require("../services/utils/wallet/walletManager");
 const authenticate = require("../middleware/requireAuth")
 const { supabase } = require('../lib/supabase')
 const check2FA = require("../middleware/auth/check2FA");
-const{ sendPasswordResetEmail } = require("../utils/emailVerification");
+const { sendPasswordResetEmail } = require("../utils/emailVerification");
 const speakeasy = require("speakeasy");
 const qrcode = require("qrcode");
 const nacl = require("tweetnacl");
 nacl.util = require("tweetnacl-util");
 const { v4: uuidv4 } = require("uuid");
-const { Connection, clusterApiUrl, PublicKey } = require("@solana/web3.js");
 const { CSRF_COOKIE, generateCsrfToken, setCsrfCookie } = require("../middleware/csrf");
 
 // Validation, CSRF and auth cookie helpers
@@ -33,9 +31,13 @@ const {
   REFRESH_TOKEN_TTL_MS,
 } = require("../utils/authCookies");
 
-// Envelope encryption helper for generating encrypted wallet blobs
-const { encryptPrivateKey } = require("../armEncryption/envelopeCrypto");
-console.log("✅ encryptPrivateKey loaded →", typeof encryptPrivateKey);
+// 🔐 Unprotected envelope wallet service (DB/env aware)
+// (replaces inline wrappers; keeps routes skinny)
+const {
+  createUnprotectedWallet,
+  // unlockUnprotectedWallet, migratePlaintextToUnprotected  // available if/when needed
+} = require("../armEncryption/unprotected");
+console.log("✅ wallets/unprotected service loaded →", typeof createUnprotectedWallet);
 console.log("🧠 Running auth.js from →", __filename);
 
 const connection = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
@@ -183,205 +185,102 @@ return res.json({
 
 
 
+// POST /auth/generate-vault  (web3 signup)
 router.post("/generate-vault", async (req, res) => {
   try {
     const { phantomPublicKey, agreedToTerms } = req.body;
     if (!phantomPublicKey) {
       return res.status(400).json({ error: "Missing phantomPublicKey" });
     }
-
     if (!agreedToTerms) {
       return res.status(400).json({ error: "Must agree to Terms and Privacy Policy" });
     }
 
-    const existing = await prisma.user.findUnique({
-      where: { phantomPublicKey },
-    });
-
+    const existing = await prisma.user.findUnique({ where: { phantomPublicKey } });
     if (existing) {
       return res.status(400).json({ error: "User already exists" });
     }
 
-    const now = Date.now();
+    const now   = Date.now();
     const today = new Date(now).toISOString().slice(0, 10);
 
-    // Wrap the entire workflow in a transaction.  We predefine userId so it
-    // can be used for AAD when encrypting the keypair.  Note that
-    // encryptPrivateKey requires an AAD even for unprotected wallets; we
-    // supply one here based on the new userId and the fact that this is a
-    // vault wallet.
-    const transaction = await prisma.$transaction(async (prisma) => {
-      // 1. Create a vault keypair and envelope encrypt it
-      const keypair = Keypair.generate();
+    // one transaction; consistently use `tx` as the transactional prisma client
+    const transaction = await prisma.$transaction(async (tx) => {
+      // 1) make vault keypair
+      const keypair   = Keypair.generate();
       const publicKey = keypair.publicKey.toBase58();
-      const secretKeyBytes = Buffer.from(keypair.secretKey);
 
-      // Pre-generate a UUID for the new user; this is stored as the
-      // userId on the User model and referenced in the AAD for the wallet
+      // 2) create a brand-new external userId (AAD for envelope HKDF)
       const newUserId = uuidv4();
 
-      // 2. Create the new user.  Use the generated UUID as userId and
-      // persist phantomPublicKey for later lookups.
-      const user = await prisma.user.create({
+      // 3) create the new user row
+      const user = await tx.user.create({
         data: {
           userId: newUserId,
-          type: 'web3',
+          type: "web3",
           phantomPublicKey,
           agreedToTermsAt: new Date(),
         },
       });
 
-      // 3. Create the associated wallet as unprotected.  We leave
-      // encrypted=null and store the base58 secret so the user can set
-      // protection later.  The wallet inherits the new user's database ID
-      // via user.id.
-      const createdWallet = await prisma.wallet.create({
-        data: {
-          label: 'starter',
-          publicKey,
-          encrypted: null,
-          isProtected: false,
-          passphraseHash: null,
-          userId: user.id,
-          // store base58 secret for later migration; cast to string because
-          // bs58.encode may return a Buffer, and Prisma expects a string
-          privateKey: bs58.encode(keypair.secretKey).toString(),
-        },
+      // 4) persist wallet via service (unprotected envelope; NEVER plaintext)
+      const createdWallet = await createUnprotectedWallet({
+        prismaClient: tx,
+        dbUserId:     user.id,                 // FK → User.id
+        aadUserId:    newUserId,               // HKDF salt / AAD identifier
+        label:        "starter",
+        secretKey:    Buffer.from(keypair.secretKey),
+        publicKey,                             // optional, but we have it
       });
 
-      // 3½. Persist the vaultPublicKey and set this wallet active on the user
-      await prisma.user.update({
+      // 5) set vault key + active wallet
+      await tx.user.update({
         where: { id: user.id },
-        data: { vaultPublicKey: publicKey, activeWalletId: createdWallet.id },
+        data : { vaultPublicKey: publicKey, activeWalletId: createdWallet.id },
       });
 
-      // 5. Create default preferences
-      await prisma.userPreference.create({ data: { userId: user.id } });
+      // 6) defaults
+      await tx.userPreference.create({ data: { userId: user.id } });
 
-      // 6. Seed portfolio tables
-      await prisma.portfolioTracker.create({ data: { userId: user.id, startTs: now, lastMonthlyTs: now } });
-      await prisma.netWorthHistory.create({
-        data: {
-          userId: user.id,
-          ts: now,
-          date: today,
-          value: 0,
-          minute: new Date(now).toISOString().slice(0, 16),
-        },
+      // 7) seed portfolio tables
+      await tx.portfolioTracker.create({ data: { userId: user.id, startTs: now, lastMonthlyTs: now } });
+      await tx.netWorthHistory.create({
+        data: { userId: user.id, ts: now, date: today, value: 0, minute: new Date(now).toISOString().slice(0, 16) }
       });
-      await prisma.netWorthSnapshot.create({
-        data: { userId: user.id, ts: now, netWorth: 0, sol: 0, usdc: 0, openPositions: 0 },
+      await tx.netWorthSnapshot.create({
+        data: { userId: user.id, ts: now, netWorth: 0, sol: 0, usdc: 0, openPositions: 0 }
       });
 
-      // 7. Prepare return values.  Provide the base58-encoded secret key
-      // alongside the publicKey for backwards compatibility with clients
+      // keep legacy return values (privateKey base58) for clients that still expect it
       const privateKeyBase58 = bs58.encode(keypair.secretKey).toString();
       return { user, createdWallet, privateKey: privateKeyBase58, publicKey };
     });
 
-    // Final JWTs
-    const accessToken = jwt.sign(
-      { id: transaction.user.id, type: transaction.user.type },
-      JWT_SECRET,
-      { expiresIn: "365d" }
-    );
+    // JWTs + cookies + csrf
+    const accessToken  = jwt.sign({ id: transaction.user.id, type: transaction.user.type }, JWT_SECRET, { expiresIn: "365d" });
+    const refreshToken = jwt.sign({ id: transaction.user.id }, JWT_SECRET, { expiresIn: "365d" });
 
-    const refreshToken = jwt.sign(
-      { id: transaction.user.id },
-      JWT_SECRET,
-      { expiresIn: "365d" }
-    );
+    await prisma.refreshToken.create({ data: { token: refreshToken, userId: transaction.user.id } });
+    setAccessCookie(res, accessToken);
+    setRefreshCookie(res, refreshToken);
+    setCsrfCookie(res, generateCsrfToken());
 
-    // Store refresh token in DB
-    await prisma.refreshToken.create({
-      data: {
-        token: refreshToken,
-        userId: transaction.user.id,
-      },
-    });
-
-    // Set cookies (helpers with __Host- prefix & flags) + CSRF
-    setAccessCookie(res, accessToken); // ← changed
-    setRefreshCookie(res, refreshToken); // ← changed
-    {
-      const csrfToken = generateCsrfToken();
-      setCsrfCookie(res, csrfToken); // ← added
-    }
-
-    res.status(201).json({
-      accessToken,
-      refreshToken,
-      vaultPublicKey: transaction.publicKey,
-      vaultPrivateKey: transaction.privateKey,
-      userId: transaction.user.userId,
-      type: transaction.user.type,
-      activeWalletId: transaction.createdWallet.id,
-    });
-
+res.status(201).json({
+  accessToken,
+  refreshToken,
+  vaultPublicKey:  transaction.publicKey,
+  vaultPrivateKey: transaction.privateKey,   // legacy bridge
+  userId:          transaction.user.id,      // ← local DB id (consistent with /register)
+  externalUserId:  transaction.user.userId,  // ← keep for web3 flows
+  type:            transaction.user.type,
+  activeWalletId:  transaction.createdWallet.id,
+});
   } catch (err) {
     console.error("🔥 Vault gen error:", err.stack || err);
     res.status(500).json({ error: "Failed to generate vault" });
   }
 });
 
-
-
-
-// router.post("/generate-vault", async (req, res) => {
-//   try {
-//     const { phantomPublicKey } = req.body;
-//     if (!phantomPublicKey) {
-//       return res.status(400).json({ error: "Missing phantomPublicKey" });
-//     }
-
-//     const existing = await prisma.user.findUnique({
-//       where: { phantomPublicKey },
-//       select: { userId: true, vaultPublicKey: true }
-//     });
-
-//     if (existing) {
-//       if (existing.vaultPublicKey) {
-//         return res.status(400).json({ error: "Vault already exists" });
-//       }
-//       return res.status(400).json({ error: "User already exists without vault" });
-//     }
-
-//     // 🪪 Generate vault keypair
-//     const keypair = Keypair.generate();
-//     const publicKey = keypair.publicKey.toBase58();
-//     const privateKey = bs58.encode(keypair.secretKey);
-//     const encryptedPrivateKey = encrypt(privateKey);
-
-//     // 💾 Create user
-//     const user = await prisma.user.create({
-//       data: {
-//         userId: uuidv4(),
-//         type: "web3",
-//         phantomPublicKey,
-//         vaultPublicKey: publicKey,
-//         vaultPrivateKeyEnc: encryptedPrivateKey
-//       }
-//     });
-
-//     // 🔐 Issue JWT token
-//     const accessToken = jwt.sign(
-//       { userId: user.userId, type: user.type },
-//       JWT_SECRET,
-//       { expiresIn: "1d" }
-//     );
-
-//     res.status(201).json({
-//       accessToken,
-//       vaultPublicKey: publicKey,
-//       vaultPrivateKey: privateKey,
-//       userId: user.userId,
-//       type: user.type
-//     });
-//   } catch (err) {
-//     console.error("🔥 Vault gen error:", err.stack || err);
-//     res.status(500).json({ error: "Failed to generate vault" });
-//   }
-// });
 
 
 
@@ -766,172 +665,105 @@ router.post("/disable-2fa", authenticate, async (req, res) => {
 // POST /auth/register
 router.post("/register", async (req, res) => {
   try {
-      console.log("[/register] body:", req.body);
+    const { username, email, password, confirmPassword, agreedToTerms } = req.body;
+    // …all your validation + supabase signup…
 
-const { username, email, password, confirmPassword, agreedToTerms } = req.body;
-
-    // 🔥 Check required fields
-    if (!username || !email || !password || !confirmPassword)
-      return res.status(400).json({ error: "All fields are required." });
-
-        // 🔥 Email must be valid
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email))
-      return res.status(400).json({ error: "Invalid email format." });
-
-        // 🔥 Password constraints
-    const pwRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[!@#$%^&*]).{6,}$/;
-    if (!pwRegex.test(password))
-      return res.status(400).json({
-        error: "Password must be at least 6 characters, with one uppercase, one number, and one special character."
-      });
-
-    // 🔥 Passwords must match
-    if (password !== confirmPassword)
-      return res.status(400).json({ error: "Passwords do not match." });
-
-    if (!agreedToTerms)
-  return res.status(400).json({ error: "You must agree to the Terms and Privacy Policy." });
-
-    // ✅ Supabase signup
-const { data, error } = await supabase.auth.signUp({
-  email, password,
-  options: {
-    emailRedirectTo: `${process.env.FRONTEND_URL}/email-confirmed`
-  }});    
-if (error) {
-      console.error("Supabase signup error:", error.message);
-      return res.status(400).json({ error: error.message });
-    }
-
-
+    const { data, error } = await supabase.auth.signUp({
+      email, password,
+      options: { emailRedirectTo: `${process.env.FRONTEND_URL}/email-confirmed` }
+    });
+    if (error) return res.status(400).json({ error: error.message });
     const supabaseUser = data.user;
 
-    // 🚫 Old local duplicate email check (not needed, we trust Supabase for this)
-    // const existing = await prisma.user.findUnique({ where: { email } });
-    // if (existing) return res.status(400).json({ error: "Email already used" });
+    // Optional: quick pre-check to give a fast error (still race-safe via tx catch)
+    const dup = await prisma.user.findUnique({ where: { username } });
+    if (dup) return res.status(400).json({ error: "Username already taken." });
 
-    // 🚫 Old local password hashing (password is stored in Supabase, not here)
-    // const hashedPassword = await bcrypt.hash(password, 10);
-
-    // ✅ Start a transaction to create your local user + wallet
-    const transaction = await prisma.$transaction(async (prisma) => {
+    const transaction = await prisma.$transaction(async (tx) => {
       const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+      const now   = Date.now();
+      const today = new Date(now).toISOString().slice(0, 10);
 
-      // Create user
+      // 1) user
       let user;
-
       try {
-        user = await prisma.user.create({
+        user = await tx.user.create({
           data: {
-            userId: supabaseUser.id,
+            userId: supabaseUser.id,    // external ID (HKDF salt / AAD)
             username,
             email,
             type: "web",
             createdAt: new Date(),
             usageResetAt: new Date(Date.now() + THIRTY_DAYS_MS),
-            credits: Number(0),
-            agreedToTermsAt: new Date() // ✅ store agreement timestamp
+            credits: 0,
+            agreedToTermsAt: new Date(),
           },
         });
       } catch (err) {
-        if (err.code === 'P2002' && err.meta?.target?.includes('username')) {
-          return res.status(400).json({ error: "Username already taken." });
+        if (err.code === "P2002" && err.meta?.target?.includes("username")) {
+          const e = new Error("Username already taken.");
+          e.status = 400; e.expose = true;
+          throw e; // ❗throw, don't res.json() here
         }
         throw err;
       }
 
-
-      // Generate wallet and associate it.  For unprotected starter wallets we
-      // leave `encrypted` null and store the base58 secret so the user can
-      // set up protection later.
-      const wallet = Keypair.generate();
-      const publicKey = wallet.publicKey.toBase58();
-      const createdWallet = await prisma.wallet.create({
-        data: {
-          label: "starter",
-          publicKey,
-          encrypted: null,
-          isProtected: false,
-          passphraseHash: null,
-          userId: user.id,
-          privateKey: bs58.encode(wallet.secretKey).toString(),
-        },
+      // 2) starter wallet via unprotected service
+      const kp        = Keypair.generate();
+      const publicKey = kp.publicKey.toBase58();
+      const createdWallet = await createUnprotectedWallet({
+        prismaClient: tx,
+        dbUserId:     user.id,       // FK → User.id
+        aadUserId:    user.userId,   // HKDF salt / AAD
+        label:        "starter",
+        secretKey:    Buffer.from(kp.secretKey),
+        publicKey,
       });
 
-  // 🔥 mark starter wallet active
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { activeWalletId: createdWallet.id }
-  });
+      // 3) active wallet + seeds
+      await tx.user.update({ where: { id: user.id }, data: { activeWalletId: createdWallet.id }});
+      await tx.userPreference.create({ data: { userId: user.id }});
+      await tx.portfolioTracker.create({ data: { userId: user.id, startTs: now, lastMonthlyTs: now }});
+      await tx.netWorthHistory.create({
+        data: { userId: user.id, ts: now, date: today, value: 0, minute: new Date(now).toISOString().slice(0, 16) }
+      });
+      await tx.netWorthSnapshot.create({
+        data: { userId: user.id, ts: now, netWorth: 0, sol: 0, usdc: 0, openPositions: 0 }
+      });
 
-      // 🧠 Create user preferences (defaults auto-filled via schema)
-    await prisma.userPreference.create({
-      data: { userId: user.id }
-    });
-
-     /* 4️⃣  🔥 seed portfolio tables (initial net-worth = 0) */
-     const now = Date.now();
-     const today = new Date(now).toISOString().slice(0, 10);      // YYYY-MM-DD
-
-     await prisma.portfolioTracker.create({
-       data: { userId: user.id, startTs: now, lastMonthlyTs: now }
-     });
-
-     await prisma.netWorthHistory.create({
-       data: { userId: user.id, ts: now, date: today, value: 0, minute: new Date(now).toISOString().slice(0, 16) }
-     });
-
-     await prisma.netWorthSnapshot.create({
-  data:{ userId:user.id, ts:now, netWorth:0, sol:0, usdc:0, openPositions:0 }
-});
       return { user, createdWallet };
     });
 
-    // ✅ Return token
-const accessToken  = jwt.sign({ id: transaction.user.id, type: "web" }, JWT_SECRET, { expiresIn: "7d" });
-const refreshToken = jwt.sign({ id: transaction.user.id }, JWT_SECRET, { expiresIn: "30d" });
+    // tokens + cookies + csrf
+    const accessToken  = jwt.sign({ id: transaction.user.id, type: "web" }, JWT_SECRET, { expiresIn: "7d" });
+    const refreshToken = jwt.sign({ id: transaction.user.id }, JWT_SECRET, { expiresIn: "30d" });
+    await prisma.refreshToken.create({ data: { token: refreshToken, userId: transaction.user.id } });
 
+    setAccessCookie(res, accessToken);
+    setRefreshCookie(res, refreshToken);
+    setCsrfCookie(res, generateCsrfToken());
 
-await prisma.refreshToken.create({
-  data: { token: refreshToken, userId: transaction.user.id }
-});
-// Set cookies via helpers + CSRF (← changed)
-setAccessCookie(res, accessToken);
-setRefreshCookie(res, refreshToken);
-{
-  const csrfToken = generateCsrfToken();
-  setCsrfCookie(res, csrfToken);
-}
-res.json({
-  accessToken,
-  refreshToken,
-  userId: transaction.user.id,
-  activeWalletId: transaction.createdWallet.id,
-  wallet: {
-    id:        transaction.createdWallet.id,
-    publicKey: transaction.createdWallet.publicKey,
-    label:     transaction.createdWallet.label
-  }
-});
+    return res.json({
+      accessToken,
+      refreshToken,
+      userId: transaction.user.id,
+      activeWalletId: transaction.createdWallet.id,
+      wallet: {
+        id:        transaction.createdWallet.id,
+        publicKey: transaction.createdWallet.publicKey,
+        label:     transaction.createdWallet.label,
+      },
+    });
   } catch (err) {
+    if (err.expose && err.status) {
+      return res.status(err.status).json({ error: err.message });
+    }
     console.error("Register error:", err);
-    res.status(500).json({ error: "Server error" });
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
-// router.post("/resend-confirm", async (req, res) => {
-//   const { email } = req.body;
-//   if (!email) return res.status(400).json({ error: "Missing email." });
 
-//   const { error } = await supabase.auth.resend({ email });
-//   if (error) {
-//     console.error("Resend error:", error.message);
-//     return res.status(400).json({ error: error.message });
-//   }
-
-//   res.json({ message: "Confirmation email resent." });
-// });
 
 router.post("/resend-confirm", async (req, res) => {
   const { email } = req.body;
@@ -1311,52 +1143,45 @@ router.post("/refresh", validate({ body: refreshSchema }), async (req, res) => {
 
 
 // Generate a new wallet (envelope-encrypted, no extra side-effects)
+// Generate a new wallet (envelope-encrypted, no extra side-effects)
 router.post("/wallet/generate", requireAuth, async (req, res) => {
   try {
     const userId = req.user.id;
     const { label } = req.body;
-
-    const wallet    = Keypair.generate();
-    const publicKey = wallet.publicKey.toBase58();
-    // Unprotected wallets: we leave encrypted null and only store
-    // the base58 secret.  When the user sets up protection the
-    // secret will be migrated.
 
     if (label) {
       const dup = await prisma.wallet.findFirst({ where: { userId, label } });
       if (dup) return res.status(400).json({ error: "Label already exists." });
     }
 
-    const newWallet = await prisma.wallet.create({
-      data: {
-        userId,
-        label: label || "New Wallet",
-        publicKey,
-        encrypted: null,
-        isProtected: false,
-        passphraseHash: null,
-        // store base58 secret for later migration
-        privateKey: bs58.encode(wallet.secretKey).toString(),
-      },
+    // pull external userId (AAD for HKDF)
+    const user = await prisma.user.findUnique({
+      where : { id: userId },
+      select: { id: true, userId: true, activeWalletId: true }
+    });
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    // create keypair and persist via service
+    const wallet    = Keypair.generate();
+    const publicKey = wallet.publicKey.toBase58();
+
+    const newWallet = await createUnprotectedWallet({
+      prismaClient: prisma,
+      dbUserId:     user.id,                   // FK → User.id
+      aadUserId:    user.userId,               // HKDF salt / AAD identifier
+      label:        label || "New Wallet",
+      secretKey:    Buffer.from(wallet.secretKey),
+      publicKey,
     });
 
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-
+    // ensure activeWalletId set at least once
     let activeWalletId = user.activeWalletId;
-
     if (!activeWalletId) {
-      await prisma.user.update({
-        where: { id: userId },
-        data: { activeWalletId: newWallet.id }
-      });
+      await prisma.user.update({ where: { id: userId }, data: { activeWalletId: newWallet.id } });
       activeWalletId = newWallet.id;
     }
 
-    return res.json({
-      wallet: newWallet,
-      activeWalletId
-    });
-
+    return res.json({ wallet: newWallet, activeWalletId });
   } catch (err) {
     console.error("🔥 Wallet generate error:", err.stack || err);
     return res.status(500).json({ error: "Failed to generate wallet." });

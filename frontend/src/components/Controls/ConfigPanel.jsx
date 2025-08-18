@@ -137,7 +137,17 @@ const humanizeMode = (mode) =>
     .toLowerCase();
 
 /* ───────────────── global user defaults ───────────────── */
-const userPrefs = JSON.parse(localStorage.getItem("userPrefs") || "{}");
+// replace the one-liner with this safe loader
+const userPrefs = (() => {
+  try {
+    const raw = localStorage.getItem("userPrefs");
+    if (!raw || raw === "undefined") return {};
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+})();
+
 const DEFAULT_SLIPPAGE =
   typeof userPrefs.slippage === "number" ? userPrefs.slippage : 1.0;
 
@@ -636,8 +646,12 @@ const ConfigPanel = ({
 
   /** 🔧 read slippage (and whatever else you store) once per render */
 
+  // const tradeOpts = {
+  //   walletId: activeWallet?.id,
+  //   slippage: swapOpts.slippage ?? prefs?.slippage ?? DEFAULT_SLIPPAGE,
+  //   priorityFee: swapOpts.priorityFee,
+  // };
   const tradeOpts = {
-    walletId: activeWallet?.id,
     slippage: swapOpts.slippage ?? prefs?.slippage ?? DEFAULT_SLIPPAGE,
     priorityFee: swapOpts.priorityFee,
   };
@@ -826,17 +840,22 @@ const ConfigPanel = ({
 
     try {
       const res = await manualSell(pct, mint, tradeOpts); // ✅ now includes walletId
-      const explorer = `https://explorer.solana.com/tx/${res.tx}?cluster=mainnet-beta`;
-
-      toast.success(
-        <span>
-          ✅ Sold {pct}% —{" "}
-          <a href={explorer} target="_blank" rel="noopener noreferrer" className="underline">
-            View&nbsp;Tx
-          </a>
-        </span>,
-        { id: toastId, duration: 25000 }
-      );
+      const tx = res?.tx;
+      if (tx) {
+        const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
+        toast.success(
+          <span>
+            ✅ Sold {pct}% —{" "}
+            <a href={explorer} target="_blank" rel="noopener noreferrer" className="underline">
+              View&nbsp;Tx
+            </a>
+          </span>,
+          { id: toastId, duration: 25000 }
+        );
+      } else {
+        // No tx (e.g., duplicate click suppressed). Still show success so the user isn’t left hanging.
+        toast.success(`✅ Sold ${pct}%`, { id: toastId, duration: 10000 });
+      }
 
       if (typeof fetchOpenTrades === "function") await fetchOpenTrades(); // 🧼 refresh trades
     } catch (err) {

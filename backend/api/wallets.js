@@ -1,34 +1,32 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../../.env") });
 const express = require("express");
 const router = express.Router();
-const { Connection, Keypair, PublicKey, Transaction, SystemProgram } = require("@solana/web3.js");
-const path = require("path");
-const fs = require("fs");
+const { Connection, Keypair, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58");
 const { getCurrentWallet, loadWalletsFromDb } = require("../services/utils/wallet/walletManager");
 const { getFullNetWorthApp } = require("../utils/getFullNetworth");
-// const loadSettings  = require("../telegram/utils/tpSlStorage").loadSettings; // 
-const getWalletTokensWithMeta = require("../services/strategies/paid_api/getWalletTokensWithMeta"); // wallet-level helper
+const getWalletTokensWithMeta = require("../services/strategies/paid_api/getWalletTokensWithMeta");
 const axios = require("axios");
-const { getTokenName }  = require("../services/utils/analytics/getTokenName");
+const { getTokenName } = require("../services/utils/analytics/getTokenName");
 const pLimit = require("p-limit");
-const limit = pLimit(4);  
+const limit = pLimit(4);
 const connection = new Connection(process.env.SOLANA_RPC_URL);
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
-const authenticate = require("../middleware/requireAuth")
+const authenticate = require("../middleware/requireAuth");
 const { encrypt, decrypt } = require("../middleware/auth/encryption");
 const check2FA = require("../middleware/auth/check2FA");
 const { getTokenAccountsAndInfo, getMintDecimals } = require("../utils/tokenAccounts");
-const { encryptPrivateKey } = require("../armEncryption/envelopeCrypto");   // 👈 NEW
-const crypto  = require("crypto");    
+// ⬇️ Use the same unprotected-envelope service as other routes
+const { createUnprotectedWallet } = require("../armEncryption/unprotected");
+const crypto = require("crypto");
 
 // Validation for balance queries
 const validate = require("../middleware/validate");
 const { balanceQuerySchema } = require("./schemas/wallets.schema");
+
 /* ───────────────── Price helper (robust import) ───────────────── */
 const priceMod = require("../services/strategies/paid_api/getTokenPrice");
-// default export may be a function (getTokenPrice); otherwise take named
 const getTokenPrice =
   typeof priceMod === "function" ? priceMod : priceMod.getTokenPrice;
 
@@ -50,14 +48,13 @@ async function getSolPriceSafe(userId) {
   }
 }
 
-
 // ── Pagination helper (idempotent) ───────────────────────────────────────────
 function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
-  const cap  = Number(defaults.cap || 500);
-  let take   = parseInt(req.query?.take ?? defaults.take, 10);
-  let skip   = parseInt(req.query?.skip ?? defaults.skip, 10);
+  const cap = Number(defaults.cap || 500);
+  let take = parseInt(req.query?.take ?? defaults.take, 10);
+  let skip = parseInt(req.query?.skip ?? defaults.skip, 10);
   if (!Number.isFinite(take) || take <= 0) take = defaults.take;
-  if (!Number.isFinite(skip) || skip <  0) skip = defaults.skip;
+  if (!Number.isFinite(skip) || skip < 0) skip = defaults.skip;
   take = Math.min(Math.max(1, take), cap);
   skip = Math.max(0, skip);
   return { take, skip };
@@ -68,11 +65,10 @@ const MIN_VALUE_USD = 0.50;
 const EXCLUDE_MINTS = new Set([
   "So11111111111111111111111111111111111111112", // wSOL
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-  "Es9vMFrzaCER9SADJdTjaiCviCqiSBamEn3DcSjh3rCt"  // USDC legacy
+  "Es9vMFrzaCER9SADJdTjaiCviCqiSBamEn3DcSjh3rCt", // USDC legacy
 ]);
 
-const MIN_IMPORT_USD = 0.25;                              // 💰 dust bar
-
+const MIN_IMPORT_USD = 0.25; // 💰 dust bar
 
 const injectUntracked = async (userId, walletIds = null) => {
   let wrote = false;
@@ -658,10 +654,13 @@ router.post("/validate-mint", async (req, res) => {
 // FOR NEW AUTH SYSTEM SAVE WALLET HIDE KEY
 router.post("/import-wallet", authenticate, async (req, res) => {
   const { label, privateKey } = req.body;
-  const userId = req.user.id;
+  const dbUserId = req.user.id; // User.id (UUID string)
 
-  console.log("🛂 Authenticated user:", userId);
-  console.log("📩 Request body:", { label, privateKey: privateKey?.slice(0, 6) + "..." });
+  console.log("🛂 Authenticated user:", dbUserId);
+  console.log("📩 Request body:", {
+    label,
+    privateKey: privateKey?.slice(0, 6) + "...",
+  });
 
   if (!label || !privateKey)
     return res.status(400).json({ error: "Missing label or privateKey." });
@@ -676,54 +675,62 @@ router.post("/import-wallet", authenticate, async (req, res) => {
       return res.status(400).json({ error: "Invalid base58 private key." });
     }
     if (secretKey.length !== 64)
-      return res.status(400).json({ error: "Key must be 64-byte ed25519 secret." });
+      return res
+        .status(400)
+        .json({ error: "Key must be 64-byte ed25519 secret." });
 
-    const keypair   = Keypair.fromSecretKey(secretKey);
+    const keypair = Keypair.fromSecretKey(secretKey);
     const publicKey = keypair.publicKey.toBase58();
     console.log("🧾 Public key derived:", publicKey);
 
-    /* 2️⃣  Duplicate checks */
-    if (await prisma.wallet.findFirst({ where: { userId, publicKey } }))
+    /* 2️⃣  Duplicate checks (publicKey and label scoped to this user) */
+    if (await prisma.wallet.findFirst({ where: { userId: dbUserId, publicKey } }))
       return res.status(400).json({ error: "Wallet already saved." });
 
-    if (await prisma.wallet.findFirst({ where: { userId, label } }))
+    if (await prisma.wallet.findFirst({ where: { userId: dbUserId, label } }))
       return res.status(400).json({ error: "Label already exists." });
 
-    /* 3️⃣  Save the wallet as unprotected: store only the base58 secret key and
-           leave the envelope empty.  The envelope will be created on
-           first protection setup. */
-    const wallet = await prisma.wallet.create({
-      data: {
-        userId,
-        label,
-        publicKey,
-        encrypted   : null,
-        isProtected : false,
-        passphraseHash: null,
-        // Store the base58 secret to allow later migration to pass‑phrase.
-        // Some bs58 implementations return a Buffer; convert to string to
-        // prevent Prisma from persisting a Buffer object in a VARCHAR column.
-        privateKey : bs58.encode(secretKey).toString(),
-      },
+    /* 3️⃣  Load user for AAD/HKDF salt (User.userId) and active wallet check */
+    const userRec = await prisma.user.findUnique({
+      where: { id: dbUserId },
+      select: { id: true, userId: true, activeWalletId: true },
     });
+    if (!userRec) return res.status(404).json({ error: "User not found." });
+
+    /* 4️⃣  Create wallet via centralized UNPROTECTED service
+           - KEK = HKDF(ENCRYPTION_SECRET, salt = userRec.userId, info="wallet-kek")
+           - Envelope JSON is stored in Wallet.encrypted (object, not string)
+           - No plaintext in Wallet.privateKey
+    */
+    const wallet = await createUnprotectedWallet({
+      prismaClient: prisma,
+      dbUserId: userRec.id,               // FK → User.id (string/UUID)
+      aadUserId: userRec.userId,          // HKDF salt/AAD (string)
+      label,
+      secretKey: Buffer.from(secretKey),  // Buffer OK; service can also accept base58/hex
+      publicKey,                          // consistency/sanity
+    });
+
     console.log("✅ Wallet saved to DB:", wallet.id);
 
     /* 5️⃣  Make it active if user has none */
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user.activeWalletId)
-      await prisma.user.update({ where: { id: userId }, data: { activeWalletId: wallet.id } });
+    if (!userRec.activeWalletId) {
+      await prisma.user.update({
+        where: { id: dbUserId },
+        data: { activeWalletId: wallet.id },
+      });
+    }
 
     /* 6️⃣  Inject untracked SPL positions */
-    await injectUntracked(userId, [wallet.id]);
+    await injectUntracked(dbUserId, [wallet.id]);
 
     /* 7️⃣  Done */
     return res.json({
-      message         : "Wallet saved.",
+      message: "Wallet saved.",
       wallet,
-      activeWalletId  : wallet.id,
-      refetchOpenTrades: true
+      activeWalletId: userRec.activeWalletId || wallet.id,
+      refetchOpenTrades: true,
     });
-
   } catch (err) {
     if (err.code === "P2002" && err.meta?.target?.includes("userId_label"))
       return res.status(400).json({ error: "Label already exists." });
