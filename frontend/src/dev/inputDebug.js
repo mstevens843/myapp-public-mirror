@@ -1,80 +1,101 @@
-// Debugging utilities for Breakout inputs
-// Maintains a ring buffer of the last 1000 input events and exposes a
-// helper to download the trace. Logs are gated behind
-// localStorage.BREAKOUT_DEBUG === "1" so they remain silent by default.
+/*
+ * Instrumentation helpers for breakout strategy configs.
+ *
+ * These functions maintain a simple ring buffer of recent input and effect
+ * events.  When BREAKOUT_DEBUG is set to "1" in localStorage, entries are
+ * pushed into the buffer.  The buffer is exposed on window.__BREAKOUT_INPUT_TRACE
+ * and can be dumped via window.dumpBreakoutTrace() for offline analysis.
+ *
+ * Supported event types:
+ *   - change: user typed or toggled an input
+ *   - blur: user blurred a field (numeric coercion may occur)
+ *   - effect: component or effect wrote to config
+ *   - focus: element gained focus
+ *   - select: text selection range changed
+ *   - render: component re‑rendered
+ */
 
-// In-memory ring buffer attached to window so it persists across module
-// reloads. Each entry includes a timestamp for easier correlation.
-function ensureBuffer() {
-  if (typeof window === 'undefined') return [];
-  if (!window.__BREAKOUT_INPUT_TRACE) {
-    window.__BREAKOUT_INPUT_TRACE = [];
+const DEFAULT_TRACE_SIZE = 500;
+
+// We lazily initialise the ring buffer only when imported in the browser.
+let _ring;
+function getRing() {
+  if (!_ring) {
+    _ring = [];
+    // Expose the buffer on window for debugging
+    if (typeof window !== "undefined") {
+      window.__BREAKOUT_INPUT_TRACE = _ring;
+      window.dumpBreakoutTrace = function () {
+        try {
+          return JSON.stringify(_ring, null, 2);
+        } catch (e) {
+          return "[]";
+        }
+      };
+    }
   }
-  return window.__BREAKOUT_INPUT_TRACE;
+  return _ring;
+}
+
+function getMax() {
+  if (typeof window !== "undefined") {
+    const sz = parseInt(window.localStorage?.BREAKOUT_TRACE_SIZE);
+    if (Number.isFinite(sz) && sz > 0) return sz;
+  }
+  return DEFAULT_TRACE_SIZE;
+}
+
+function shouldLog() {
+  if (typeof window === "undefined") return false;
+  return window.localStorage?.BREAKOUT_DEBUG === "1";
 }
 
 function pushEntry(entry) {
-  const buffer = ensureBuffer();
-  const item = { ts: Date.now(), ...entry };
-  buffer.push(item);
-  // Keep the buffer bounded to 1000 entries
-  if (buffer.length > 1000) {
-    buffer.shift();
+  const ring = getRing();
+  const max = getMax();
+  if (ring.length >= max) {
+    ring.shift();
   }
+  ring.push({ time: Date.now(), ...entry });
 }
 
+// Change logging: captures raw string and computed next value
 export function logChange({ comp, field, raw, prev, next }) {
-  try {
-    if (typeof window === 'undefined') return;
-    if (localStorage.BREAKOUT_DEBUG !== '1') return;
-    pushEntry({ type: 'change', comp, field, raw, prev, next });
-    // eslint-disable-next-line no-console
-    console.log(`[${comp}] change`, { field, raw, prev, next });
-  } catch (_) {
-    // noop
-  }
+  if (!shouldLog()) return;
+  pushEntry({ type: "change", comp, field, raw, prev, next });
 }
 
+// Blur logging: captures before/after conversion
 export function logBlur({ comp, field, before, after }) {
-  try {
-    if (typeof window === 'undefined') return;
-    if (localStorage.BREAKOUT_DEBUG !== '1') return;
-    pushEntry({ type: 'blur', comp, field, before, after });
-    // eslint-disable-next-line no-console
-    console.log(`[${comp}] blur`, { field, before, after });
-  } catch (_) {
-    // noop
-  }
+  if (!shouldLog()) return;
+  pushEntry({ type: "blur", comp, field, before, after });
 }
 
+// Effect logging: used by parents/effects that write to config
 export function logEffect({ comp, reason, touched }) {
-  try {
-    if (typeof window === 'undefined') return;
-    if (localStorage.BREAKOUT_DEBUG !== '1') return;
-    pushEntry({ type: 'effect', comp, reason, touched });
-    // eslint-disable-next-line no-console
-    console.log(`[${comp}] effect`, { reason, touched });
-  } catch (_) {
-    // noop
-  }
+  if (!shouldLog()) return;
+  const touchedList = Array.isArray(touched)
+    ? touched
+    : touched && typeof touched === "object"
+    ? Object.keys(touched)
+    : [];
+  pushEntry({ type: "effect", comp, reason, touched: touchedList });
 }
 
-// Expose a helper on window that downloads the current trace as a JSON file.
-if (typeof window !== 'undefined') {
-  window.dumpBreakoutTrace = function dumpBreakoutTrace() {
-    try {
-      const data = JSON.stringify(ensureBuffer(), null, 2);
-      const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = 'breakout-trace.json';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-      URL.revokeObjectURL(url);
-    } catch (_) {
-      // noop
-    }
-  };
+// Focus logging: when an input or interactive element receives focus
+export function logFocus({ comp, field }) {
+  if (!shouldLog()) return;
+  pushEntry({ type: "focus", comp, field });
+}
+
+// Selection logging: captures caret or text selection changes
+export function logSelection({ comp, field, start, end }) {
+  if (!shouldLog()) return;
+  pushEntry({ type: "select", comp, field, start, end });
+}
+
+// Render logging: logs each render of a component with optional reason
+export function logRender({ comp, fieldSet, reason }) {
+  if (!shouldLog()) return;
+  pushEntry({ type: "render", comp, fields: fieldSet, reason });
 }

@@ -1,4 +1,10 @@
-import React, { useMemo, useState, useCallback, useEffect } from "react";
+import React, {
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import StrategyTooltip from "./StrategyTooltip";
 import TokenSourceSelector, { feedOptions as FEEDS } from "./TokenSourceSelector";
@@ -8,7 +14,14 @@ import { toast } from "sonner";
 import { saveConfig } from "@/utils/autobotApi";
 
 // Logging helpers for input instrumentation
-import { logChange, logBlur, logEffect } from "../dev/inputDebug";
+import {
+  logChange,
+  logBlur,
+  logEffect,
+  logFocus,
+  logSelection,
+  logRender,
+} from "../../dev/inputDebug";
 
 /* fields required by validator ---------------------------------------- */
 export const OPTIONAL_FIELDS = [
@@ -40,10 +53,16 @@ const NUM_FIELDS = [
 ];
 
 const Card = ({ title, right, children, className = "" }) => (
-  <div className={`bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 sm:p-4 ${className}`}>
+  <div
+    className={`bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 sm:p-4 ${className}`}
+  >
     {(title || right) && (
       <div className="flex items-center justify-between mb-3">
-        {title ? <div className="text-sm font-semibold text-zinc-200">{title}</div> : <div />}
+        {title ? (
+          <div className="text-sm font-semibold text-zinc-200">{title}</div>
+        ) : (
+          <div />
+        )}
         {right}
       </div>
     )}
@@ -59,11 +78,15 @@ const TabButton = ({ active, onClick, children, badge }) => (
   <button
     type="button"
     onClick={onClick}
-    className={`relative px-3 sm:px-4 py-2 text-sm transition ${active ? "text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}
+    className={`relative px-3 sm:px-4 py-2 text-sm transition ${
+      active ? "text-zinc-100" : "text-zinc-400 hover:text-zinc-200"
+    }`}
   >
     <span className="pb-1">{children}</span>
     <span
-      className={`absolute left-0 right-0 -bottom-[1px] h-[2px] transition ${active ? "bg-emerald-400" : "bg-transparent"}`}
+      className={`absolute left-0 right-0 -bottom-[1px] h-[2px] transition ${
+        active ? "bg-emerald-400" : "bg-transparent"
+      }`}
     />
     {badge > 0 && (
       <span className="ml-2 inline-flex items-center justify-center text-[10px] rounded-full px-1.5 py-0.5 bg-red-600 text-white">
@@ -82,17 +105,32 @@ const TAB_KEYS = {
     "minLiquidity",
     "volumeSpikeMultiplier",
   ],
-  execution: ["useSignals", "executionShape", "delayBeforeBuyMs", "priorityFeeLamports", "mevMode", "briberyAmount"],
+  execution: [
+    "useSignals",
+    "executionShape",
+    "delayBeforeBuyMs",
+    "priorityFeeLamports",
+    "mevMode",
+    "briberyAmount",
+  ],
   tokens: ["tokenFeed", "monitoredTokens", "overrideMonitored"],
   advanced: [],
 };
 
 const validateBreakoutConfig = (cfg = {}) => {
   const errs = [];
-  if (cfg.breakoutThreshold === "" || cfg.breakoutThreshold === undefined || Number.isNaN(+cfg.breakoutThreshold)) {
+  if (
+    cfg.breakoutThreshold === "" ||
+    cfg.breakoutThreshold === undefined ||
+    Number.isNaN(+cfg.breakoutThreshold)
+  ) {
     errs.push("breakoutThreshold is required.");
   }
-  if (cfg.volumeThreshold === "" || cfg.volumeThreshold === undefined || Number.isNaN(+cfg.volumeThreshold)) {
+  if (
+    cfg.volumeThreshold === "" ||
+    cfg.volumeThreshold === undefined ||
+    Number.isNaN(+cfg.volumeThreshold)
+  ) {
     errs.push("volumeThreshold is required.");
   }
   return errs;
@@ -103,10 +141,12 @@ const countErrorsForTab = (errors) => {
   const counts = { core: 0, execution: 0, tokens: 0, advanced: 0 };
   for (const tab of Object.keys(TAB_KEYS)) {
     const keys = TAB_KEYS[tab];
-    counts[tab] = lower.filter((msg) => keys.some((k) => msg.includes(k.toLowerCase()))).length;
+    counts[tab] = lower.filter((msg) =>
+      keys.some((k) => msg.includes(k.toLowerCase()))
+    ).length;
   }
   const categorized = Object.values(counts).reduce((a, b) => a + b, 0);
-  if (categorized < errors.length) counts.core += (errors.length - categorized);
+  if (categorized < errors.length) counts.core += errors.length - categorized;
   return counts;
 };
 
@@ -141,52 +181,132 @@ const BreakoutConfig = ({
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
   // Determine debug flags from localStorage. Always guarded under typeof window
-  const isDebug = typeof window !== 'undefined' && localStorage.BREAKOUT_DEBUG === '1';
-  const isRawInputMode = typeof window !== 'undefined' && localStorage.BREAKOUT_RAW_INPUT_MODE === '1';
+  const isDebug =
+    typeof window !== "undefined" && localStorage.BREAKOUT_DEBUG === "1";
+  const isRawInputMode =
+    typeof window !== "undefined" &&
+    localStorage.BREAKOUT_RAW_INPUT_MODE === "1";
+
+  // Track the active field for guard rails. Use a ref so updates don't cause rerender.
+  const activeFieldRef = useRef(null);
+  const clearActiveField = useCallback(() => {
+    activeFieldRef.current = null;
+    if (typeof window !== "undefined") {
+      window.__BREAKOUT_ACTIVE_FIELD = null;
+    }
+  }, []);
+
+  // Event handlers to capture focus and selection across the component.
+  const handleFocusCapture = useCallback(
+    (e) => {
+      const name = e?.target?.name;
+      if (!name) return;
+      activeFieldRef.current = name;
+      if (typeof window !== "undefined") {
+        window.__BREAKOUT_ACTIVE_FIELD = name;
+      }
+      logFocus({ comp: "BreakoutConfig", field: name });
+    },
+    []
+  );
+  const handleBlurCapture = useCallback(
+    (e) => {
+      const name = e?.target?.name;
+      // Only clear if leaving the current active field
+      if (!name) return;
+      if (activeFieldRef.current === name) {
+        clearActiveField();
+      }
+    },
+    [clearActiveField]
+  );
+  const handleSelectCapture = useCallback((e) => {
+    const name = e?.target?.name;
+    if (!name) return;
+    const { selectionStart: start, selectionEnd: end } = e.target;
+    logSelection({ comp: "BreakoutConfig", field: name, start, end });
+  }, []);
+
+  // Log renders with a snapshot of the current field set for debugging.
+  useEffect(() => {
+    logRender({
+      comp: "BreakoutConfig",
+      fieldSet: Object.keys(merged),
+      reason: "render",
+    });
+  }, [merged]);
 
   // Handler for all onChange events. Writes raw values into parent config
   const handleChange = useCallback(
     (e) => {
       const { name, type, value, checked } = e.currentTarget;
       let next;
-      if (type === 'checkbox') {
+      if (type === "checkbox") {
         next = !!checked;
       } else {
         next = value;
       }
       const prevVal = merged[name];
-      setConfig((prevConfig) => ({ ...(prevConfig ?? {}), [name]: next }));
-      logChange({ comp: 'BreakoutConfig', field: name, raw: value, prev: prevVal, next });
+      setConfig((prevConfig) => {
+        // If this field is currently active, always write through
+        const updated = { ...(prevConfig ?? {}) };
+        updated[name] = next;
+        return updated;
+      });
+      logChange({
+        comp: "BreakoutConfig",
+        field: name,
+        raw: value,
+        prev: prevVal,
+        next,
+      });
     },
     [setConfig, merged]
   );
 
-  // Per-field blur handler for numeric fields. Converts the raw string into a number if possible
+  // Per-field blur handler for numeric fields. Converts the raw string into
+  // a number if possible. When RAW_INPUT_MODE is enabled, no coercion is done.
   const handleBlur = useCallback(
     (field) => (e) => {
-      if (!NUM_FIELDS.includes(field)) return;
-      const raw = e?.currentTarget?.value ?? '';
+      if (!NUM_FIELDS.includes(field)) {
+        // Non-numeric field: still clear active on blur
+        clearActiveField();
+        return;
+      }
+      const raw = e?.currentTarget?.value ?? "";
       const before = merged[field];
+      if (isRawInputMode) {
+        // Skip coercion; leave as raw string
+        clearActiveField();
+        return;
+      }
       let after;
-      if (raw === '') {
-        after = '';
+      if (raw === "") {
+        after = "";
       } else {
         const num = Number(raw);
-        after = Number.isFinite(num) ? num : '';
+        after = Number.isFinite(num) ? num : "";
       }
-      setConfig((prevConfig) => ({ ...(prevConfig ?? {}), [field]: after }));
-      logBlur({ comp: 'BreakoutConfig', field, before, after });
+      setConfig((prevConfig) => {
+        const updated = { ...(prevConfig ?? {}) };
+        updated[field] = after;
+        return updated;
+      });
+      logBlur({ comp: "BreakoutConfig", field, before, after });
+      // Clear active field after processing
+      clearActiveField();
     },
-    [setConfig, merged]
+    [setConfig, merged, isRawInputMode, clearActiveField]
   );
 
-  // Build a view model that ensures numeric values are always represented as strings for display
+  // Build a view model that ensures numeric values are always represented
+  // as strings for display
   const view = useMemo(() => {
     const v = { ...merged };
     NUM_FIELDS.forEach((k) => {
       const val = merged[k];
-      if (val === '' || val === null || val === undefined) {
-        v[k] = '';
+      if (val === "" || val === null || val === undefined) {
+        v[k] = "";
       } else {
         v[k] = String(val);
       }
@@ -194,53 +314,59 @@ const BreakoutConfig = ({
     return v;
   }, [merged]);
 
-  const priceWins = ['', '30m', '1h', '2h', '4h'];
-  const volumeWins = ['', '30m', '1h', '2h', '4h', '8h'];
+  const priceWins = ["", "30m", "1h", "2h", "4h"];
+  const volumeWins = ["", "30m", "1h", "2h", "4h", "8h"];
 
   const fieldWrap =
-    'relative rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 hover:border-zinc-600 focus-within:border-emerald-500/70 transition';
+    "relative rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 hover:border-zinc-600 focus-within:border-emerald-500/70 transition";
   const inp =
-    'w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 outline-none border-none focus:outline-none';
+    "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 outline-none border-none focus:outline-none";
 
   const errors = validateBreakoutConfig(merged);
   const tabErr = countErrorsForTab(errors);
 
-  const [activeTab, setActiveTab] = useState('core');
+  const [activeTab, setActiveTab] = useState("core");
   const [showRequiredOnly, setShowRequiredOnly] = useState(false);
   // Preset dialog state
   const [showSaveDialog, setShowSaveDialog] = useState(false);
-  const [presetName, setPresetName] = useState('');
+  const [presetName, setPresetName] = useState("");
 
   const doSavePreset = async () => {
     try {
-      const name = (presetName || '').trim();
+      const name = (presetName || "").trim();
       // Normalize numeric fields before saving: coerce to numbers when possible
       const patch = {};
       for (const k of NUM_FIELDS) {
         const raw = merged[k];
-        if (raw === '' || raw === null || raw === undefined) {
-          patch[k] = '';
+        if (raw === "" || raw === null || raw === undefined) {
+          patch[k] = "";
         } else {
           const num = Number(raw);
-          patch[k] = Number.isFinite(num) ? num : '';
+          patch[k] = Number.isFinite(num) ? num : "";
         }
       }
       setConfig((prev) => ({ ...(prev ?? {}), ...patch }));
-      logEffect({ comp: 'BreakoutConfig', reason: 'savePreset', touched: patch });
+      logEffect({
+        comp: "BreakoutConfig",
+        reason: "savePreset",
+        touched: patch,
+      });
       await saveConfig(mode, { ...merged, ...patch }, name);
-      window.dispatchEvent(new CustomEvent('savedConfig:changed', { detail: { mode } }));
-      toast.success(name ? `Saved preset “${name}”` : 'Preset saved');
+      window.dispatchEvent(
+        new CustomEvent("savedConfig:changed", { detail: { mode } })
+      );
+      toast.success(name ? `Saved preset “${name}”` : "Preset saved");
       setShowSaveDialog(false);
-      setPresetName('');
+      setPresetName("");
     } catch (e) {
-      toast.error(e?.message || 'Failed to save preset');
+      toast.error(e?.message || "Failed to save preset");
     }
   };
 
   // Flag for parent modal to suppress close while the save dialog is open
   useEffect(() => {
     if (showSaveDialog) {
-      document.body.dataset.saveOpen = '1';
+      document.body.dataset.saveOpen = "1";
     } else {
       delete document.body.dataset.saveOpen;
     }
@@ -264,9 +390,9 @@ const BreakoutConfig = ({
                 type="text"
                 inputMode="decimal"
                 name="breakoutThreshold"
-                value={view.breakoutThreshold ?? ''}
+                value={view.breakoutThreshold ?? ""}
                 onChange={handleChange}
-                onBlur={handleBlur('breakoutThreshold')}
+                onBlur={handleBlur("breakoutThreshold")}
                 placeholder="e.g. 5"
                 className={inp}
                 disabled={disabled}
@@ -308,9 +434,9 @@ const BreakoutConfig = ({
                 type="text"
                 inputMode="decimal"
                 name="volumeThreshold"
-                value={view.volumeThreshold ?? ''}
+                value={view.volumeThreshold ?? ""}
                 onChange={handleChange}
-                onBlur={handleBlur('volumeThreshold')}
+                onBlur={handleBlur("volumeThreshold")}
                 disabled={disabled}
                 placeholder="e.g. 100000"
                 className={inp}
@@ -355,9 +481,9 @@ const BreakoutConfig = ({
                   type="text"
                   inputMode="decimal"
                   name="volumeSpikeMultiplier"
-                  value={view.volumeSpikeMultiplier ?? ''}
+                  value={view.volumeSpikeMultiplier ?? ""}
                   onChange={handleChange}
-                  onBlur={handleBlur('volumeSpikeMultiplier')}
+                  onBlur={handleBlur("volumeSpikeMultiplier")}
                   disabled={disabled}
                   placeholder="e.g. 2"
                   className={inp}
@@ -375,9 +501,9 @@ const BreakoutConfig = ({
                   type="text"
                   inputMode="decimal"
                   name="minLiquidity"
-                  value={view.minLiquidity ?? ''}
+                  value={view.minLiquidity ?? ""}
                   onChange={handleChange}
-                  onBlur={handleBlur('minLiquidity')}
+                  onBlur={handleBlur("minLiquidity")}
                   disabled={disabled}
                   placeholder="e.g. 200000"
                   className={inp}
@@ -404,9 +530,9 @@ const BreakoutConfig = ({
                 type="text"
                 inputMode="decimal"
                 name="delayBeforeBuyMs"
-                value={view.delayBeforeBuyMs ?? ''}
+                value={view.delayBeforeBuyMs ?? ""}
                 onChange={handleChange}
-                onBlur={handleBlur('delayBeforeBuyMs')}
+                onBlur={handleBlur("delayBeforeBuyMs")}
                 disabled={disabled}
                 placeholder="e.g. 5000"
                 className={inp}
@@ -423,9 +549,9 @@ const BreakoutConfig = ({
                 type="text"
                 inputMode="decimal"
                 name="priorityFeeLamports"
-                value={view.priorityFeeLamports ?? ''}
+                value={view.priorityFeeLamports ?? ""}
                 onChange={handleChange}
-                onBlur={handleBlur('priorityFeeLamports')}
+                onBlur={handleBlur("priorityFeeLamports")}
                 disabled={disabled}
                 placeholder="e.g. 20000"
                 className={inp}
@@ -442,7 +568,7 @@ const BreakoutConfig = ({
               <span>Enable Signals</span>
               <StrategyTooltip name="useSignals" />
             </div>
-            <div className={fieldWrap + ' flex items-center justify-between px-3 py-2'}>
+            <div className={fieldWrap + " flex items-center justify-between px-3 py-2"}>
               <input
                 type="checkbox"
                 name="useSignals"
@@ -451,7 +577,9 @@ const BreakoutConfig = ({
                 disabled={disabled}
                 className="accent-emerald-500 h-4 w-4"
               />
-              <span className="text-xs text-zinc-400">Backend-derived momentum cues</span>
+              <span className="text-xs text-zinc-400">
+                Backend-derived momentum cues
+              </span>
             </div>
           </div>
           {/* Execution shape */}
@@ -463,7 +591,7 @@ const BreakoutConfig = ({
             <div className={fieldWrap}>
               <select
                 name="executionShape"
-                value={view.executionShape ?? ''}
+                value={view.executionShape ?? ""}
                 onChange={handleChange}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
@@ -508,9 +636,9 @@ const BreakoutConfig = ({
                 type="text"
                 inputMode="decimal"
                 name="briberyAmount"
-                value={view.briberyAmount ?? ''}
+                value={view.briberyAmount ?? ""}
                 onChange={handleChange}
-                onBlur={handleBlur('briberyAmount')}
+                onBlur={handleBlur("briberyAmount")}
                 disabled={disabled}
                 placeholder="e.g. 0.002"
                 className={inp}
@@ -543,21 +671,31 @@ const BreakoutConfig = ({
   );
 
   const summaryTokenList = view.overrideMonitored
-    ? ' My Token List'
-    : FEEDS.find((f) => f.value === view.tokenFeed)?.label || 'Custom';
+    ? " My Token List"
+    : FEEDS.find((f) => f.value === view.tokenFeed)?.label || "Custom";
 
   return (
-    <div className="bg-zinc-950/90 text-zinc-200 rounded-xl border border-zinc-800 shadow-xl focus:outline-none">
+    <div
+      className="bg-zinc-950/90 text-zinc-200 rounded-xl border border-zinc-800 shadow-xl focus:outline-none"
+      // Capture focus/blur/select events to track the active field for guard rails
+      onFocusCapture={handleFocusCapture}
+      onBlurCapture={handleBlurCapture}
+      onSelectCapture={handleSelectCapture}
+    >
       {/* Header + Tabs */}
       <div className="p-4 sm:p-5 border-b border-zinc-900 sticky top-0 z-[5] bg-zinc-1000 focus:outline-none">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg sm:text-xl font-semibold tracking-tight flex items-center gap-2">
             Breakout Config
             {isDebug && (
-              <span className="text-xs px-2 py-0.5 rounded bg-emerald-700 text-white">Input Debug ON</span>
+              <span className="text-xs px-2 py-0.5 rounded bg-emerald-700 text-white">
+                Input Debug ON
+              </span>
             )}
             {isRawInputMode && (
-              <span className="text-xs px-2 py-0.5 rounded bg-yellow-700 text-white">RAW INPUT MODE</span>
+              <span className="text-xs px-2 py-0.5 rounded bg-yellow-700 text-white">
+                RAW INPUT MODE
+              </span>
             )}
           </h2>
           <label className="flex items-center gap-3 select-none">
@@ -570,20 +708,38 @@ const BreakoutConfig = ({
             <span className="relative inline-flex h-5 w-9 rounded-full bg-zinc-700 transition-colors peer-checked:bg-emerald-500">
               <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4" />
             </span>
-            <span className="text-xs sm:text-sm text-zinc-300">Required only</span>
+            <span className="text-xs sm:text-sm text-zinc-300">
+              Required only
+            </span>
           </label>
         </div>
         <div className="flex items-center gap-3 sm:gap-4 relative">
-          <TabButton active={activeTab === 'core'} onClick={() => setActiveTab('core')} badge={tabErr.core}>
+          <TabButton
+            active={activeTab === "core"}
+            onClick={() => setActiveTab("core")}
+            badge={tabErr.core}
+          >
             Core
           </TabButton>
-          <TabButton active={activeTab === 'execution'} onClick={() => setActiveTab('execution')} badge={tabErr.execution}>
+          <TabButton
+            active={activeTab === "execution"}
+            onClick={() => setActiveTab("execution")}
+            badge={tabErr.execution}
+          >
             Execution
           </TabButton>
-          <TabButton active={activeTab === 'tokens'} onClick={() => setActiveTab('tokens')} badge={tabErr.tokens}>
+          <TabButton
+            active={activeTab === "tokens"}
+            onClick={() => setActiveTab("tokens")}
+            badge={tabErr.tokens}
+          >
             Token List
           </TabButton>
-          <TabButton active={activeTab === 'advanced'} onClick={() => setActiveTab('advanced')} badge={tabErr.advanced}>
+          <TabButton
+            active={activeTab === "advanced"}
+            onClick={() => setActiveTab("advanced")}
+            badge={tabErr.advanced}
+          >
             Advanced
           </TabButton>
         </div>
@@ -591,7 +747,8 @@ const BreakoutConfig = ({
       {/* Content */}
       <div className="p-4 sm:p-5" data-inside-dialog="1">
         <div className="bg-zinc-900 text-zinc-300 text-xs rounded-md p-2 mb-4">
-          Detects sudden price/volume break-outs on monitored or feed-selected tokens and enters early.
+          Detects sudden price/volume break-outs on monitored or feed-selected
+          tokens and enters early.
         </div>
         {errors.length > 0 && (
           <div className="bg-red-900 text-red-100 text-xs p-2 rounded-md mb-4 border border-red-800 space-y-1">
@@ -600,29 +757,50 @@ const BreakoutConfig = ({
             ))}
           </div>
         )}
-        {activeTab === 'core' && <CoreTab />}
-        {activeTab === 'execution' && <ExecutionTab />}
-        {activeTab === 'tokens' && <TokensTab />}
-        {activeTab === 'advanced' && <AdvancedTab />}
+        {activeTab === "core" && <CoreTab />}
+        {activeTab === "execution" && <ExecutionTab />}
+        {activeTab === "tokens" && <TokensTab />}
+        {activeTab === "advanced" && <AdvancedTab />}
         {/* Strategy Summary */}
         <div className="mt-6 bg-zinc-900 rounded-md p-3">
           <p className="text-xs text-right leading-4">
-            <span className="text-pink-400 font-semibold">Breakout Summary</span> — List:&nbsp;
-            <span className="text-emerald-300 font-semibold">{summaryTokenList}</span>;&nbsp;Pump&nbsp;
-            <span className="text-emerald-300 font-semibold">≥ {view.breakoutThreshold}%</span>
+            <span className="text-pink-400 font-semibold">Breakout Summary</span>
+            &nbsp;— List:&nbsp;
+            <span className="text-emerald-300 font-semibold">
+              {summaryTokenList}
+            </span>
+            ;&nbsp;Pump&nbsp;
+            <span className="text-emerald-300 font-semibold">
+              ≥ {view.breakoutThreshold}%
+            </span>
             &nbsp;in&nbsp;
-            <span className="text-indigo-300 font-semibold">{view.priceWindow || '30m'}</span>;&nbsp;Volume&nbsp;
-            <span className="text-emerald-300 font-semibold">≥ ${(+view.volumeThreshold || 0).toLocaleString()}</span>
+            <span className="text-indigo-300 font-semibold">
+              {view.priceWindow || "30m"}
+            </span>
+            ;&nbsp;Volume&nbsp;
+            <span className="text-emerald-300 font-semibold">
+              ≥ $
+              {(+view.volumeThreshold || 0).toLocaleString()}
+            </span>
             &nbsp;in&nbsp;
-            <span className="text-indigo-300 font-semibold">{view.volumeWindow || '1h'}</span>
+            <span className="text-indigo-300 font-semibold">
+              {view.volumeWindow || "1h"}
+            </span>
             {view.volumeSpikeMultiplier && (
               <>
-                ; Spike × <span className="text-yellow-300 font-semibold">{view.volumeSpikeMultiplier}</span>
+                ; Spike × {" "}
+                <span className="text-yellow-300 font-semibold">
+                  {view.volumeSpikeMultiplier}
+                </span>
               </>
             )}
             {view.minLiquidity && (
               <>
-                ; LP ≥ <span className="text-orange-300 font-semibold">${(+view.minLiquidity || 0).toLocaleString()}</span>
+                ; LP ≥ {" "}
+                <span className="text-orange-300 font-semibold">
+                  $
+                  {(+view.minLiquidity || 0).toLocaleString()}
+                </span>
               </>
             )}
           </p>
@@ -633,9 +811,13 @@ const BreakoutConfig = ({
         <div className="flex items-center justify-between gap-3">
           <div className="text-xs">
             {errors.length > 0 ? (
-              <span className="text-zinc-400">⚠️ {errors.length} validation {errors.length === 1 ? 'issue' : 'issues'}</span>
+              <span className="text-zinc-400">
+                ⚠️ {errors.length} validation {errors.length === 1 ? "issue" : "issues"}
+              </span>
             ) : (
-              <span className="text-emerald-400 drop-shadow-[0_0_6px_rgba(16,185,129,0.8)]">Ready</span>
+              <span className="text-emerald-400 drop-shadow-[0_0_6px_rgba(16,185,129,0.8)]">
+                Ready
+              </span>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -644,7 +826,11 @@ const BreakoutConfig = ({
               onClick={() => {
                 const reset = { ...defaults };
                 setConfig((prev) => ({ ...(prev ?? {}), ...reset }));
-                logEffect({ comp: 'BreakoutConfig', reason: 'reset', touched: reset });
+                logEffect({
+                  comp: "BreakoutConfig",
+                  reason: "reset",
+                  touched: reset,
+                });
               }}
               disabled={disabled}
               className="px-3 py-1.5 text-xs rounded-md border border-zinc-800 hover:border-zinc-700 text-zinc-200"
@@ -667,9 +853,7 @@ const BreakoutConfig = ({
       <Dialog.Root open={showSaveDialog} onOpenChange={setShowSaveDialog}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-fadeIn" />
-          <Dialog.Content
-            className="fixed z-50 top-1/2 left-1/2 w-[380px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl focus:outline-none data-[state=open]:animate-scaleIn"
-          >
+          <Dialog.Content className="fixed z-50 top-1/2 left-1/2 w-[380px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl focus:outline-none data-[state=open]:animate-scaleIn">
             <div className="relative">
               <Dialog.Title className="text-sm font-semibold text-white mb-3 text-center">
                 Save Config Preset

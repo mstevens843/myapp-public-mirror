@@ -1,7 +1,15 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+} from "react";
 import { useUser } from "@/contexts/UserProvider";
+
+// Instrumentation helper (no-ops unless BREAKOUT_DEBUG=1 in localStorage)
+import { logEffect } from "../../dev/inputDebug";
 
 export default function ConfigModal({
   open,
@@ -17,15 +25,77 @@ export default function ConfigModal({
   const { activeWallet } = useUser();
   const contentRef = useRef(null);
 
-  // Keep a working copy while open
+  // Safe setter: preserve active field value while typing
+  const safeSetTempConfig = useCallback(
+    (value) => {
+      const activeField =
+        typeof window !== "undefined" ? window.__BREAKOUT_ACTIVE_FIELD : null;
+
+      if (typeof value === "function") {
+        setTempConfig((prev) => {
+          const updated = value(prev);
+          let result = updated;
+          if (activeField && prev && Object.prototype.hasOwnProperty.call(prev, activeField)) {
+            result = { ...updated, [activeField]: prev[activeField] };
+          }
+          logEffect({
+            comp: "ConfigModal",
+            reason: "safeSetTempConfig function",
+            touched: Object.keys(result),
+          });
+          return result;
+        });
+      } else {
+        const updated = value || {};
+        const result = (() => {
+          if (!activeField) return updated;
+          return { ...updated, [activeField]: tempConfig[activeField] };
+        })();
+        setTempConfig(result);
+        logEffect({
+          comp: "ConfigModal",
+          reason: "safeSetTempConfig object",
+          touched: Object.keys(result),
+        });
+      }
+    },
+    [tempConfig]
+  );
+
+  // Keep a working copy while open, merging walletId and preserving active field
   useEffect(() => {
     if (open) {
-      setTempConfig({
-        ...config,
-        walletId: config?.walletId ?? activeWallet?.id,
-      });
+      const activeField =
+        typeof window !== "undefined" ? window.__BREAKOUT_ACTIVE_FIELD : null;
+      if (activeField) {
+        setTempConfig((prev) => {
+          const merged = {
+            ...prev,
+            ...(config || {}),
+            walletId: config?.walletId ?? activeWallet?.id,
+          };
+          if (prev && Object.prototype.hasOwnProperty.call(prev, activeField)) {
+            merged[activeField] = prev[activeField];
+          }
+          logEffect({
+            comp: "ConfigModal",
+            reason: "sync on open",
+            touched: Object.keys(merged),
+          });
+          return merged;
+        });
+      } else {
+        setTempConfig({
+          ...config,
+          walletId: config?.walletId ?? activeWallet?.id,
+        });
+        logEffect({
+          comp: "ConfigModal",
+          reason: "sync on open",
+          touched: Object.keys(config || {}),
+        });
+      }
     }
-    // NOTE: intentionally *not* depending on tempConfig here
   }, [open, config, activeWallet]);
 
   const handleSave = () => onSave?.(tempConfig);
@@ -55,11 +125,8 @@ export default function ConfigModal({
   };
 
   // --- HOTKEY / FOCUS STEAL GUARD -------------------------------
-  // Stop key events from bubbling to any global handlers that yank focus.
   const handleKeyCapture = useCallback((e) => {
-    // Let Escape reach Radix to close *only* when mini-modal is not up.
     if (e.key === "Escape" && !suppressClose()) return;
-    // Otherwise just stop propagation (do NOT preventDefault) so inputs keep working.
     e.stopPropagation();
   }, []);
   // ---------------------------------------------------------------
@@ -69,7 +136,7 @@ export default function ConfigModal({
       open={open}
       onOpenChange={(v) => {
         if (!v) {
-          if (suppressClose()) return; // block close while mini-modal is up
+          if (suppressClose()) return;
           onClose?.();
         }
       }}
@@ -77,10 +144,9 @@ export default function ConfigModal({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/85 backdrop-blur-sm z-40 data-[state=open]:animate-fadeIn" />
 
-        {/* Use asChild so we control the focusable element */}
         <Dialog.Content
           asChild
-          onOpenAutoFocus={(e) => e.preventDefault()} // stop refocus stealing on open
+          onOpenAutoFocus={(e) => e.preventDefault()}
           onCloseAutoFocus={(e) => e.preventDefault()}
           onEscapeKeyDown={(e) => {
             if (suppressClose()) e.preventDefault();
@@ -88,13 +154,13 @@ export default function ConfigModal({
           onPointerDownOutside={(e) => {
             const t = e?.target;
             if (suppressClose() || isInsideDialogish(t)) {
-              e.preventDefault(); // don't let Radix close
+              e.preventDefault();
             }
           }}
           onInteractOutside={(e) => {
             const t = e?.target;
             if (suppressClose() || isInsideDialogish(t)) {
-              e.preventDefault(); // don't let Radix close
+              e.preventDefault();
             }
           }}
         >
@@ -107,7 +173,6 @@ export default function ConfigModal({
                             focus:outline-none focus-visible:outline-none ring-0`}
             data-inside-dialog="1"
             style={{ outline: "none", boxShadow: "none" }}
-            // Key guards (capture phase) so nothing escapes the dialog
             onKeyDownCapture={handleKeyCapture}
             onKeyUpCapture={(e) => e.stopPropagation()}
             onKeyPressCapture={(e) => e.stopPropagation()}
@@ -130,14 +195,13 @@ export default function ConfigModal({
             <div
               className="space-y-4 max-h-[70vh] overflow-y-auto pr-1 mb-4 overscroll-contain"
               data-inside-dialog="1"
-              // Belt-and-suspenders: also keep events inside the scroll region.
               onKeyDownCapture={handleKeyCapture}
               onKeyUpCapture={(e) => e.stopPropagation()}
               onKeyPressCapture={(e) => e.stopPropagation()}
             >
               {React.cloneElement(children, {
                 config: tempConfig,
-                setConfig: setTempConfig,
+                setConfig: safeSetTempConfig,
                 disabled,
               })}
             </div>

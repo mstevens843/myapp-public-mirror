@@ -1,8 +1,11 @@
 // AdvancedFields.jsx — Turbo-style solid fields + transparent inputs
-import React from "react";
+import React, { useCallback, useMemo } from "react";
 import AdvancedSection from "./AdvancedSection";
 import StrategyTooltip from "../Strategy_Configs/StrategyTooltip";
 import { ChevronDown } from "lucide-react";
+
+// Instrumentation helpers (no-ops unless BREAKOUT_DEBUG=1 in localStorage)
+import { logChange, logBlur, logEffect } from "../../dev/inputDebug";
 
 /* Default advanced inputs (labels aligned with Turbo/Sniper UI) */
 const BASE_FIELDS = [
@@ -27,20 +30,74 @@ export default function AdvancedFields({
 }) {
   const usedFields = fields || BASE_FIELDS;
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setConfig((prev) => ({
-      ...prev,
-      [name]:
-        value === ""
-          ? ""
-          : name === "mevMode"
-          ? value
-          : parseFloat(value),
-    }));
-  };
+  // Build a "view" model: force numbers to display as strings so typing works.
+  const view = useMemo(() => {
+    const v = { ...config };
+    usedFields.forEach(({ name }) => {
+      const val = config[name];
+      if (val === "" || val === null || val === undefined) {
+        v[name] = "";
+      } else {
+        v[name] = String(val);
+      }
+    });
+    return v;
+  }, [config, usedFields]);
 
-  /* Solid container + transparent input pattern (matches Sniper/Turbo) */
+  // Change handler: always set raw string or select value
+  const handleChange = useCallback(
+    (e) => {
+      const { name, type, value, checked } = e.currentTarget;
+      const next = type === "checkbox" ? !!checked : value;
+      setConfig((prev) => {
+        const updated = { ...(prev ?? {}) };
+        updated[name] = next;
+        return updated;
+      });
+      logChange({
+        comp: "AdvancedFields",
+        field: name,
+        raw: value,
+        prev: config[name],
+        next,
+      });
+    },
+    [setConfig, config]
+  );
+
+  // Blur handler: coerce strings → numbers unless RAW_INPUT_MODE is active
+  const handleBlur = useCallback(
+    (field) => (e) => {
+      const raw = e?.currentTarget?.value ?? "";
+      const before = config[field];
+      const isRawInputMode =
+        typeof window !== "undefined" &&
+        window.localStorage?.BREAKOUT_RAW_INPUT_MODE === "1";
+
+      if (isRawInputMode) {
+        logBlur({ comp: "AdvancedFields", field, before, after: raw });
+        return;
+      }
+
+      let after;
+      if (raw === "") {
+        after = "";
+      } else {
+        const num = Number(raw);
+        after = Number.isFinite(num) ? num : "";
+      }
+
+      setConfig((prev) => {
+        const updated = { ...(prev ?? {}) };
+        updated[field] = after;
+        return updated;
+      });
+      logBlur({ comp: "AdvancedFields", field, before, after });
+    },
+    [setConfig, config]
+  );
+
+  /* Styling classes (Turbo/Sniper solid field look) */
   const fieldWrap =
     "relative rounded-md border border-zinc-700 bg-zinc-900 " +
     "px-2 py-1.5 hover:border-zinc-800 focus-within:border-emerald-500 " +
@@ -64,7 +121,7 @@ export default function AdvancedFields({
               <div className={fieldWrap}>
                 <select
                   name="mevMode"
-                  value={config.mevMode ?? ""}
+                  value={view.mevMode ?? ""}
                   onChange={handleChange}
                   disabled={disabled}
                   className={`${inp} appearance-none pr-8`}
@@ -78,11 +135,12 @@ export default function AdvancedFields({
             ) : (
               <div className={fieldWrap}>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   name={name}
-                  step="any"
-                  value={config[name] ?? ""}
+                  value={view[name] ?? ""}
                   onChange={handleChange}
+                  onBlur={handleBlur(name)}
                   placeholder={placeholder}
                   disabled={disabled}
                   className={inp}
