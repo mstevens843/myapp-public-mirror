@@ -1,5 +1,6 @@
 // ScalperConfig.jsx — Tabbed layout (Core / Execution / Token List / Advanced)
-// Solid (non-transparent) backgrounds, darker container, pretty toggle, no “Apply” button
+// Draft-only editing (no keystroke updates to parent).
+// Summary only recomputes on dropdown toggle or Apply/Save.
 
 import React, { useMemo, useEffect, useState } from "react";
 import StrategyTooltip from "./StrategyTooltip";
@@ -110,7 +111,73 @@ const countErrorsForTab = (errors) => {
   return counts;
 };
 
-const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
+/* helpers for parsing/pretty */
+const safeNum = (v) => {
+  const s = (v ?? "").toString().replace(/,/g, "").trim();
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+const pretty = (v) => {
+  const n = safeNum(v);
+  return n === null ? (v ?? "") : n.toLocaleString();
+};
+
+/* Build an aggregated object and a human-readable summary
+   NOTE: This does NOT mutate original fields; it adds _derived + strategySummary. */
+const buildAggregated = (d) => {
+  const list = d.overrideMonitored
+    ? "📝 My Token List"
+    : FEEDS.find((f) => f.value === d.tokenFeed)?.label || "Custom";
+
+  const entryThresholdPct = safeNum(d.entryThreshold);
+  const volumeThresholdUSD = safeNum(d.volumeThreshold);
+  const minMC = safeNum(d.minMarketCap);
+  const maxMC = safeNum(d.maxMarketCap);
+  const spike = safeNum(d.volumeSpikeMultiplier);
+  const priorityFee = safeNum(d.priorityFeeLamports);
+  const briberyAmt = safeNum(d.briberyAmount);
+
+  const summaryText = [
+    `List: ${list}`,
+    `Pump ≥ ${entryThresholdPct ?? d.entryThreshold}% in ${d.priceWindow}`,
+    `Volume ≥ $${pretty(d.volumeThreshold)} in ${d.volumeWindow}`,
+    spike ? `Spike × ${spike}` : null,
+    minMC || maxMC
+      ? `MC ${minMC ? `≥ $${pretty(minMC)}` : ""}${
+          minMC && maxMC ? " / " : ""
+        }${maxMC ? `≤ $${pretty(maxMC)}` : ""}`
+      : null,
+    d.executionShape ? `Exec: ${d.executionShape}` : null,
+    d.mevMode ? `MEV: ${d.mevMode}` : null,
+    priorityFee ? `PriorityFee: ${priorityFee} μlam` : null,
+    briberyAmt ? `Bribe: ${briberyAmt}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return {
+    ...d,
+    _derived: {
+      entryThresholdPct,
+      volumeThresholdUSD,
+      minMarketCapUSD: minMC,
+      maxMarketCapUSD: maxMC,
+      spike,
+      priorityFeeLamportsNum: priorityFee,
+      briberyAmountNum: briberyAmt,
+    },
+    strategySummary: summaryText,
+  };
+};
+
+const ScalperConfig = ({
+  config = {},
+  setConfig,             // parent setter — called ONLY on Apply / SavePreset
+  disabled,
+  children,
+  onSavePreset,          // optional callback(finalAggregated)
+}) => {
   /* defaults */
   const defaults = {
     // Core
@@ -130,41 +197,64 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
     executionShape: "", // "", "TWAP", "ATOMIC"
     priorityFeeLamports: "", // μlam
     mevMode: "fast", // or "secure"
-    briberyAmount: 0.0, // SOL
+    briberyAmount: 0.0, // SOL or lamports label—left as-is
   };
 
-  const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
+  // Merge incoming config with defaults (stable base)
+  const mergedIncoming = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
+
+  // 🔒 LOCAL DRAFT STATE — inputs bind to this only.
+  const [draft, setDraft] = useState(mergedIncoming);
+
+  // Keep draft in sync when parent config changes (e.g. loading a preset)
+useEffect(() => {
+  setDraft({ ...defaults, ...(config ?? {}) });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [config]);
 
   /* options (tight for scalper) */
   const priceWins = ["1m", "5m"];
   const volumeWins = ["1m", "5m"];
 
-  /* Prevent stale window values when coming from other strategies */
+  /* Prevent stale window values when coming from other strategies – local only */
   useEffect(() => {
-    if (!priceWins.includes(merged.priceWindow)) {
-      setConfig((p) => ({ ...p, priceWindow: defaults.priceWindow }));
-    }
-    if (!volumeWins.includes(merged.volumeWindow)) {
-      setConfig((p) => ({ ...p, volumeWindow: defaults.volumeWindow }));
-    }
+    setDraft((d) => {
+      const next = { ...d };
+      if (!priceWins.includes(next.priceWindow)) next.priceWindow = defaults.priceWindow;
+      if (!volumeWins.includes(next.volumeWindow)) next.volumeWindow = defaults.volumeWindow;
+      return next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Local change helpers (no parent updates)
   const change = (e) => {
     const { name, value, type, checked } = e.target;
-    setConfig((prev) => ({
+    setDraft((prev) => ({
       ...prev,
-      [name]:
-        type === "checkbox"
-          ? checked
-          : ["priceWindow", "volumeWindow", "executionShape", "mevMode"].includes(name)
-          ? value
-          : value === ""
-          ? ""
-          : isNaN(Number(value))
-          ? value
-          : parseFloat(value),
+      [name]: type === "checkbox" ? checked : value,
     }));
+  };
+
+  // Coerce numeric-looking strings on blur (strip commas; empty -> "")
+  const coerceNumberOnBlur = (name) => (e) => {
+    const raw = (e.target.value ?? "").trim();
+    if (raw === "") {
+      setDraft((p) => ({ ...p, [name]: "" }));
+      return;
+    }
+    const num = Number(String(raw).replace(/,/g, ""));
+    const normalized = Number.isFinite(num) ? String(num) : raw;
+    setDraft((p) => ({ ...p, [name]: normalized }));
+  };
+
+  // Provide a setConfig-compatible setter for child components (kept local)
+  const setDraftCompat = (update) => {
+    if (typeof update === "function") {
+      setDraft((prev) => update(prev));
+    } else {
+      setDraft((prev) => ({ ...prev, ...(update || {}) }));
+    }
   };
 
   /* solid field container + transparent inputs */
@@ -177,11 +267,27 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
     "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 " +
     "outline-none border-none focus:outline-none";
 
-  const errors = validateScalperConfig(merged, priceWins, volumeWins);
+  // Validate the *draft*
+  const errors = validateScalperConfig(draft, priceWins, volumeWins);
   const tabErr = countErrorsForTab(errors);
 
   const [activeTab, setActiveTab] = useState("core");
   const [showRequiredOnly, setShowRequiredOnly] = useState(false);
+
+  // Collapsible Summary state + snapshot (so it DOES NOT change while typing)
+  const [showSummary, setShowSummary] = useState(false);
+  const [summarySnapshot, setSummarySnapshot] = useState(null);
+
+  const openOrCloseSummary = () => {
+    setShowSummary((prev) => {
+      const next = !prev;
+      if (next) {
+        // Compute snapshot ONLY when opening
+        setSummarySnapshot(buildAggregated(draft));
+      }
+      return next;
+    });
+  };
 
   /* Tabs */
   const CoreTab = () => (
@@ -197,11 +303,12 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
-                step="any"
+                type="text"
+                inputMode="numeric"
                 name="entryThreshold"
-                value={merged.entryThreshold}
+                value={draft.entryThreshold ?? ""}
                 onChange={change}
+                onBlur={coerceNumberOnBlur("entryThreshold")}
                 disabled={disabled}
                 placeholder="e.g. 0.5"
                 className={inp}
@@ -218,7 +325,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="priceWindow"
-                value={merged.priceWindow}
+                value={draft.priceWindow ?? ""}
                 onChange={change}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
@@ -239,11 +346,12 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
-                step="any"
+                type="text"
+                inputMode="numeric"
                 name="volumeThreshold"
-                value={merged.volumeThreshold}
+                value={draft.volumeThreshold ?? ""}
                 onChange={change}
+                onBlur={coerceNumberOnBlur("volumeThreshold")}
                 disabled={disabled}
                 placeholder="e.g. 500"
                 className={inp}
@@ -260,7 +368,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="volumeWindow"
-                value={merged.volumeWindow}
+                value={draft.volumeWindow ?? ""}
                 onChange={change}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
@@ -285,12 +393,14 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
               </div>
               <div className={fieldWrap}>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
                   name="minMarketCap"
-                  value={merged.minMarketCap ?? ""}
+                  value={draft.minMarketCap ?? ""}
                   onChange={change}
+                  onBlur={coerceNumberOnBlur("minMarketCap")}
                   disabled={disabled}
-                  placeholder="e.g. 1000000"
+                  placeholder="e.g. 1,000,000"
                   className={inp}
                 />
               </div>
@@ -304,12 +414,14 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
               </div>
               <div className={fieldWrap}>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
                   name="maxMarketCap"
-                  value={merged.maxMarketCap ?? ""}
+                  value={draft.maxMarketCap ?? ""}
                   onChange={change}
+                  onBlur={coerceNumberOnBlur("maxMarketCap")}
                   disabled={disabled}
-                  placeholder="e.g. 10000000"
+                  placeholder="e.g. 10,000,000"
                   className={inp}
                 />
               </div>
@@ -323,12 +435,12 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
               </div>
               <div className={fieldWrap}>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
                   name="volumeSpikeMultiplier"
-                  step="any"
-                  min={1.1}
-                  value={merged.volumeSpikeMultiplier}
+                  value={draft.volumeSpikeMultiplier ?? ""}
                   onChange={change}
+                  onBlur={coerceNumberOnBlur("volumeSpikeMultiplier")}
                   disabled={disabled}
                   placeholder="e.g. 2"
                   className={inp}
@@ -356,7 +468,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
               <input
                 type="checkbox"
                 name="useSignals"
-                checked={!!merged.useSignals}
+                checked={!!draft.useSignals}
                 onChange={(e) =>
                   change({ target: { name: "useSignals", type: "checkbox", checked: e.target.checked } })
                 }
@@ -376,7 +488,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="executionShape"
-                value={merged.executionShape ?? ""}
+                value={draft.executionShape ?? ""}
                 onChange={change}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
@@ -402,7 +514,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="mevMode"
-                value={merged.mevMode}
+                value={draft.mevMode ?? ""}
                 onChange={change}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
@@ -421,11 +533,12 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
-                step="0.0001"
+                type="text"
+                inputMode="numeric"
                 name="briberyAmount"
-                value={merged.briberyAmount}
+                value={draft.briberyAmount ?? ""}
                 onChange={change}
+                onBlur={coerceNumberOnBlur("briberyAmount")}
                 disabled={disabled}
                 placeholder="e.g. 0.002"
                 className={inp}
@@ -445,10 +558,12 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
+                type="text"
+                inputMode="numeric"
                 name="priorityFeeLamports"
-                value={merged.priorityFeeLamports}
+                value={draft.priorityFeeLamports ?? ""}
                 onChange={change}
+                onBlur={coerceNumberOnBlur("priorityFeeLamports")}
                 disabled={disabled}
                 placeholder="e.g. 20000"
                 className={inp}
@@ -464,7 +579,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
   const TokensTab = () => (
     <Section>
       <Card title="Token List" className="sm:col-span-2">
-        <TokenSourceSelector config={merged} setConfig={setConfig} disabled={disabled} />
+        <TokenSourceSelector config={draft} setConfig={setDraftCompat} disabled={disabled} />
       </Card>
     </Section>
   );
@@ -473,17 +588,39 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
     <>
       <Section>
         <Card title="Advanced" className="sm:col-span-2">
-          <AdvancedFields config={merged} setConfig={setConfig} disabled={disabled} />
+          <AdvancedFields config={draft} setConfig={setDraftCompat} disabled={disabled} />
         </Card>
       </Section>
       {children}
     </>
   );
 
-  /* summary helpers */
-  const summaryTokenList = merged.overrideMonitored
-    ? "📝 My Token List"
-    : FEEDS.find((f) => f.value === merged.tokenFeed)?.label || "Custom";
+  // Actions
+  const handleResetVisible = () => {
+    setDraft((prev) => ({ ...defaults, ...(prev ?? {}) }));
+    // If summary is open, refresh snapshot after reset so it reflects defaults
+    if (showSummary) setSummarySnapshot(buildAggregated({ ...defaults }));
+  };
+
+  const handleApply = () => {
+    const finalCfg = buildAggregated(draft); // aggregate ON APPLY
+    if (typeof setConfig === "function") {
+      // Shallow merge into parent so we don't drop unknown keys the parent might hold
+      setConfig((prev) => ({ ...(prev || {}), ...(finalCfg || {}) }));
+    }
+    // If summary is open, refresh snapshot to reflect committed values
+    if (showSummary) setSummarySnapshot(finalCfg);
+  };
+
+  const handleSavePreset = () => {
+    const finalCfg = buildAggregated(draft); // aggregate ON SAVE
+    if (typeof onSavePreset === "function") {
+      onSavePreset(finalCfg);
+    } else {
+      console.log("💾 Save Preset (aggregated):", finalCfg);
+    }
+    if (showSummary) setSummarySnapshot(finalCfg);
+  };
 
   /* render */
   return (
@@ -543,45 +680,39 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
         {activeTab === "tokens" && <TokensTab />}
         {activeTab === "advanced" && <AdvancedTab />}
 
-        {/* Strategy Summary */}
-        <div className="mt-6 bg-zinc-900 rounded-md p-3">
-          <p className="text-xs text-right leading-4">
-            <span className="text-pink-400 font-semibold">Scalper Summary</span> — List:&nbsp;
-            <span className="text-emerald-300 font-semibold">{summaryTokenList}</span>; &nbsp;Pump{" "}
-            <span className="text-emerald-300 font-semibold">≥ {merged.entryThreshold}%</span>
-            &nbsp;in&nbsp;
-            <span className="text-indigo-300 font-semibold">{merged.priceWindow}</span>; &nbsp;Volume&nbsp;
-            <span className="text-emerald-300 font-semibold">
-              ≥ ${(+merged.volumeThreshold).toLocaleString()}
-            </span>
-            &nbsp;in&nbsp;
-            <span className="text-indigo-300 font-semibold">{merged.volumeWindow}</span>
-            {merged.volumeSpikeMultiplier && (
-              <>
-                ; Spike × <span className="text-yellow-300 font-semibold">{merged.volumeSpikeMultiplier}</span>
-              </>
-            )}
-            {merged.minMarketCap || merged.maxMarketCap ? (
-              <>
-                ; MC&nbsp;
-                {merged.minMarketCap && (
-                  <>
-                    ≥ <span className="text-orange-300 font-semibold">${(+merged.minMarketCap).toLocaleString()}</span>
-                  </>
-                )}
-                {merged.minMarketCap && merged.maxMarketCap && " / "}
-                {merged.maxMarketCap && (
-                  <>
-                    ≤ <span className="text-orange-300 font-semibold">${(+merged.maxMarketCap).toLocaleString()}</span>
-                  </>
-                )}
-              </>
-            ) : null}
-          </p>
+        {/* Collapsible Strategy Summary (snapshot-based) */}
+        <div className="mt-6 bg-zinc-900 rounded-md border border-zinc-800">
+          <button
+            type="button"
+            onClick={openOrCloseSummary}
+            aria-expanded={showSummary}
+            aria-controls="scalper-summary"
+            className="w-full flex items-center justify-between px-3 py-2 text-xs text-zinc-200 hover:text-white"
+            title="Show/hide summary"
+          >
+            <span className="font-semibold">Scalper Summary</span>
+            <ChevronDown
+              className={`w-4 h-4 transition-transform ${showSummary ? "rotate-180" : ""}`}
+            />
+          </button>
+
+          {showSummary && summarySnapshot && (
+            <div id="scalper-summary" className="border-t border-zinc-800 p-3">
+              <p className="text-xs text-right leading-4">
+                <span className="text-pink-400 font-semibold">Scalper Summary</span> —{" "}
+                <span className="text-zinc-200">{summarySnapshot.strategySummary}</span>
+              </p>
+            </div>
+          )}
+          {showSummary && !summarySnapshot && (
+            <div id="scalper-summary" className="border-t border-zinc-800 p-3">
+              <p className="text-xs text-right leading-4 text-zinc-400">No data.</p>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Sticky Footer (no Apply button) */}
+      {/* Sticky Footer */}
       <div className="sticky bottom-0 border-t border-zinc-900 p-3 sm:p-4 bg-zinc-1000 rounded-b-2xl">
         <div className="flex items-center justify-between gap-3">
           <div className="text-xs">
@@ -596,7 +727,7 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setConfig((prev) => ({ ...defaults, ...(prev ?? {}) }))}
+              onClick={handleResetVisible}
               disabled={disabled}
               className="px-3 py-1.5 text-xs rounded-md border border-zinc-800 hover:border-zinc-700 text-zinc-200"
               title="Reset visible values to defaults (non-destructive merge)"
@@ -605,9 +736,19 @@ const ScalperConfig = ({ config = {}, setConfig, disabled, children }) => {
             </button>
             <button
               type="button"
-              onClick={() => {}}
+              onClick={handleApply}
+              disabled={disabled}
+              className="px-3 py-1.5 text-xs rounded-md border border-emerald-600/60 hover:border-emerald-500 text-emerald-300"
+              title="Apply draft to parent config (aggregate on click)"
+            >
+              Apply
+            </button>
+            <button
+              type="button"
+              onClick={handleSavePreset}
               disabled={disabled}
               className="px-3 py-1.5 text-xs rounded-md border border-zinc-800 hover:border-zinc-700 text-zinc-200"
+              title="Save preset (aggregated on click)"
             >
               Save Preset
             </button>

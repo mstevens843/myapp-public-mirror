@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback } from "react";
 import { useUser } from "@/contexts/UserProvider";
 
 export default function ConfigModal({
@@ -9,7 +9,7 @@ export default function ConfigModal({
   onSave,
   strategy = "Strategy",
   config,
-  setConfig,         // forwarded to children via clone
+  setConfig, // forwarded to children via clone
   children,
   disabled = false,
 }) {
@@ -54,6 +54,16 @@ export default function ConfigModal({
     );
   };
 
+  // --- HOTKEY / FOCUS STEAL GUARD -------------------------------
+  // Stop key events from bubbling to any global handlers that yank focus.
+  const handleKeyCapture = useCallback((e) => {
+    // Let Escape reach Radix to close *only* when mini-modal is not up.
+    if (e.key === "Escape" && !suppressClose()) return;
+    // Otherwise just stop propagation (do NOT preventDefault) so inputs keep working.
+    e.stopPropagation();
+  }, []);
+  // ---------------------------------------------------------------
+
   return (
     <Dialog.Root
       open={open}
@@ -70,7 +80,7 @@ export default function ConfigModal({
         {/* Use asChild so we control the focusable element */}
         <Dialog.Content
           asChild
-          onOpenAutoFocus={(e) => e.preventDefault()} // stop refocus stealing
+          onOpenAutoFocus={(e) => e.preventDefault()} // stop refocus stealing on open
           onCloseAutoFocus={(e) => e.preventDefault()}
           onEscapeKeyDown={(e) => {
             if (suppressClose()) e.preventDefault();
@@ -87,19 +97,20 @@ export default function ConfigModal({
               e.preventDefault(); // don't let Radix close
             }
           }}
-          // (optional) helps when nested popovers move focus
-          onFocusCapture={() => {
-            // no-op; ensures content stays mounted while focus moves
-          }}
         >
           <div
             ref={contentRef}
             className={`fixed top-1/2 left-1/2 z-50 ${widthClasses}
-                        -translate-x-1/2 -translate-y-1/2 rounded-2xl
-                        border border-zinc-700 bg-zinc-1000/95 p-6 shadow-2xl
-                        data-[state=open]:animate-scaleIn transition-all
-                        focus:outline-none focus-visible:outline-none ring-0`}
+                            -translate-x-1/2 -translate-y-1/2 rounded-2xl
+                            border border-zinc-700 bg-zinc-1000/95 p-6 shadow-2xl
+                            data-[state=open]:animate-scaleIn transition-all
+                            focus:outline-none focus-visible:outline-none ring-0`}
             data-inside-dialog="1"
+            style={{ outline: "none", boxShadow: "none" }}
+            // Key guards (capture phase) so nothing escapes the dialog
+            onKeyDownCapture={handleKeyCapture}
+            onKeyUpCapture={(e) => e.stopPropagation()}
+            onKeyPressCapture={(e) => e.stopPropagation()}
           >
             {/* Header */}
             <div className="flex justify-between items-center mb-4">
@@ -119,6 +130,10 @@ export default function ConfigModal({
             <div
               className="space-y-4 max-h-[70vh] overflow-y-auto pr-1 mb-4 overscroll-contain"
               data-inside-dialog="1"
+              // Belt-and-suspenders: also keep events inside the scroll region.
+              onKeyDownCapture={handleKeyCapture}
+              onKeyUpCapture={(e) => e.stopPropagation()}
+              onKeyPressCapture={(e) => e.stopPropagation()}
             >
               {React.cloneElement(children, {
                 config: tempConfig,
@@ -128,7 +143,13 @@ export default function ConfigModal({
             </div>
 
             {/* Footer */}
-            <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800 mt-2">
+            <div
+              className="flex justify-end gap-3 pt-4 border-t border-zinc-800 mt-2"
+              data-inside-dialog="1"
+              onKeyDownCapture={handleKeyCapture}
+              onKeyUpCapture={(e) => e.stopPropagation()}
+              onKeyPressCapture={(e) => e.stopPropagation()}
+            >
               <button
                 onClick={handleCancel}
                 className="px-4 py-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white text-sm"

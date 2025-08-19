@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useCallback, useEffect } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
 import StrategyTooltip from "./StrategyTooltip";
 import TokenSourceSelector, { feedOptions as FEEDS } from "./TokenSourceSelector";
 import AdvancedFields from "../ui/AdvancedFields";
@@ -135,8 +136,7 @@ const BreakoutConfig = ({
   // base config coming from parent
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
-  // ---------- LOCAL DRAFT STATE (fixes 1-keystroke freeze) ----------
-  // Keep raw strings for numeric fields locally; only push to parent onBlur/reset/save.
+  // ---------- LOCAL DRAFT STATE ----------
   const initDraftFrom = useCallback((src) => {
     const next = {};
     for (const k of NUM_FIELDS) {
@@ -158,7 +158,7 @@ const BreakoutConfig = ({
   const view = useMemo(() => {
     return { ...merged, ...draft };
   }, [merged, draft]);
-  // -------------------------------------------------------------------
+  // ---------------------------------------
 
   // For non-numeric fields we can write through immediately.
   const setField = useCallback((name, raw, type, checked) => {
@@ -201,7 +201,7 @@ const BreakoutConfig = ({
   const [activeTab, setActiveTab] = useState("core");
   const [showRequiredOnly, setShowRequiredOnly] = useState(false);
 
-  // Save Preset mini-modal
+  // Save Preset dialog state
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [presetName, setPresetName] = useState("");
 
@@ -230,6 +230,7 @@ const BreakoutConfig = ({
     }
   };
 
+  // Flag for parent modal to suppress close while the save dialog is open
   useEffect(() => {
     if (showSaveDialog) {
       document.body.dataset.saveOpen = "1";
@@ -238,16 +239,6 @@ const BreakoutConfig = ({
     }
     return () => { delete document.body.dataset.saveOpen; };
   }, [showSaveDialog]);
-
-  useEffect(() => {
-    if (!showSaveDialog) return;
-    const onKey = (e) => {
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setShowSaveDialog(false); }
-      if (e.key === "Enter")  { e.preventDefault(); e.stopPropagation(); doSavePreset(); }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [showSaveDialog]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const CoreTab = () => (
     <Section>
@@ -577,7 +568,7 @@ const BreakoutConfig = ({
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg sm:text-xl font-semibold tracking-tight">Breakout Config</h2>
 
-          <label className="flex items-center gap-3 select-none">
+        <label className="flex items-center gap-3 select-none">
             <input
               type="checkbox"
               className="sr-only peer"
@@ -681,27 +672,28 @@ const BreakoutConfig = ({
         </div>
       </div>
 
-      {/* Save Preset mini-modal (custom) */}
-      {showSaveDialog && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          role="dialog"
-          aria-modal="true"
-          data-inside-dialog="1"
-        >
-          <div
-            className="relative w-[380px] rounded-2xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl focus:outline-none"
-            data-inside-dialog="1"
+      {/* Save Preset Dialog (Radix) */}
+      <Dialog.Root open={showSaveDialog} onOpenChange={setShowSaveDialog}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-fadeIn" />
+          <Dialog.Content
+            className="fixed z-50 top-1/2 left-1/2 w-[380px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl focus:outline-none data-[state=open]:animate-scaleIn"
           >
-            <button
-              type="button"
-              aria-label="Close"
-              className="absolute top-2 right-2 p-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800"
-              onClick={() => setShowSaveDialog(false)}
-            >
-              <X size={16} />
-            </button>
-            <h3 className="text-sm font-semibold text-white mb-3 text-center">Save Config Preset</h3>
+            <div className="relative">
+              <Dialog.Title className="text-sm font-semibold text-white mb-3 text-center">
+                Save Config Preset
+              </Dialog.Title>
+
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  aria-label="Close"
+                  className="absolute top-2 right-2 p-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800"
+                >
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </div>
 
             <input
               autoFocus
@@ -709,20 +701,18 @@ const BreakoutConfig = ({
               onChange={(e) => setPresetName(e.currentTarget.value)}
               placeholder="Preset name (optional)…"
               className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-              onKeyDownCapture={(e) => {
-                if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); doSavePreset(); }
-                if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setShowSaveDialog(false); }
-              }}
+              // No Enter/Escape handlers: Save is click-only as requested
             />
 
             <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowSaveDialog(false)}
-                className="px-3 py-1.5 text-xs rounded-md bg-zinc-700 hover:bg-zinc-600 text-white"
-              >
-                Cancel
-              </button>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-xs rounded-md bg-zinc-700 hover:bg-zinc-600 text-white"
+                >
+                  Cancel
+                </button>
+              </Dialog.Close>
               <button
                 type="button"
                 onClick={doSavePreset}
@@ -731,9 +721,9 @@ const BreakoutConfig = ({
                 Save
               </button>
             </div>
-          </div>
-        </div>
-      )}
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 };
