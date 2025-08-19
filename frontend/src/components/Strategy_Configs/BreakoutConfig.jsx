@@ -1,3 +1,5 @@
+// src/components/strategies/BreakoutConfig.jsx
+// BreakoutConfig.jsx — tabs hoisted to module scope to prevent input remount/focus loss
 import React, {
   useMemo,
   useState,
@@ -21,7 +23,7 @@ import {
   logFocus,
   logSelection,
   logRender,
-} from "../../dev/inputDebug";
+} from "@/dev/inputDebug";
 
 /* fields required by validator ---------------------------------------- */
 export const OPTIONAL_FIELDS = [
@@ -51,6 +53,15 @@ const NUM_FIELDS = [
   "priorityFeeLamports",
   "briberyAmount",
 ];
+
+/* ---------- UI helpers (module scope; stable identities) ---------- */
+const FIELD_WRAP =
+  "relative rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 hover:border-zinc-600 focus-within:border-emerald-500/70 transition";
+const INP =
+  "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 outline-none border-none focus:outline-none";
+
+const PRICE_WINS = ["", "30m", "1h", "2h", "4h"];
+const VOLUME_WINS = ["", "30m", "1h", "2h", "4h", "8h"];
 
 const Card = ({ title, right, children, className = "" }) => (
   <div
@@ -150,6 +161,326 @@ const countErrorsForTab = (errors) => {
   return counts;
 };
 
+/* ---------- Tab components hoisted to module scope ---------- */
+const CoreTab = React.memo(function CoreTab({
+  view,
+  disabled,
+  handleChange,
+  handleBlur,
+}) {
+  return (
+    <Section>
+      <Card title="Core Filters" className="sm:col-span-2">
+        <div className="grid gap-4 sm:grid-cols-2">
+          {/* Pump threshold */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Pump Threshold (%)</span>
+              <StrategyTooltip name="breakoutThreshold" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <input
+                type="text"
+                inputMode="decimal"
+                name="breakoutThreshold"
+                value={view.breakoutThreshold ?? ""}
+                onChange={handleChange}
+                onBlur={handleBlur("breakoutThreshold")}
+                placeholder="e.g. 5"
+                className={INP}
+                disabled={disabled}
+              />
+            </div>
+          </div>
+          {/* Pump time window */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Pump Time Window</span>
+              <StrategyTooltip name="priceWindow" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <select
+                name="priceWindow"
+                value={view.priceWindow}
+                onChange={handleChange}
+                className={`${INP} appearance-none pr-8`}
+                disabled={disabled}
+              >
+                <option value="">None</option>
+                {PRICE_WINS.map((w) => (
+                  <option key={w} value={w}>
+                    {w}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+            </div>
+          </div>
+          {/* Volume floor */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Volume Floor (USD)</span>
+              <StrategyTooltip name="volumeThreshold" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <input
+                type="text"
+                inputMode="decimal"
+                name="volumeThreshold"
+                value={view.volumeThreshold ?? ""}
+                onChange={handleChange}
+                onBlur={handleBlur("volumeThreshold")}
+                disabled={disabled}
+                placeholder="e.g. 100000"
+                className={INP}
+              />
+            </div>
+          </div>
+          {/* Volume window */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Volume Time Window</span>
+              <StrategyTooltip name="volumeWindow" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <select
+                name="volumeWindow"
+                value={view.volumeWindow}
+                onChange={handleChange}
+                disabled={disabled}
+                className={`${INP} appearance-none pr-8`}
+              >
+                <option value="">None</option>
+                {VOLUME_WINS.map((w) => (
+                  <option key={w} value={w}>
+                    {w}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+            </div>
+          </div>
+        </div>
+        {!(view?.__showRequiredOnly) && (
+          <div className="grid sm:grid-cols-2 gap-4 mt-4">
+            {/* Volume spike */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Volume Spike ×</span>
+                <StrategyTooltip name="volumeSpikeMultiplier" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="volumeSpikeMultiplier"
+                  value={view.volumeSpikeMultiplier ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("volumeSpikeMultiplier")}
+                  disabled={disabled}
+                  placeholder="e.g. 2"
+                  className={INP}
+                />
+              </div>
+            </div>
+            {/* Min liquidity */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Min Liquidity (USD)</span>
+                <StrategyTooltip name="minLiquidity" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="minLiquidity"
+                  value={view.minLiquidity ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("minLiquidity")}
+                  disabled={disabled}
+                  placeholder="e.g. 200000"
+                  className={INP}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+    </Section>
+  );
+});
+
+const ExecutionTab = React.memo(function ExecutionTab({
+  view,
+  disabled,
+  handleChange,
+  handleBlur,
+}) {
+  return (
+    <Section>
+      <Card title="Timing & Fees">
+        <div className="grid gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Delay Before Buy (ms)</span>
+              <StrategyTooltip name="delayBeforeBuyMs" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <input
+                type="text"
+                inputMode="decimal"
+                name="delayBeforeBuyMs"
+                value={view.delayBeforeBuyMs ?? ""}
+                onChange={handleChange}
+                onBlur={handleBlur("delayBeforeBuyMs")}
+                disabled={disabled}
+                placeholder="e.g. 5000"
+                className={INP}
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Priority Fee (μlam)</span>
+              <StrategyTooltip name="priorityFeeLamports" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <input
+                type="text"
+                inputMode="decimal"
+                name="priorityFeeLamports"
+                value={view.priorityFeeLamports ?? ""}
+                onChange={handleChange}
+                onBlur={handleBlur("priorityFeeLamports")}
+                disabled={disabled}
+                placeholder="e.g. 20000"
+                className={INP}
+              />
+            </div>
+          </div>
+        </div>
+      </Card>
+      <Card title="Signals & Execution Shape">
+        <div className="grid gap-4">
+          {/* Toggle signals */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 text-sm font-medium text-zinc-300">
+              <span>Enable Signals</span>
+              <StrategyTooltip name="useSignals" />
+            </div>
+            <div className={FIELD_WRAP + " flex items-center justify-between px-3 py-2"}>
+              <input
+                type="checkbox"
+                name="useSignals"
+                checked={!!view.useSignals}
+                onChange={handleChange}
+                disabled={disabled}
+                className="accent-emerald-500 h-4 w-4"
+              />
+              <span className="text-xs text-zinc-400">
+                Backend-derived momentum cues
+              </span>
+            </div>
+          </div>
+          {/* Execution shape */}
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Execution Shape</span>
+              <StrategyTooltip name="executionShape" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <select
+                name="executionShape"
+                value={view.executionShape ?? ""}
+                onChange={handleChange}
+                disabled={disabled}
+                className={`${INP} appearance-none pr-8`}
+              >
+                <option value="">Default</option>
+                <option value="TWAP">TWAP</option>
+                <option value="ATOMIC">Atomic Scalp</option>
+              </select>
+              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+            </div>
+          </div>
+        </div>
+      </Card>
+      <Card title="MEV Preferences">
+        <div className="grid gap-4">
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>MEV Mode</span>
+              <StrategyTooltip name="mevMode" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <select
+                name="mevMode"
+                value={view.mevMode}
+                onChange={handleChange}
+                disabled={disabled}
+                className={`${INP} appearance-none pr-8`}
+              >
+                <option value="fast">fast</option>
+                <option value="secure">secure</option>
+              </select>
+              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+              <span>Bribery (SOL)</span>
+              <StrategyTooltip name="briberyAmount" />
+            </div>
+            <div className={FIELD_WRAP}>
+              <input
+                type="text"
+                inputMode="decimal"
+                name="briberyAmount"
+                value={view.briberyAmount ?? ""}
+                onChange={handleChange}
+                onBlur={handleBlur("briberyAmount")}
+                disabled={disabled}
+                placeholder="e.g. 0.002"
+                className={INP}
+              />
+            </div>
+          </div>
+        </div>
+      </Card>
+    </Section>
+  );
+});
+
+const TokensTab = React.memo(function TokensTab({ view, setConfig, disabled }) {
+  return (
+    <Section>
+      <Card title="Token List" className="sm:col-span-2">
+        {/* Pass through parent setConfig so selector can write immediately */}
+        <TokenSourceSelector config={view} setConfig={setConfig} disabled={disabled} />
+      </Card>
+    </Section>
+  );
+});
+
+const AdvancedTab = React.memo(function AdvancedTab({
+  view,
+  setConfig,
+  disabled,
+  children,
+}) {
+  return (
+    <>
+      <Section>
+        <Card title="Advanced" className="sm:col-span-2">
+          <AdvancedFields config={view} setConfig={setConfig} disabled={disabled} />
+        </Card>
+      </Section>
+      {children}
+    </>
+  );
+});
+
+/* ---------- Main component ---------- */
 const BreakoutConfig = ({
   config = {},
   setConfig,
@@ -209,6 +540,7 @@ const BreakoutConfig = ({
     },
     []
   );
+
   const handleBlurCapture = useCallback(
     (e) => {
       const name = e?.target?.name;
@@ -220,6 +552,7 @@ const BreakoutConfig = ({
     },
     [clearActiveField]
   );
+
   const handleSelectCapture = useCallback((e) => {
     const name = e?.target?.name;
     if (!name) return;
@@ -248,7 +581,6 @@ const BreakoutConfig = ({
       }
       const prevVal = merged[name];
       setConfig((prevConfig) => {
-        // If this field is currently active, always write through
         const updated = { ...(prevConfig ?? {}) };
         updated[name] = next;
         return updated;
@@ -264,8 +596,7 @@ const BreakoutConfig = ({
     [setConfig, merged]
   );
 
-  // Per-field blur handler for numeric fields. Converts the raw string into
-  // a number if possible. When RAW_INPUT_MODE is enabled, no coercion is done.
+  // Per-field blur handler for numeric fields. Converts the raw string into a number if possible.
   const handleBlur = useCallback(
     (field) => (e) => {
       if (!NUM_FIELDS.includes(field)) {
@@ -299,8 +630,7 @@ const BreakoutConfig = ({
     [setConfig, merged, isRawInputMode, clearActiveField]
   );
 
-  // Build a view model that ensures numeric values are always represented
-  // as strings for display
+  // Build a view model that ensures numeric values are always represented as strings for display
   const view = useMemo(() => {
     const v = { ...merged };
     NUM_FIELDS.forEach((k) => {
@@ -313,14 +643,6 @@ const BreakoutConfig = ({
     });
     return v;
   }, [merged]);
-
-  const priceWins = ["", "30m", "1h", "2h", "4h"];
-  const volumeWins = ["", "30m", "1h", "2h", "4h", "8h"];
-
-  const fieldWrap =
-    "relative rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1.5 hover:border-zinc-600 focus-within:border-emerald-500/70 transition";
-  const inp =
-    "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 outline-none border-none focus:outline-none";
 
   const errors = validateBreakoutConfig(merged);
   const tabErr = countErrorsForTab(errors);
@@ -375,300 +697,8 @@ const BreakoutConfig = ({
     };
   }, [showSaveDialog]);
 
-  const CoreTab = () => (
-    <Section>
-      <Card title="Core Filters" className="sm:col-span-2">
-        <div className="grid gap-4 sm:grid-cols-2">
-          {/* Pump threshold */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Pump Threshold (%)</span>
-              <StrategyTooltip name="breakoutThreshold" />
-            </div>
-            <div className={fieldWrap}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="breakoutThreshold"
-                value={view.breakoutThreshold ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("breakoutThreshold")}
-                placeholder="e.g. 5"
-                className={inp}
-                disabled={disabled}
-              />
-            </div>
-          </div>
-          {/* Pump time window */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Pump Time Window</span>
-              <StrategyTooltip name="priceWindow" />
-            </div>
-            <div className={fieldWrap}>
-              <select
-                name="priceWindow"
-                value={view.priceWindow}
-                onChange={handleChange}
-                className={`${inp} appearance-none pr-8`}
-                disabled={disabled}
-              >
-                <option value="">None</option>
-                {priceWins.map((w) => (
-                  <option key={w} value={w}>
-                    {w}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-            </div>
-          </div>
-          {/* Volume floor */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Volume Floor (USD)</span>
-              <StrategyTooltip name="volumeThreshold" />
-            </div>
-            <div className={fieldWrap}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="volumeThreshold"
-                value={view.volumeThreshold ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("volumeThreshold")}
-                disabled={disabled}
-                placeholder="e.g. 100000"
-                className={inp}
-              />
-            </div>
-          </div>
-          {/* Volume window */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Volume Time Window</span>
-              <StrategyTooltip name="volumeWindow" />
-            </div>
-            <div className={fieldWrap}>
-              <select
-                name="volumeWindow"
-                value={view.volumeWindow}
-                onChange={handleChange}
-                disabled={disabled}
-                className={`${inp} appearance-none pr-8`}
-              >
-                <option value="">None</option>
-                {volumeWins.map((w) => (
-                  <option key={w} value={w}>
-                    {w}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-            </div>
-          </div>
-        </div>
-        {!showRequiredOnly && (
-          <div className="grid sm:grid-cols-2 gap-4 mt-4">
-            {/* Volume spike */}
-            <div className="space-y-1">
-              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                <span>Volume Spike ×</span>
-                <StrategyTooltip name="volumeSpikeMultiplier" />
-              </div>
-              <div className={fieldWrap}>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  name="volumeSpikeMultiplier"
-                  value={view.volumeSpikeMultiplier ?? ""}
-                  onChange={handleChange}
-                  onBlur={handleBlur("volumeSpikeMultiplier")}
-                  disabled={disabled}
-                  placeholder="e.g. 2"
-                  className={inp}
-                />
-              </div>
-            </div>
-            {/* Min liquidity */}
-            <div className="space-y-1">
-              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                <span>Min Liquidity (USD)</span>
-                <StrategyTooltip name="minLiquidity" />
-              </div>
-              <div className={fieldWrap}>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  name="minLiquidity"
-                  value={view.minLiquidity ?? ""}
-                  onChange={handleChange}
-                  onBlur={handleBlur("minLiquidity")}
-                  disabled={disabled}
-                  placeholder="e.g. 200000"
-                  className={inp}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-      </Card>
-    </Section>
-  );
-
-  const ExecutionTab = () => (
-    <Section>
-      <Card title="Timing & Fees">
-        <div className="grid gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Delay Before Buy (ms)</span>
-              <StrategyTooltip name="delayBeforeBuyMs" />
-            </div>
-            <div className={fieldWrap}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="delayBeforeBuyMs"
-                value={view.delayBeforeBuyMs ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("delayBeforeBuyMs")}
-                disabled={disabled}
-                placeholder="e.g. 5000"
-                className={inp}
-              />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Priority Fee (μlam)</span>
-              <StrategyTooltip name="priorityFeeLamports" />
-            </div>
-            <div className={fieldWrap}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="priorityFeeLamports"
-                value={view.priorityFeeLamports ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("priorityFeeLamports")}
-                disabled={disabled}
-                placeholder="e.g. 20000"
-                className={inp}
-              />
-            </div>
-          </div>
-        </div>
-      </Card>
-      <Card title="Signals & Execution Shape">
-        <div className="grid gap-4">
-          {/* Toggle signals */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-sm font-medium text-zinc-300">
-              <span>Enable Signals</span>
-              <StrategyTooltip name="useSignals" />
-            </div>
-            <div className={fieldWrap + " flex items-center justify-between px-3 py-2"}>
-              <input
-                type="checkbox"
-                name="useSignals"
-                checked={!!view.useSignals}
-                onChange={handleChange}
-                disabled={disabled}
-                className="accent-emerald-500 h-4 w-4"
-              />
-              <span className="text-xs text-zinc-400">
-                Backend-derived momentum cues
-              </span>
-            </div>
-          </div>
-          {/* Execution shape */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Execution Shape</span>
-              <StrategyTooltip name="executionShape" />
-            </div>
-            <div className={fieldWrap}>
-              <select
-                name="executionShape"
-                value={view.executionShape ?? ""}
-                onChange={handleChange}
-                disabled={disabled}
-                className={`${inp} appearance-none pr-8`}
-              >
-                <option value="">Default</option>
-                <option value="TWAP">TWAP</option>
-                <option value="ATOMIC">Atomic Scalp</option>
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-            </div>
-          </div>
-        </div>
-      </Card>
-      <Card title="MEV Preferences">
-        <div className="grid gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>MEV Mode</span>
-              <StrategyTooltip name="mevMode" />
-            </div>
-            <div className={fieldWrap}>
-              <select
-                name="mevMode"
-                value={view.mevMode}
-                onChange={handleChange}
-                disabled={disabled}
-                className={`${inp} appearance-none pr-8`}
-              >
-                <option value="fast">fast</option>
-                <option value="secure">secure</option>
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-            </div>
-          </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Bribery (SOL)</span>
-              <StrategyTooltip name="briberyAmount" />
-            </div>
-            <div className={fieldWrap}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="briberyAmount"
-                value={view.briberyAmount ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("briberyAmount")}
-                disabled={disabled}
-                placeholder="e.g. 0.002"
-                className={inp}
-              />
-            </div>
-          </div>
-        </div>
-      </Card>
-    </Section>
-  );
-
-  const TokensTab = () => (
-    <Section>
-      <Card title="Token List" className="sm:col-span-2">
-        {/* Pass through parent setConfig so selector can write immediately */}
-        <TokenSourceSelector config={view} setConfig={setConfig} disabled={disabled} />
-      </Card>
-    </Section>
-  );
-
-  const AdvancedTab = () => (
-    <>
-      <Section>
-        <Card title="Advanced" className="sm:col-span-2">
-          <AdvancedFields config={view} setConfig={setConfig} disabled={disabled} />
-        </Card>
-      </Section>
-      {children}
-    </>
-  );
+  // expose showRequiredOnly to CoreTab via view (read-only) so it can hide optional fields
+  const viewForTabs = useMemo(() => ({ ...view, __showRequiredOnly: showRequiredOnly }), [view, showRequiredOnly]);
 
   const summaryTokenList = view.overrideMonitored
     ? " My Token List"
@@ -687,12 +717,12 @@ const BreakoutConfig = ({
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg sm:text-xl font-semibold tracking-tight flex items-center gap-2">
             Breakout Config
-            {isDebug && (
+            {typeof window !== "undefined" && localStorage.BREAKOUT_DEBUG === "1" && (
               <span className="text-xs px-2 py-0.5 rounded bg-emerald-700 text-white">
                 Input Debug ON
               </span>
             )}
-            {isRawInputMode && (
+            {typeof window !== "undefined" && localStorage.BREAKOUT_RAW_INPUT_MODE === "1" && (
               <span className="text-xs px-2 py-0.5 rounded bg-yellow-700 text-white">
                 RAW INPUT MODE
               </span>
@@ -757,10 +787,35 @@ const BreakoutConfig = ({
             ))}
           </div>
         )}
-        {activeTab === "core" && <CoreTab />}
-        {activeTab === "execution" && <ExecutionTab />}
-        {activeTab === "tokens" && <TokensTab />}
-        {activeTab === "advanced" && <AdvancedTab />}
+        {activeTab === "core" && (
+          <CoreTab
+            view={viewForTabs}
+            disabled={disabled}
+            handleChange={handleChange}
+            handleBlur={handleBlur}
+          />
+        )}
+        {activeTab === "execution" && (
+          <ExecutionTab
+            view={view}
+            disabled={disabled}
+            handleChange={handleChange}
+            handleBlur={handleBlur}
+          />
+        )}
+        {activeTab === "tokens" && (
+          <TokensTab view={view} setConfig={setConfig} disabled={disabled} />
+        )}
+        {activeTab === "advanced" && (
+          <AdvancedTab
+            view={view}
+            setConfig={setConfig}
+            disabled={disabled}
+          >
+            {/** pass through any children after Advanced **/}
+            {typeof children !== "undefined" ? children : null}
+          </AdvancedTab>
+        )}
         {/* Strategy Summary */}
         <div className="mt-6 bg-zinc-900 rounded-md p-3">
           <p className="text-xs text-right leading-4">
@@ -779,8 +834,7 @@ const BreakoutConfig = ({
             </span>
             ;&nbsp;Volume&nbsp;
             <span className="text-emerald-300 font-semibold">
-              ≥ $
-              {(+view.volumeThreshold || 0).toLocaleString()}
+              ≥ ${(+view.volumeThreshold || 0).toLocaleString()}
             </span>
             &nbsp;in&nbsp;
             <span className="text-indigo-300 font-semibold">
@@ -788,7 +842,7 @@ const BreakoutConfig = ({
             </span>
             {view.volumeSpikeMultiplier && (
               <>
-                ; Spike × {" "}
+                ; Spike ×{" "}
                 <span className="text-yellow-300 font-semibold">
                   {view.volumeSpikeMultiplier}
                 </span>
@@ -796,10 +850,9 @@ const BreakoutConfig = ({
             )}
             {view.minLiquidity && (
               <>
-                ; LP ≥ {" "}
+                ; LP ≥{" "}
                 <span className="text-orange-300 font-semibold">
-                  $
-                  {(+view.minLiquidity || 0).toLocaleString()}
+                  ${(+view.minLiquidity || 0).toLocaleString()}
                 </span>
               </>
             )}
@@ -853,47 +906,63 @@ const BreakoutConfig = ({
       <Dialog.Root open={showSaveDialog} onOpenChange={setShowSaveDialog}>
         <Dialog.Portal>
           <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-fadeIn" />
-          <Dialog.Content className="fixed z-50 top-1/2 left-1/2 w-[380px] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl focus:outline-none data-[state=open]:animate-scaleIn">
-            <div className="relative">
-              <Dialog.Title className="text-sm font-semibold text-white mb-3 text-center">
-                Save Config Preset
-              </Dialog.Title>
-              <Dialog.Close asChild>
-                <button
-                  type="button"
-                  aria-label="Close"
-                  className="absolute top-2 right-2 p-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800"
-                >
-                  <X size={16} />
-                </button>
-              </Dialog.Close>
-            </div>
-            <input
-              autoFocus
-              value={presetName}
-              onChange={(e) => setPresetName(e.currentTarget.value)}
-              placeholder="Preset name (optional)…"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            />
-            {/* No Enter/Escape handlers: Save is click-only as requested */}
-            <div className="mt-4 flex justify-end gap-2">
-              <Dialog.Close asChild>
-                <button
-                  type="button"
-                  className="px-3 py-1.5 text-xs rounded-md bg-zinc-700 hover:bg-zinc-600 text-white"
-                >
-                  Cancel
-                </button>
-              </Dialog.Close>
-              <button
-                type="button"
-                onClick={doSavePreset}
-                className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-black font-semibold"
-              >
-                Save
-              </button>
-            </div>
-          </Dialog.Content>
+<Dialog.Content
+  className="fixed z-50 top-1/2 left-1/2 w-[380px] -translate-x-1/2 -translate-y-1/2
+             rounded-xl border border-zinc-800 bg-zinc-950/95
+             p-5 text-zinc-200 shadow-2xl focus:outline-none
+             data-[state=open]:animate-scaleIn"
+>
+  {/* Header */}
+  <div className="relative mb-4">
+    <Dialog.Title className="text-sm font-semibold text-white text-center">
+      Save Config Preset
+    </Dialog.Title>
+    <Dialog.Close asChild>
+      <button
+        type="button"
+        aria-label="Close"
+        className="absolute top-2 right-2 p-1 rounded-md
+                   text-zinc-400 hover:text-white hover:bg-zinc-800"
+      >
+        <X size={16} />
+      </button>
+    </Dialog.Close>
+  </div>
+
+  {/* Input */}
+  <input
+    autoFocus
+    value={presetName}
+    onChange={(e) => setPresetName(e.currentTarget.value)}
+    placeholder="Preset name (optional)…"
+    className="w-full rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2
+               text-sm text-white placeholder:text-zinc-500
+               focus:outline-none focus:ring-1 focus:ring-emerald-500"
+  />
+
+  {/* Footer */}
+  <div className="mt-4 flex justify-end gap-2">
+    <Dialog.Close asChild>
+      <button
+        type="button"
+        className="px-3 py-1.5 text-xs rounded-md border border-zinc-800
+                   bg-zinc-900 hover:bg-zinc-800 text-zinc-200"
+      >
+        Cancel
+      </button>
+    </Dialog.Close>
+    <button
+      type="button"
+      onClick={doSavePreset}
+      className="px-3 py-1.5 text-xs rounded-md bg-emerald-600
+                 hover:bg-emerald-500 text-black font-semibold"
+    >
+      Save
+    </button>
+  </div>
+</Dialog.Content>
+
+
         </Dialog.Portal>
       </Dialog.Root>
     </div>

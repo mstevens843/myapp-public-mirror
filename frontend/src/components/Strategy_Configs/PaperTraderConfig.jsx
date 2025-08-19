@@ -1,7 +1,7 @@
 // PaperTraderConfig.jsx  ✨ Sniper-equivalent UI in permanent dry-run mode
 //-----------------------------------------------------------------------
 
-import React, { useEffect } from "react";
+import React, { useEffect, useCallback } from "react";
 import SniperConfig from "./SniperConfig";
 
 /**
@@ -35,7 +35,7 @@ export default function PaperTraderConfig({
       return { ...next, dryRun: true };
     });
 
-  // ✨ Simulation-specific change handler.
+  // ✨ Simulation-specific change handler (raw strings).
   // Supports dot-notation paths (e.g. "latency.quoteMs").
   const handleSimChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -49,19 +49,37 @@ export default function PaperTraderConfig({
         obj = obj[p];
       }
       const key = path[path.length - 1];
-      let val;
-      if (type === "checkbox") {
-        val = checked;
-      } else if (value === "") {
-        val = "";
-      } else {
-        const num = parseFloat(value);
-        val = isNaN(num) ? value : num;
-      }
+      const val = type === "checkbox" ? checked : value;
       obj[key] = val;
       return next;
     });
   };
+
+  // Coerce numeric fields on blur (only those tagged with data-num="1")
+  const handleSimBlur = useCallback((e) => {
+    const el = e?.currentTarget;
+    if (!el) return;
+    const { name, value, dataset } = el;
+    if (!name || !(dataset && dataset.num === "1")) return;
+    const path = name.split(".");
+    const toNumOrEmpty = (s) => {
+      if (s === "") return "";
+      const n = Number(s);
+      return Number.isFinite(n) ? n : "";
+    };
+    wrappedSetConfig((prev) => {
+      const next = { ...prev };
+      let obj = next;
+      for (let i = 0; i < path.length - 1; i++) {
+        const p = path[i];
+        obj[p] = obj[p] && typeof obj[p] === "object" ? { ...obj[p] } : {};
+        obj = obj[p];
+      }
+      const key = path[path.length - 1];
+      obj[key] = toNumOrEmpty(value ?? "");
+      return next;
+    });
+  }, [wrappedSetConfig]);
 
   const inputCls =
     "pl-3 pr-2 py-2 rounded-md border border-zinc-700 bg-zinc-900 text-white " +
@@ -126,11 +144,12 @@ export default function PaperTraderConfig({
         <label className="flex flex-col text-sm font-medium gap-1">
           <span className="flex items-center gap-1">Slippage Cap (bps)</span>
           <input
-            type="number"
+            type="text" inputMode="decimal" data-num="1"
             name="slippageBpsCap"
             step="any"
             value={config.slippageBpsCap ?? ""}
             onChange={handleSimChange}
+            onBlur={handleSimBlur}
             placeholder="e.g. 50"
             disabled={disabled}
             className={inputCls}
@@ -144,7 +163,7 @@ export default function PaperTraderConfig({
             {["quoteMs", "buildMs", "sendMs", "landMs"].map((key) => (
               <input
                 key={key}
-                type="number"
+                type="text" inputMode="decimal" data-num="1"
                 name={`latency.${key}`}
                 step="any"
                 value={
@@ -153,6 +172,7 @@ export default function PaperTraderConfig({
                     : ""
                 }
                 onChange={handleSimChange}
+                onBlur={handleSimBlur}
                 placeholder={key}
                 disabled={disabled}
                 className={inputCls}
@@ -169,7 +189,7 @@ export default function PaperTraderConfig({
               (key) => (
                 <input
                   key={key}
-                  type="number"
+                  type="text" inputMode="decimal" data-num="1"
                   name={`failureRates.${key}`}
                   step="any"
                   value={
@@ -178,6 +198,7 @@ export default function PaperTraderConfig({
                       : ""
                   }
                   onChange={handleSimChange}
+                  onBlur={handleSimBlur}
                   placeholder={key}
                   disabled={disabled}
                   className={inputCls}
@@ -192,7 +213,7 @@ export default function PaperTraderConfig({
           <label className="flex flex-col text-sm font-medium gap-1">
             <span>Min Parts</span>
             <input
-              type="number"
+              type="text" inputMode="decimal" data-num="1"
               name="partials.minParts"
               step="1"
               value={
@@ -201,6 +222,7 @@ export default function PaperTraderConfig({
                   : ""
               }
               onChange={handleSimChange}
+              onBlur={handleSimBlur}
               placeholder="1"
               disabled={disabled}
               className={inputCls}
@@ -209,7 +231,7 @@ export default function PaperTraderConfig({
           <label className="flex flex-col text-sm font-medium gap-1">
             <span>Max Parts</span>
             <input
-              type="number"
+              type="text" inputMode="decimal" data-num="1"
               name="partials.maxParts"
               step="1"
               value={
@@ -218,6 +240,7 @@ export default function PaperTraderConfig({
                   : ""
               }
               onChange={handleSimChange}
+              onBlur={handleSimBlur}
               placeholder="3"
               disabled={disabled}
               className={inputCls}

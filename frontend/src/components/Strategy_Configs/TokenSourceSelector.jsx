@@ -1,9 +1,7 @@
-// frontend/src/components/Strategy_Configs/TokenSourceSelector.jsx
-
 // TokenSourceSelector.jsx — Two-pane "Variant B" layout (left radio list, right detail)
 // Solid dark UI, emerald accents, inline chart illustration
 
-import React, { useMemo, useCallback } from "react";
+import React, { useMemo } from "react";
 import StrategyTooltip from "./StrategyTooltip";
 import {
   Rocket,
@@ -16,9 +14,6 @@ import {
   ArrowLeftRight,
   Clock,
 } from "lucide-react";
-
-// Instrumentation (no-ops unless BREAKOUT_DEBUG=1 in localStorage)
-import { logChange, logBlur } from "../../dev/inputDebug";
 
 /** Shared feed catalog (exported so parent can read labels for summary) */
 export const feedOptions = [
@@ -39,15 +34,13 @@ export const feedOptions = [
   {
     value: "high-liquidity",
     label: "High Liquidity",
-    title:
-      "Pools with strong depth and tighter spreads—safer execution during volatility.",
+    title: "Pools with strong depth and tighter spreads—safer execution during volatility.",
     icon: Droplet,
   },
   {
     value: "mid-cap-growth",
     label: "Mid-Cap Growth",
-    title:
-      "Mid-cap tokens showing sustained growth and improving market structure.",
+    title: "Mid-cap tokens showing sustained growth and improving market structure.",
     icon: BarChart3,
   },
   {
@@ -65,15 +58,13 @@ export const feedOptions = [
   {
     value: "high-trade",
     label: "High Trade Count",
-    title:
-      "Tokens with elevated transaction count—broad participation / bot interest.",
+    title: "Tokens with elevated transaction count—broad participation / bot interest.",
     icon: ArrowLeftRight,
   },
   {
     value: "recent-good-liquidity",
     label: "Recently Listed + Liquidity",
-    title:
-      "Newly listed tokens that already have solid liquidity provision.",
+    title: "Newly listed tokens that already have solid liquidity provision.",
     icon: Clock,
   },
 ];
@@ -83,11 +74,8 @@ export default function TokenSourceSelector({
   setConfig,
   disabled = false,
 }) {
-  const {
-    tokenFeed = "new",
-    overrideMonitored = false,
-    monitoredTokens = "",
-  } = config || {};
+  const { tokenFeed = "new", overrideMonitored = false, monitoredTokens = "" } =
+    config || {};
 
   const selectedFeed = useMemo(
     () => feedOptions.find((f) => f.value === tokenFeed) || feedOptions[0],
@@ -103,68 +91,20 @@ export default function TokenSourceSelector({
     [monitoredTokens]
   );
 
-  // Functional setter that preserves other keys and plays nice with the
-  // ConfigModal safeSetTempConfig (which preserves the active field).
-  const set = useCallback(
-    (patch) =>
-      setConfig((p) => ({
-        ...(p || {}),
-        ...patch,
-      })),
-    [setConfig]
-  );
+  const set = (patch) =>
+    setConfig((p) => ({
+      ...(p || {}),
+      ...patch,
+    }));
 
-  const onPickFeed = useCallback(
-    (value) => {
-      if (disabled || overrideMonitored) return;
-      const prev = tokenFeed;
-      set({ tokenFeed: value });
-      logChange({
-        comp: "TokenSourceSelector",
-        field: "tokenFeed",
-        prev,
-        raw: value,
-        next: value,
-      });
-    },
-    [disabled, overrideMonitored, tokenFeed, set]
-  );
+  const onPickFeed = (value) => {
+    if (disabled || overrideMonitored) return;
+    set({ tokenFeed: value });
+  };
 
-  const onToggleOverride = useCallback(
-    (checked) => {
-      const prev = !!overrideMonitored;
-      set({ overrideMonitored: checked });
-      logChange({
-        comp: "TokenSourceSelector",
-        field: "overrideMonitored",
-        prev,
-        raw: checked,
-        next: checked,
-      });
-    },
-    [overrideMonitored, set]
-  );
-
-  const onChangeTokens = useCallback(
-    (e) => {
-      const value = e.target.value;
-      const prev = monitoredTokens;
-      // Write raw string; no coercion here (Breakout RAW mode + blur policies apply elsewhere)
-      set({ monitoredTokens: value });
-      logChange({
-        comp: "TokenSourceSelector",
-        field: "monitoredTokens",
-        prev,
-        raw: value,
-        next: value,
-      });
-    },
-    [monitoredTokens, set]
-  );
-
-  const onBlurTokens = useCallback(() => {
-    logBlur({ comp: "TokenSourceSelector", field: "monitoredTokens" });
-  }, []);
+  const onToggleOverride = (checked) => {
+    set({ overrideMonitored: checked });
+  };
 
   return (
     <div className="mt-2 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] gap-4">
@@ -302,8 +242,7 @@ export default function TokenSourceSelector({
               name="monitoredTokens"
               rows={4}
               value={monitoredTokens}
-              onChange={onChangeTokens}
-              onBlur={onBlurTokens}
+              onChange={(e) => set({ monitoredTokens: e.target.value })}
               placeholder="Mint addresses…"
               className="w-full resize-y bg-transparent px-2 py-2 text-sm text-white placeholder:text-zinc-500 outline-none"
               disabled={disabled || !overrideMonitored}
@@ -314,9 +253,7 @@ export default function TokenSourceSelector({
               When “Use My Token List” is enabled, the feed is ignored.
             </p>
             <p className="text-[11px] text-zinc-400">
-              {overrideMonitored
-                ? `Detected: ${tokenCount} token${tokenCount === 1 ? "" : "s"}`
-                : "—"}
+              {overrideMonitored ? `Detected: ${tokenCount} token${tokenCount === 1 ? "" : "s"}` : "—"}
             </p>
           </div>
         </div>

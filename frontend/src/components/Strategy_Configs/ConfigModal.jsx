@@ -1,3 +1,4 @@
+// frontend/src/components/Strategy_Configs/ConfigModal.jsx
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import React, {
@@ -25,78 +26,154 @@ export default function ConfigModal({
   const { activeWallet } = useUser();
   const contentRef = useRef(null);
 
-  // Safe setter: preserve active field value while typing
+  // Helper to read the currently focused field name
+  const getActiveField = () =>
+    typeof window !== "undefined" ? window.__BREAKOUT_ACTIVE_FIELD : null;
+
+  /**
+   * safeSetTempConfig:
+   * - Allows direct edits to the active field (keep the user's new value).
+   * - If an incoming patch/effect tries to touch the active field while typing,
+   *   preserve the previous value (guard against clobbering).
+   */
   const safeSetTempConfig = useCallback(
     (value) => {
-      const activeField =
-        typeof window !== "undefined" ? window.__BREAKOUT_ACTIVE_FIELD : null;
+      const activeField = getActiveField();
 
       if (typeof value === "function") {
         setTempConfig((prev) => {
-          const updated = value(prev);
-          let result = updated;
-          if (activeField && prev && Object.prototype.hasOwnProperty.call(prev, activeField)) {
-            result = { ...updated, [activeField]: prev[activeField] };
+          const prevObj = prev ?? {};
+          const nextObj = value(prevObj) ?? {};
+
+          // Use the user-provided next object as the base
+          const result = { ...nextObj };
+
+          if (activeField) {
+            const prevHas = Object.prototype.hasOwnProperty.call(prevObj, activeField);
+            const nextHas = Object.prototype.hasOwnProperty.call(nextObj, activeField);
+            const userEditedActive =
+              nextHas && nextObj[activeField] !== prevObj[activeField];
+
+            // If this update did NOT explicitly change the active field,
+            // keep the previous active value to avoid clobbering in-progress typing.
+            if (!userEditedActive && prevHas) {
+              result[activeField] = prevObj[activeField];
+            }
           }
+
           logEffect({
             comp: "ConfigModal",
-            reason: "safeSetTempConfig function",
+            reason: "safeSetTempConfig(function)",
             touched: Object.keys(result),
           });
           return result;
         });
       } else {
-        const updated = value || {};
-        const result = (() => {
-          if (!activeField) return updated;
-          return { ...updated, [activeField]: tempConfig[activeField] };
-        })();
-        setTempConfig(result);
-        logEffect({
-          comp: "ConfigModal",
-          reason: "safeSetTempConfig object",
-          touched: Object.keys(result),
+        setTempConfig((prev) => {
+          const prevObj = prev ?? {};
+          const patch = value || {};
+
+          // Merge patch with previous
+          const result = { ...prevObj, ...patch };
+
+          if (activeField) {
+            const prevHas = Object.prototype.hasOwnProperty.call(prevObj, activeField);
+            const patchTouches =
+              Object.prototype.hasOwnProperty.call(patch, activeField) &&
+              patch[activeField] !== prevObj[activeField];
+
+            // If a non-user merge touches the active field, restore prev
+            if (!patchTouches && prevHas) {
+              result[activeField] = prevObj[activeField];
+            }
+          }
+
+          logEffect({
+            comp: "ConfigModal",
+            reason: "safeSetTempConfig(object)",
+            touched: Object.keys(result),
+          });
+          return result;
         });
       }
     },
-    [tempConfig]
+    []
   );
 
-  // Keep a working copy while open, merging walletId and preserving active field
+  // Expose for console debugging
   useEffect(() => {
-    if (open) {
-      const activeField =
-        typeof window !== "undefined" ? window.__BREAKOUT_ACTIVE_FIELD : null;
-      if (activeField) {
-        setTempConfig((prev) => {
-          const merged = {
-            ...prev,
-            ...(config || {}),
-            walletId: config?.walletId ?? activeWallet?.id,
-          };
-          if (prev && Object.prototype.hasOwnProperty.call(prev, activeField)) {
-            merged[activeField] = prev[activeField];
-          }
-          logEffect({
-            comp: "ConfigModal",
-            reason: "sync on open",
-            touched: Object.keys(merged),
-          });
-          return merged;
-        });
-      } else {
-        setTempConfig({
-          ...config,
-          walletId: config?.walletId ?? activeWallet?.id,
-        });
-        logEffect({
-          comp: "ConfigModal",
-          reason: "sync on open",
-          touched: Object.keys(config || {}),
-        });
-      }
+    if (typeof window !== "undefined") {
+      window.__BREAKOUT_SAFE_SET = safeSetTempConfig;
     }
-  }, [open, config, activeWallet]);
+  }, [safeSetTempConfig]);
+
+  // Keep a live mirror for console: window.__BREAKOUT_TEMP_CONFIG
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.__BREAKOUT_TEMP_CONFIG = tempConfig;
+    }
+  }, [tempConfig]);
+
+  // ---- initial sync: run ONCE per open, StrictMode-proof, never while typing
+  const didInitialSyncRef = useRef(false);
+  // StrictMode sentinel that survives remounts and strategy changes
+  const SENTINEL_KEY = "__BREAKOUT_LAST_MODAL_SYNC__";
+  const lastSyncRef = useRef(0); // also keep in-ref for non-window environments
+
+  useEffect(() => {
+    if (!open) {
+      didInitialSyncRef.current = false;
+      return;
+    }
+    if (didInitialSyncRef.current) return;
+
+    // If already have a populated config, skip resync (prevents StrictMode double)
+    if (tempConfig && Object.keys(tempConfig).length > 0) {
+      logEffect({
+        comp: "ConfigModal",
+        reason: "skip sync (already populated)",
+        touched: Object.keys(tempConfig),
+      });
+      didInitialSyncRef.current = true;
+      return;
+    }
+
+    // If a field is active, delay sync
+    if (getActiveField()) return;
+
+    didInitialSyncRef.current = true; // set before mutating state
+
+    setTempConfig(() => {
+      const merged = {
+        ...(config || {}),
+        walletId: config?.walletId ?? activeWallet?.id,
+      };
+      logEffect({
+        comp: "ConfigModal",
+        reason: "sync on open (final guarded)",
+        touched: Object.keys(merged),
+      });
+      return merged;
+    });
+  }, [open, activeWallet?.id, strategy]);
+
+  // Keep walletId fresh while open (safe to update independently)
+  useEffect(() => {
+    if (!open) return;
+    const id = activeWallet?.id;
+    if (!id) return;
+    setTempConfig((prev) => {
+      const prevObj = prev ?? {};
+      if (prevObj.walletId === id) return prevObj;
+      const next = { ...prevObj, walletId: id };
+      logEffect({
+        comp: "ConfigModal",
+        reason: "walletId sync",
+        touched: ["walletId"],
+      });
+      return next;
+    });
+  }, [open, activeWallet?.id]);
 
   const handleSave = () => onSave?.(tempConfig);
   const handleCancel = () => onClose?.();
@@ -144,8 +221,9 @@ export default function ConfigModal({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 bg-black/85 backdrop-blur-sm z-40 data-[state=open]:animate-fadeIn" />
 
+        {/* NOTE: no `asChild` to avoid Radix "{undefined} for {DialogContent}" warning */}
         <Dialog.Content
-          asChild
+          ref={contentRef}
           onOpenAutoFocus={(e) => e.preventDefault()}
           onCloseAutoFocus={(e) => e.preventDefault()}
           onEscapeKeyDown={(e) => {
@@ -163,70 +241,66 @@ export default function ConfigModal({
               e.preventDefault();
             }
           }}
+          className={`fixed top-1/2 left-1/2 z-50 ${widthClasses}
+            -translate-x-1/2 -translate-y-1/2 rounded-2xl
+            border border-zinc-700 bg-zinc-1000/95 p-6 shadow-2xl
+            data-[state=open]:animate-scaleIn transition-all
+            focus:outline-none focus-visible:outline-none ring-0`}
+          style={{ outline: "none", boxShadow: "none" }}
+          data-inside-dialog="1"
+          onKeyDownCapture={handleKeyCapture}
+          onKeyUpCapture={(e) => e.stopPropagation()}
+          onKeyPressCapture={(e) => e.stopPropagation()}
         >
+          {/* Header */}
+          <div className="flex justify-between items-center mb-4">
+            <Dialog.Title className="text-lg font-bold text-white tracking-wide">
+              {strategy} Config
+            </Dialog.Title>
+            <button
+              onClick={handleCancel}
+              className="text-zinc-400 hover:text-white transition"
+              aria-label="Close"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          {/* Body */}
           <div
-            ref={contentRef}
-            className={`fixed top-1/2 left-1/2 z-50 ${widthClasses}
-                            -translate-x-1/2 -translate-y-1/2 rounded-2xl
-                            border border-zinc-700 bg-zinc-1000/95 p-6 shadow-2xl
-                            data-[state=open]:animate-scaleIn transition-all
-                            focus:outline-none focus-visible:outline-none ring-0`}
+            className="space-y-4 max-h-[70vh] overflow-y-auto pr-1 mb-4 overscroll-contain"
             data-inside-dialog="1"
-            style={{ outline: "none", boxShadow: "none" }}
             onKeyDownCapture={handleKeyCapture}
             onKeyUpCapture={(e) => e.stopPropagation()}
             onKeyPressCapture={(e) => e.stopPropagation()}
           >
-            {/* Header */}
-            <div className="flex justify-between items-center mb-4">
-              <Dialog.Title className="text-lg font-bold text-white tracking-wide">
-                {strategy} Config
-              </Dialog.Title>
-              <button
-                onClick={handleCancel}
-                className="text-zinc-400 hover:text-white transition"
-                aria-label="Close"
-              >
-                <X size={18} />
-              </button>
-            </div>
+            {React.cloneElement(children, {
+              config: tempConfig,
+              setConfig: safeSetTempConfig,
+              disabled,
+            })}
+          </div>
 
-            {/* Body */}
-            <div
-              className="space-y-4 max-h-[70vh] overflow-y-auto pr-1 mb-4 overscroll-contain"
-              data-inside-dialog="1"
-              onKeyDownCapture={handleKeyCapture}
-              onKeyUpCapture={(e) => e.stopPropagation()}
-              onKeyPressCapture={(e) => e.stopPropagation()}
+          {/* Footer */}
+          <div
+            className="flex justify-end gap-3 pt-4 border-t border-zinc-800 mt-2"
+            data-inside-dialog="1"
+            onKeyDownCapture={handleKeyCapture}
+            onKeyUpCapture={(e) => e.stopPropagation()}
+            onKeyPressCapture={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={handleCancel}
+              className="px-4 py-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white text-sm"
             >
-              {React.cloneElement(children, {
-                config: tempConfig,
-                setConfig: safeSetTempConfig,
-                disabled,
-              })}
-            </div>
-
-            {/* Footer */}
-            <div
-              className="flex justify-end gap-3 pt-4 border-t border-zinc-800 mt-2"
-              data-inside-dialog="1"
-              onKeyDownCapture={handleKeyCapture}
-              onKeyUpCapture={(e) => e.stopPropagation()}
-              onKeyPressCapture={(e) => e.stopPropagation()}
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              className="px-4 py-2 rounded-md text-black text-sm font-semibold bg-emerald-500 hover:bg-emerald-600"
             >
-              <button
-                onClick={handleCancel}
-                className="px-4 py-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                className="px-4 py-2 rounded-md text-black text-sm font-semibold bg-emerald-500 hover:bg-emerald-600"
-              >
-                Save &amp; Apply
-              </button>
-            </div>
+              Save &amp; Apply
+            </button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
