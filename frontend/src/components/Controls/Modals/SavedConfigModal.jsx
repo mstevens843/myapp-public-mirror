@@ -246,7 +246,7 @@ export default function SavedConfigModal({
 
   /* ───────── FILTER / SORT ────── */
   useEffect(() => {
-    let arr=[...configs];
+    let arr = Array.isArray(configs) ? [...configs] : [];
     if(query) arr = arr.filter(c => c.strategy.toLowerCase().includes(query.toLowerCase()));
     arr.sort(sortBy==="fields"
       ? (a,b)=>Object.keys(b.config).length - Object.keys(a.config).length
@@ -403,7 +403,7 @@ if (SAFETY_KEYS.includes(k)) {
   return (
     <div key={k} className={wrap}>
       <label className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
-{L(subKey)}
+{L(k)}
         <span
           className={`inline-flex h-5 w-10 items-center rounded-full transition ${
             editing.config[k] ? "bg-emerald-500" : "bg-zinc-600"
@@ -505,7 +505,8 @@ if (!isNaN(+v)) {
   }
 
     /* string dropdown with custom fallback */
-    const opts=[...new Set(configs.map(c=>c.config[k]).filter(s=>typeof s==="string"&&s.trim()))];
+    const baseList = Array.isArray(configs) ? configs : [];
+    const opts=[...new Set(baseList.map(c=>c?.config?.[k]).filter(s=>typeof s==="string"&&s.trim()))];
     if (editing.config[k] && !opts.includes(editing.config[k])) opts.unshift(editing.config[k]);
 
     return (

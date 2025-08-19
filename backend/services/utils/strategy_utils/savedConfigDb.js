@@ -15,9 +15,14 @@ module.exports = {
     });
   },
 
-  async listPresets(userId) {
+  // Accept optional `mode` filter to support /list-configs?mode=...
+  async listPresets(userId, mode = null) {
     return prisma.SavedConfigs.findMany({
-      where: { userId, isSaved: true },
+      where: {
+        userId,
+        isSaved: true,
+        ...(mode ? { strategyName: mode } : {}),
+      },
       orderBy: { savedAt: "desc" },
       select: {
         id: true,
@@ -29,18 +34,16 @@ module.exports = {
     });
   },
 
-
-
   async updatePreset({ id, userId, name, cfg }) {
-  return prisma.SavedConfigs.update({
-    where: { id, userId },
-    data: {
-      name,
-      extras   : cfg,
-      savedAt  : new Date(),     // bump timestamp
-    },
-  });
-},
+    return prisma.SavedConfigs.update({
+      where: { id, userId },
+      data: {
+        name,
+        extras: cfg,
+        savedAt: new Date(), // bump timestamp
+      },
+    });
+  },
 
   async deletePreset(userId, id) {
     return prisma.SavedConfigs.deleteMany({

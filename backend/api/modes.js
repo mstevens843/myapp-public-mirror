@@ -310,42 +310,23 @@ router.get('/status/detailed', requireAuth, async (req, res) => {
 
 /* ───────────  Saved-config convenience endpoints (unchanged)  ─────────── */
 
-/* ───── POST /save-config ───────────── */
+/* POST /save-config */
 router.post('/save-config', async (req, res) => {
   const { mode, config, name = '' } = req.body;
   if (!mode || !config) return res.status(400).json({ error: 'mode & config required' });
   try {
-    /* ------------------------------------------------------------------
-     * 1) Strip all runtime-only keys – we only want reusable bot settings
-     * ---------------------------------------------------------------- */
     const RUNTIME_KEYS = [
-      'botId',
-      'pid',
-      'walletId',
-      'wallet',
-      'walletIds',
-      'wallets',
-      'userId',
-      'mode',
-      'status',
-      'startTime',
-      'startedAt',
-      'pausedAt',
-      'stoppedAt',
-      'lastTickAt',
+      'botId','pid','walletId','wallet','walletIds','wallets','userId','mode','status',
+      'startTime','startedAt','pausedAt','stoppedAt','lastTickAt',
     ];
     const cleanCfg = Object.fromEntries(
       Object.entries(config).filter(([k]) => !RUNTIME_KEYS.includes(k))
     );
-    /* 2) Persist preset – strategyName is the rail selection you passed in
-     *    (`sniper`, `scalper`, …) so there’s zero chance of “scheduleLauncher”
-     *    leaking in again.
-     */
     const row = await savedSvc.savePreset({
       userId: req.user.id,
-      mode, // <- becomes SavedConfigs.strategyName
+      mode,
       name,
-      cfg: cleanCfg, // <- cleaned config blob
+      cfg: cleanCfg,
     });
     res.json({ message: 'saved', id: row.id });
   } catch (err) {
@@ -354,26 +335,49 @@ router.post('/save-config', async (req, res) => {
   }
 });
 
-/* ───── GET /load-configs ───────────── */
+/* GET /list-configs  (normalized shape) */
 router.get('/list-configs', async (req, res) => {
   const { mode } = req.query;
   try {
-    const configs = await savedSvc.listPresets(req.user.id, mode);
-    res.json(configs);
+    const rows = await savedSvc.listPresets(req.user.id, mode);
+    const configs = rows.map((r) => ({
+      id: r.id,
+      strategy: r.strategyName,
+      name: r.name || "",
+      savedAt: r.savedAt,
+      config: r.extras || {},
+    }));
+    res.json({ configs });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'failed', details: err.message });
   }
 });
 
-/* ───── DELETE /delete-config ───────── */
+/* PUT /edit-config/:id */
+router.put('/edit-config/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const { name = "", config } = req.body || {};
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid id' });
+  if (!config || typeof config !== 'object') return res.status(400).json({ error: 'config required' });
+  try {
+    const row = await savedSvc.updatePreset({ id, userId: req.user.id, name, cfg: config });
+    res.json({ ok: true, id: row.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'failed', details: err.message });
+  }
+});
+
+/* DELETE /delete-config/:id  (fix arg order) */
 router.delete('/delete-config/:id', async (req, res) => {
   try {
-    await savedSvc.deletePreset(req.params.id, req.user.id);
+    await savedSvc.deletePreset(req.user.id, req.params.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'failed', details: err.message });
   }
 });
+
 
 module.exports = router;

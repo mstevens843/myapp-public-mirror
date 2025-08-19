@@ -1,11 +1,10 @@
-// BreakoutConfig.jsx — Tabbed layout (Core / Execution / Token List / Advanced)
-// Solid dark UI, emerald accents, vertical inputs per card, glowy “Ready”
-
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useCallback, useEffect } from "react";
 import StrategyTooltip from "./StrategyTooltip";
 import TokenSourceSelector, { feedOptions as FEEDS } from "./TokenSourceSelector";
 import AdvancedFields from "../ui/AdvancedFields";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
+import { toast } from "sonner";
+import { saveConfig } from "@/utils/autobotApi";
 
 export const OPTIONAL_FIELDS = [
   "priceWindow",
@@ -24,7 +23,17 @@ export const OPTIONAL_FIELDS = [
 
 export const REQUIRED_FIELDS = ["breakoutThreshold", "volumeThreshold"];
 
-/* shared UI helpers (solid backgrounds) */
+// numeric fields we edit as raw strings (no coercion until blur/save)
+const NUM_FIELDS = [
+  "breakoutThreshold",
+  "volumeThreshold",
+  "volumeSpikeMultiplier",
+  "minLiquidity",
+  "delayBeforeBuyMs",
+  "priorityFeeLamports",
+  "briberyAmount",
+];
+
 const Card = ({ title, right, children, className = "" }) => (
   <div className={`bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 sm:p-4 ${className}`}>
     {(title || right) && (
@@ -43,6 +52,7 @@ const Section = ({ children }) => (
 
 const TabButton = ({ active, onClick, children, badge }) => (
   <button
+    type="button"
     onClick={onClick}
     className={`relative px-3 sm:px-4 py-2 text-sm transition
       ${active ? "text-zinc-100" : "text-zinc-400 hover:text-zinc-200"}`}
@@ -60,7 +70,6 @@ const TabButton = ({ active, onClick, children, badge }) => (
   </button>
 );
 
-/* tab key mapping for simple validation badges */
 const TAB_KEYS = {
   core: [
     "breakoutThreshold", "priceWindow",
@@ -95,8 +104,13 @@ const countErrorsForTab = (errors) => {
   return counts;
 };
 
-const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
-  /* defaults ----------------------------------------------------------- */
+const BreakoutConfig = ({
+  config = {},
+  setConfig,
+  disabled,
+  children,
+  mode = "breakout",
+}) => {
   const defaults = {
     // Core
     breakoutThreshold     : 5,
@@ -111,48 +125,130 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
 
     // Execution
     useSignals            : false,
-    executionShape        : "",         // "", "TWAP", "ATOMIC"
+    executionShape        : "",
     delayBeforeBuyMs      : "",
-    priorityFeeLamports   : "",         // μlam
-    mevMode               : "fast",     // or "secure"
-    briberyAmount         : 0.0,        // SOL, optional
+    priorityFeeLamports   : "",
+    mevMode               : "fast",
+    briberyAmount         : 0.0,
   };
 
+  // base config coming from parent
   const merged = useMemo(() => ({ ...defaults, ...(config ?? {}) }), [config]);
 
-  const change = (e) => {
-    const { name, value, type, checked } = e.target;
-    setConfig((prev) => ({
-      ...prev,
-      [name]:
-        type === "checkbox"
-          ? checked
-          : ["priceWindow", "volumeWindow", "executionShape", "mevMode"].includes(name)
-          ? value
-          : value === "" ? "" : (isNaN(Number(value)) ? value : parseFloat(value)),
-    }));
+  // ---------- LOCAL DRAFT STATE (fixes 1-keystroke freeze) ----------
+  // Keep raw strings for numeric fields locally; only push to parent onBlur/reset/save.
+  const initDraftFrom = useCallback((src) => {
+    const next = {};
+    for (const k of NUM_FIELDS) {
+      const v = src?.[k];
+      next[k] = (v === "" || v === null || v === undefined) ? "" : String(v);
+    }
+    return next;
+  }, []);
+
+  const [draft, setDraft] = useState(() => initDraftFrom(merged));
+
+  // When parent config changes externally (open/reset/preset load), resync draft.
+  useEffect(() => {
+    setDraft(initDraftFrom(merged));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initDraftFrom, merged.breakoutThreshold, merged.volumeThreshold, merged.volumeSpikeMultiplier, merged.minLiquidity, merged.delayBeforeBuyMs, merged.priorityFeeLamports, merged.briberyAmount]);
+
+  // View model: show draft values for numeric fields; everything else from merged.
+  const view = useMemo(() => {
+    return { ...merged, ...draft };
+  }, [merged, draft]);
+  // -------------------------------------------------------------------
+
+  // For non-numeric fields we can write through immediately.
+  const setField = useCallback((name, raw, type, checked) => {
+    if (type === "checkbox") {
+      setConfig((prev) => ({ ...(prev || {}), [name]: !!checked }));
+      return;
+    }
+    // If it's one of our numeric fields, keep it in local draft only (no parent write yet).
+    if (NUM_FIELDS.includes(name)) {
+      setDraft((d) => ({ ...d, [name]: raw }));
+    } else {
+      setConfig((prev) => ({ ...(prev || {}), [name]: raw }));
+    }
+  }, [setConfig]);
+
+  // On blur for numeric inputs: parse and push to parent; keep draft as typed.
+  const coerceNumberOnBlur = (name) => (e) => {
+    const raw = e?.currentTarget?.value ?? "";
+    if (raw === "") {
+      setConfig((prev) => ({ ...(prev || {}), [name]: "" }));
+      return;
+    }
+    const num = Number(raw);
+    setConfig((prev) => ({ ...(prev || {}), [name]: Number.isFinite(num) ? num : "" }));
   };
 
   const priceWins  = ["", "30m","1h","2h","4h"];
   const volumeWins = ["", "30m","1h","2h","4h","8h"];
 
-  /* solid field container + transparent inputs */
   const fieldWrap =
     "relative rounded-md border border-zinc-700 bg-zinc-900 " +
-    "px-2 py-1.5 hover:border-zinc-800 focus-within:border-emerald-500 " +
-    "focus-within:ring-2 focus-within:ring-emerald-500/20 transition";
-
+    "px-2 py-1.5 hover:border-zinc-600 focus-within:border-emerald-500/70 transition";
   const inp =
     "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 " +
     "outline-none border-none focus:outline-none";
 
-  const errors = validateBreakoutConfig(merged);
+  const errors = validateBreakoutConfig(view);
   const tabErr = countErrorsForTab(errors);
 
   const [activeTab, setActiveTab] = useState("core");
   const [showRequiredOnly, setShowRequiredOnly] = useState(false);
 
-  /* Tabs --------------------------------------------------------------- */
+  // Save Preset mini-modal
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [presetName, setPresetName] = useState("");
+
+  const doSavePreset = async () => {
+    try {
+      const name = (presetName || "").trim();
+      // Push current draft into parent before save to ensure numbers are parsed
+      const patch = {};
+      for (const k of NUM_FIELDS) {
+        const raw = draft[k];
+        if (raw === "" || raw === null || raw === undefined) patch[k] = "";
+        else {
+          const num = Number(raw);
+          patch[k] = Number.isFinite(num) ? num : "";
+        }
+      }
+      setConfig((prev) => ({ ...(prev || {}), ...patch }));
+
+      await saveConfig(mode, { ...merged, ...patch }, name);
+      window.dispatchEvent(new CustomEvent("savedConfig:changed", { detail: { mode } }));
+      toast.success(name ? `Saved preset “${name}”` : "Preset saved");
+      setShowSaveDialog(false);
+      setPresetName("");
+    } catch (e) {
+      toast.error(e?.message || "Failed to save preset");
+    }
+  };
+
+  useEffect(() => {
+    if (showSaveDialog) {
+      document.body.dataset.saveOpen = "1";
+    } else {
+      delete document.body.dataset.saveOpen;
+    }
+    return () => { delete document.body.dataset.saveOpen; };
+  }, [showSaveDialog]);
+
+  useEffect(() => {
+    if (!showSaveDialog) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setShowSaveDialog(false); }
+      if (e.key === "Enter")  { e.preventDefault(); e.stopPropagation(); doSavePreset(); }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [showSaveDialog]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const CoreTab = () => (
     <Section>
       <Card title="Core Filters" className="sm:col-span-2">
@@ -165,11 +261,14 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 name="breakoutThreshold"
-                step="any"
-                value={merged.breakoutThreshold}
-                onChange={change}
+                value={view.breakoutThreshold ?? ""}
+                onChange={(e) =>
+                  setField("breakoutThreshold", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                }
+                onBlur={coerceNumberOnBlur("breakoutThreshold")}
                 placeholder="e.g. 5"
                 className={inp}
                 disabled={disabled}
@@ -186,13 +285,13 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="priceWindow"
-                value={merged.priceWindow}
-                onChange={change}
+                value={view.priceWindow}
+                onChange={(e) => setField("priceWindow", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)}
                 className={`${inp} appearance-none pr-8`}
                 disabled={disabled}
               >
                 <option value="">None</option>
-                {priceWins.map((w) => <option key={w}>{w}</option>)}
+                {priceWins.map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
               <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none"/>
             </div>
@@ -206,10 +305,14 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 name="volumeThreshold"
-                value={merged.volumeThreshold}
-                onChange={change}
+                value={view.volumeThreshold ?? ""}
+                onChange={(e) =>
+                  setField("volumeThreshold", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                }
+                onBlur={coerceNumberOnBlur("volumeThreshold")}
                 disabled={disabled}
                 placeholder="e.g. 100000"
                 className={inp}
@@ -226,13 +329,13 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="volumeWindow"
-                value={merged.volumeWindow}
-                onChange={change}
+                value={view.volumeWindow}
+                onChange={(e) => setField("volumeWindow", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
               >
                 <option value="">None</option>
-                {volumeWins.map((w) => <option key={w}>{w}</option>)}
+                {volumeWins.map((w) => <option key={w} value={w}>{w}</option>)}
               </select>
               <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none"/>
             </div>
@@ -240,49 +343,53 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
         </div>
 
         {!showRequiredOnly && (
-          <>
+          <div className="grid sm:grid-cols-2 gap-4 mt-4">
             {/* Volume spike */}
-            <div className="grid sm:grid-cols-2 gap-4 mt-4">
-              <div className="space-y-1">
-                <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                  <span>Volume Spike ×</span>
-                  <StrategyTooltip name="volumeSpikeMultiplier" />
-                </div>
-                <div className={fieldWrap}>
-                  <input
-                    type="number"
-                    name="volumeSpikeMultiplier"
-                    step="any"
-                    min={1.1}
-                    value={merged.volumeSpikeMultiplier}
-                    onChange={change}
-                    disabled={disabled}
-                    placeholder="e.g. 2"
-                    className={inp}
-                  />
-                </div>
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Volume Spike ×</span>
+                <StrategyTooltip name="volumeSpikeMultiplier" />
               </div>
-
-              {/* Min liquidity */}
-              <div className="space-y-1">
-                <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                  <span>Min Liquidity (USD)</span>
-                  <StrategyTooltip name="minLiquidity" />
-                </div>
-                <div className={fieldWrap}>
-                  <input
-                    type="number"
-                    name="minLiquidity"
-                    value={merged.minLiquidity ?? ""}
-                    onChange={change}
-                    disabled={disabled}
-                    placeholder="e.g. 200000"
-                    className={inp}
-                  />
-                </div>
+              <div className={fieldWrap}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="volumeSpikeMultiplier"
+                  value={view.volumeSpikeMultiplier ?? ""}
+                  onChange={(e) =>
+                    setField("volumeSpikeMultiplier", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                  }
+                  onBlur={coerceNumberOnBlur("volumeSpikeMultiplier")}
+                  disabled={disabled}
+                  placeholder="e.g. 2"
+                  className={inp}
+                />
               </div>
             </div>
-          </>
+
+            {/* Min liquidity */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Min Liquidity (USD)</span>
+                <StrategyTooltip name="minLiquidity" />
+              </div>
+              <div className={fieldWrap}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="minLiquidity"
+                  value={view.minLiquidity ?? ""}
+                  onChange={(e) =>
+                    setField("minLiquidity", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                  }
+                  onBlur={coerceNumberOnBlur("minLiquidity")}
+                  disabled={disabled}
+                  placeholder="e.g. 200000"
+                  className={inp}
+                />
+              </div>
+            </div>
+          </div>
         )}
       </Card>
     </Section>
@@ -290,7 +397,6 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
 
   const ExecutionTab = () => (
     <Section>
-      {/* Timing & Fees — VERTICAL inputs inside each card */}
       <Card title="Timing & Fees">
         <div className="grid gap-4">
           <div className="space-y-1">
@@ -300,10 +406,14 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 name="delayBeforeBuyMs"
-                value={merged.delayBeforeBuyMs}
-                onChange={change}
+                value={view.delayBeforeBuyMs ?? ""}
+                onChange={(e) =>
+                  setField("delayBeforeBuyMs", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                }
+                onBlur={coerceNumberOnBlur("delayBeforeBuyMs")}
                 disabled={disabled}
                 placeholder="e.g. 5000"
                 className={inp}
@@ -318,10 +428,14 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 name="priorityFeeLamports"
-                value={merged.priorityFeeLamports}
-                onChange={change}
+                value={view.priorityFeeLamports ?? ""}
+                onChange={(e) =>
+                  setField("priorityFeeLamports", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                }
+                onBlur={coerceNumberOnBlur("priorityFeeLamports")}
                 disabled={disabled}
                 placeholder="e.g. 20000"
                 className={inp}
@@ -343,15 +457,9 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
               <input
                 type="checkbox"
                 name="useSignals"
-                checked={!!merged.useSignals}
+                checked={!!view.useSignals}
                 onChange={(e) =>
-                  change({
-                    target: {
-                      name: "useSignals",
-                      type: "checkbox",
-                      checked: e.target.checked,
-                    },
-                  })
+                  setField("useSignals", e.currentTarget.value, "checkbox", e.currentTarget.checked)
                 }
                 disabled={disabled}
                 className="accent-emerald-500 h-4 w-4"
@@ -371,8 +479,10 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="executionShape"
-                value={merged.executionShape ?? ""}
-                onChange={change}
+                value={view.executionShape ?? ""}
+                onChange={(e) =>
+                  setField("executionShape", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                }
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
               >
@@ -396,8 +506,8 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
             <div className={fieldWrap}>
               <select
                 name="mevMode"
-                value={merged.mevMode}
-                onChange={change}
+                value={view.mevMode}
+                onChange={(e) => setField("mevMode", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)}
                 disabled={disabled}
                 className={`${inp} appearance-none pr-8`}
               >
@@ -410,16 +520,19 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
 
           <div className="space-y-1">
             <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Bribery Lamports (SOL)</span>
+              <span>Bribery (SOL)</span>
               <StrategyTooltip name="briberyAmount" />
             </div>
             <div className={fieldWrap}>
               <input
-                type="number"
-                step="0.0001"
+                type="text"
+                inputMode="decimal"
                 name="briberyAmount"
-                value={merged.briberyAmount}
-                onChange={change}
+                value={view.briberyAmount ?? ""}
+                onChange={(e) =>
+                  setField("briberyAmount", e.currentTarget.value, e.currentTarget.type, e.currentTarget.checked)
+                }
+                onBlur={coerceNumberOnBlur("briberyAmount")}
                 disabled={disabled}
                 placeholder="e.g. 0.002"
                 className={inp}
@@ -434,7 +547,8 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
   const TokensTab = () => (
     <Section>
       <Card title="Token List" className="sm:col-span-2">
-        <TokenSourceSelector config={merged} setConfig={setConfig} disabled={disabled}/>
+        {/* Pass through parent setConfig so selector can write immediately */}
+        <TokenSourceSelector config={view} setConfig={setConfig} disabled={disabled}/>
       </Card>
     </Section>
   );
@@ -443,33 +557,32 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
     <>
       <Section>
         <Card title="Advanced" className="sm:col-span-2">
-          <AdvancedFields config={merged} setConfig={setConfig} disabled={disabled}/>
+          <AdvancedFields config={view} setConfig={setConfig} disabled={disabled}/>
         </Card>
       </Section>
       {children}
     </>
   );
 
-  /* summary helpers */
-  const summaryTokenList = merged.overrideMonitored
+  const summaryTokenList = view.overrideMonitored
     ? "📝 My Token List"
-    : (FEEDS.find(f => f.value === merged.tokenFeed)?.label || "Custom");
+    : (FEEDS.find(f => f.value === view.tokenFeed)?.label || "Custom");
 
-  /* render ------------------------------------------------------------- */
   return (
-    <div className="bg-zinc-950/90 text-zinc-200 rounded-xl border border-zinc-800 shadow-xl">
+    <div
+      className="bg-zinc-950/90 text-zinc-200 rounded-xl border border-zinc-800 shadow-xl focus:outline-none"
+    >
       {/* Header + Tabs */}
-      <div className="p-4 sm:p-5 border-b border-zinc-900 sticky top-0 z-[5] bg-zinc-1000">
+      <div className="p-4 sm:p-5 border-b border-zinc-900 sticky top-0 z-[5] bg-zinc-1000 focus:outline-none">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg sm:text-xl font-semibold tracking-tight">Breakout Config</h2>
 
-          {/* Pretty toggle */}
           <label className="flex items-center gap-3 select-none">
             <input
               type="checkbox"
               className="sr-only peer"
               checked={showRequiredOnly}
-              onChange={(e) => setShowRequiredOnly(e.target.checked)}
+              onChange={(e) => setShowRequiredOnly(e.currentTarget.checked)}
             />
             <span className="relative inline-flex h-5 w-9 rounded-full bg-zinc-700 transition-colors peer-checked:bg-emerald-500">
               <span className="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white transition-transform peer-checked:translate-x-4" />
@@ -487,7 +600,7 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
       </div>
 
       {/* Content */}
-      <div className="p-4 sm:p-5">
+      <div className="p-4 sm:p-5" data-inside-dialog="1">
         <div className="bg-zinc-900 text-zinc-300 text-xs rounded-md p-2 mb-4">
           🚀 Detects sudden price/volume break-outs on monitored or feed-selected tokens and enters early.
         </div>
@@ -508,27 +621,27 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
           <p className="text-xs text-right leading-4">
             <span className="text-pink-400 font-semibold">Breakout Summary</span> — List:&nbsp;
             <span className="text-emerald-300 font-semibold">{summaryTokenList}</span>;
-            &nbsp;Pump <span className="text-emerald-300 font-semibold">≥ {merged.breakoutThreshold}%</span>
-            &nbsp;in&nbsp;<span className="text-indigo-300 font-semibold">{merged.priceWindow || "30m"}</span>;
+            &nbsp;Pump <span className="text-emerald-300 font-semibold">≥ {view.breakoutThreshold}%</span>
+            &nbsp;in&nbsp;<span className="text-indigo-300 font-semibold">{view.priceWindow || "30m"}</span>;
             &nbsp;Volume&nbsp;
             <span className="text-emerald-300 font-semibold">
-              ≥ ${(+merged.volumeThreshold).toLocaleString()}
+              ≥ ${(+view.volumeThreshold || 0).toLocaleString()}
             </span>
-            &nbsp;in&nbsp;<span className="text-indigo-300 font-semibold">{merged.volumeWindow || "1h"}</span>
-            {merged.volumeSpikeMultiplier && (
-              <>; Spike × <span className="text-yellow-300 font-semibold">{merged.volumeSpikeMultiplier}</span></>
+            &nbsp;in&nbsp;<span className="text-indigo-300 font-semibold">{view.volumeWindow || "1h"}</span>
+            {view.volumeSpikeMultiplier && (
+              <>; Spike × <span className="text-yellow-300 font-semibold">{view.volumeSpikeMultiplier}</span></>
             )}
-            {merged.minLiquidity && (
+            {view.minLiquidity && (
               <>; LP ≥ <span className="text-orange-300 font-semibold">
-                ${(+merged.minLiquidity).toLocaleString()}
+                ${(+view.minLiquidity || 0).toLocaleString()}
               </span></>
             )}
           </p>
         </div>
       </div>
 
-      {/* Sticky Footer (no Apply button) */}
-      <div className="sticky bottom-0 border-t border-zinc-900 p-3 sm:p-4 bg-zinc-1000 rounded-b-2xl">
+      {/* Sticky Footer */}
+      <div className="sticky bottom-0 border-t border-zinc-900 p-3 sm:p-4 bg-zinc-1000 rounded-b-2xl" data-inside-dialog="1">
         <div className="flex items-center justify-between gap-3">
           <div className="text-xs">
             {errors.length > 0 ? (
@@ -544,16 +657,21 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setConfig((prev) => ({ ...defaults, ...(prev ?? {}) }))}
+              onClick={() => {
+                // reset BOTH parent config and local draft
+                const reset = { ...defaults };
+                setConfig((prev) => ({ ...(prev ?? {}), ...reset }));
+                setDraft(initDraftFrom(reset));
+              }}
               disabled={disabled}
               className="px-3 py-1.5 text-xs rounded-md border border-zinc-800 hover:border-zinc-700 text-zinc-200"
-              title="Reset visible values to defaults (non-destructive merge)"
+              title="Reset this section to defaults"
             >
               Reset
             </button>
             <button
               type="button"
-              onClick={() => {/* keep for parity */}}
+              onClick={() => setShowSaveDialog(true)}
               disabled={disabled}
               className="px-3 py-1.5 text-xs rounded-md border border-zinc-800 hover:border-zinc-700 text-zinc-200"
             >
@@ -562,6 +680,60 @@ const BreakoutConfig = ({ config = {}, setConfig, disabled, children }) => {
           </div>
         </div>
       </div>
+
+      {/* Save Preset mini-modal (custom) */}
+      {showSaveDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          role="dialog"
+          aria-modal="true"
+          data-inside-dialog="1"
+        >
+          <div
+            className="relative w-[380px] rounded-2xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl focus:outline-none"
+            data-inside-dialog="1"
+          >
+            <button
+              type="button"
+              aria-label="Close"
+              className="absolute top-2 right-2 p-1 rounded-md text-zinc-400 hover:text-white hover:bg-zinc-800"
+              onClick={() => setShowSaveDialog(false)}
+            >
+              <X size={16} />
+            </button>
+            <h3 className="text-sm font-semibold text-white mb-3 text-center">Save Config Preset</h3>
+
+            <input
+              autoFocus
+              value={presetName}
+              onChange={(e) => setPresetName(e.currentTarget.value)}
+              placeholder="Preset name (optional)…"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              onKeyDownCapture={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); doSavePreset(); }
+                if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setShowSaveDialog(false); }
+              }}
+            />
+
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSaveDialog(false)}
+                className="px-3 py-1.5 text-xs rounded-md bg-zinc-700 hover:bg-zinc-600 text-white"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={doSavePreset}
+                className="px-3 py-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-black font-semibold"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

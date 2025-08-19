@@ -199,15 +199,35 @@ export const saveConfig = async (mode, config, name = "") => {
 export const listSavedConfigs = async () => {
   try {
     const res = await authFetch("/api/mode/list-configs");
-    const data = await res.json();
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_) {}
     if (!res.ok) {
-      track("bot_error", {
-        action: "listSavedConfigs",
-        error: data.error,
-      });
-      throw new Error(data.error || "Failed to list saved configs");
+      const msg = (data && data.error) || res.statusText || "Failed to list saved configs";
+      track("bot_error", { action: "listSavedConfigs", error: msg });
+      throw new Error(msg);
     }
-    return data.configs; // [{id, strategy, name, savedAt, config}]
+
+    // Robust normalization: accept either {configs:[...]} or a raw array.
+    let list = [];
+    if (Array.isArray(data?.configs)) {
+      list = data.configs;
+    } else if (Array.isArray(data)) {
+      // Map legacy/raw rows (strategyName/extras) to UI contract.
+      list = data.map((row) => ({
+        id: row.id,
+        strategy: row.strategy ?? row.strategyName ?? row.mode ?? "unknown",
+        name: row.name ?? "",
+        savedAt: row.savedAt ?? row.updatedAt ?? null,
+        config: row.config ?? row.extras ?? {},
+      }));
+    } else if (data && Array.isArray(data.items)) {
+      list = data.items;
+    } else {
+      list = [];
+    }
+    return list; // [{id, strategy, name, savedAt, config}]
   } catch (err) {
     track("bot_error", { action: "listSavedConfigs", error: err.message });
     throw err;
@@ -221,10 +241,7 @@ export const deleteSavedConfig = async (id) => {
     });
     const data = await res.json();
     if (!res.ok) {
-      track("bot_error", {
-        action: "deleteSavedConfig",
-        error: data.error,
-      });
+      track("bot_error", { action: "deleteSavedConfig", error: data.error });
       throw new Error(data.error || "Failed to delete config");
     }
   } catch (err) {
@@ -240,12 +257,14 @@ export const editSavedConfig = async (id, config, name = "") => {
       body: JSON.stringify({ name, config }),
     });
     if (!res.ok) {
-      const { error } = await res.json();
-      track("bot_error", {
-        action: "editSavedConfig",
-        error: error,
-      });
-      throw new Error(error || "Failed to update config");
+      // Try to surface server message if available
+      let msg = "Failed to update config";
+      try {
+        const { error } = await res.json();
+        if (error) msg = error;
+      } catch (_) {}
+      track("bot_error", { action: "editSavedConfig", error: msg });
+      throw new Error(msg);
     }
   } catch (err) {
     track("bot_error", { action: "editSavedConfig", error: err.message });

@@ -169,12 +169,13 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     select: { mevMode: true, briberyAmount: true, defaultPriorityFee: true },
   });
 
-  const mevMode            = userPrefs?.mevMode || "fast";
-  const briberyAmount      = userPrefs?.briberyAmount ?? 0;
-  const shared             = mevMode === "secure";
-  const priorityFeeLamports = toNum(metaPriority) ?? toNum(userPrefs?.defaultPriorityFee) ?? 0;
+  const mevMode              = userPrefs?.mevMode || "fast";
+  const bribeSol             = Number(userPrefs?.briberyAmount ?? 0);   // stored in SOL now
+  const bribeLamports        = Math.floor(bribeSol * 1e9);
+  const shared               = mevMode === "secure";
+  const priorityFeeLamports  = toNum(metaPriority) ?? toNum(userPrefs?.defaultPriorityFee) ?? 0;
 
-  console.log("🛡️ Using MEV prefs:", { mevMode, shared, briberyAmount, priorityFeeLamports });
+  console.log("🛡️ Using MEV prefs:", { mevMode, shared, bribeSol, bribeLamports, priorityFeeLamports });
 
   let txHash = null;
   // optional quorum wiring (env or meta)
@@ -196,7 +197,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         wallet,
         shared,
         priorityFee: priorityFeeLamports,
-        briberyAmount,
+        tipLamports: bribeLamports,  
         // quorum injection (keeps tight loop clean)
         privateRpcUrl: process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL,
         skipPreflight: true,
@@ -263,6 +264,10 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       closedOutAmount: BigInt(0),
       strategy,
       txHash,
+      userId,
+      walletId,
+      walletLabel,
+      botId: meta.botId || strategy,
       unit:
         quote.inputMint === SOL_MINT ? "sol" :
         quote.inputMint === USDC_MINT ? "usdc" : "spl",
@@ -271,12 +276,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       usdValue,
       type: "buy",
       side: "buy",
-      botId: meta.botId || strategy,
-      walletId,
-      walletLabel,
       mevMode,
       priorityFee: priorityFeeLamports,
-      briberyAmount,
+      briberyAmount: bribeLamports,
       mevShared: shared,
       inputMint: quote.inputMint,
       outputMint: quote.outputMint,
@@ -324,7 +326,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       slippage,
       mevMode,
       priorityFee: priorityFeeLamports,
-      briberyAmount,
+      briberyAmount: bribeLamports,
       mevShared: shared,
       inputMint: quote.inputMint,
       outputMint: quote.outputMint,

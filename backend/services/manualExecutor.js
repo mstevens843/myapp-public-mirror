@@ -224,11 +224,12 @@ async function performManualBuy(opts) {
 
   /* MEV / bribery / priority-fee */
   const mevMode        = (prefs?.mevMode === "secure" ? "secure" : "fast");
-  const briberyAmount  = prefs?.briberyAmount ?? 0;
+  const bribeSol      = Number(prefs?.briberyAmount ?? 0);   // stored in SOL now
+  const bribeLamports = Math.floor(bribeSol * 1e9);
   const priorityFeeToUse =
     prefs?.defaultPriorityFee !== undefined ? prefs.defaultPriorityFee : 0;
   const shared         = mevMode === "secure";
-  console.log("🛡️ MEV settings:", { mevMode, shared, priorityFeeToUse, briberyAmount });
+  console.log("🛡️ MEV settings:", { mevMode, shared, priorityFeeToUse, bribeSol, bribeLamports });
 
   /* ── wallet row ──────────────────────────────────────────────────────────── */
   const walletRow = await prisma.wallet.findUnique({
@@ -275,14 +276,15 @@ async function performManualBuy(opts) {
   // ❌❌ Old executor-level TTL/dup suppression removed.
   // We now rely on the route’s jobRunner + clientOrderId for idempotency.
 
-  console.log("⚙️ Applied user prefs for manual buy:", {
-    slippageInput,
-    slippageToUse,
-    maxSlippage: prefs?.defaultMaxSlippage,
-    priorityFeeToUse,
-    mevMode,
-    briberyAmount,
-  });
+console.log("⚙️ Applied user prefs for manual sell:", {
+  slippageInput: slippageInput,
+  slippageToUse,
+  maxSlippage: prefs?.defaultMaxSlippage,
+  priorityFeeToUse,         // ✅ defined now
+  mevMode,
+  bribeSol,                 // ✅ log both for clarity
+  bribeLamports,
+});
 
   const slippageBps = Math.round(Number(slippageToUse) * 100);
 
@@ -302,7 +304,7 @@ async function performManualBuy(opts) {
       wallet,
       shared,                                 // MEV secure?
       priorityFee: priorityFeeToUse,          // µ-lamports
-      briberyAmount,                          // lamports
+      tipLamports: bribeLamports,                              // lamports
     });
   } catch (err) {
     const msg = err?.message || "";
@@ -355,7 +357,7 @@ async function performManualBuy(opts) {
       entryPrice: entryPriceSOL,
       entryPriceUSD,
       mevMode,
-      briberyAmount,
+      briberyAmount: bribeLamports,    // ✅ store lamports
       priorityFee: priorityFeeToUse,
       shared,
     });
@@ -383,7 +385,7 @@ async function performManualBuy(opts) {
         walletId: walletRow.id,
         mevMode,
         priorityFee: priorityFeeToUse,
-        briberyAmount,
+        briberyAmount: bribeLamports,  // ✅ store lamports
         mevShared: shared,
         userId,
         // optionally persist the clientOrderId if you have a column for it
@@ -556,20 +558,21 @@ async function performManualSell(opts) {
   if (prefs?.defaultMaxSlippage != null) {
     slippageToUse = Math.min(Number(slippageToUse), Number(prefs.defaultMaxSlippage));
   }
-  const mevMode        = prefs?.mevMode === "secure" ? "secure" : "fast";
-  const briberyAmount  = prefs?.briberyAmount ?? 0;
-  const priorityFeeToUse = prefs?.defaultPriorityFee ?? 0;
-  const shared         = mevMode === "secure";
+  const mevMode         = prefs?.mevMode === "secure" ? "secure" : "fast";
+  const bribeSol        = Number(prefs?.briberyAmount ?? 0);   // stored in SOL now
+  const bribeLamports   = Math.floor(bribeSol * 1e9);
+  const priorityFeeToUse = Number(prefs?.defaultPriorityFee ?? 0); // ✅ match other paths
+  const shared          = mevMode === "secure";
 
-  console.log("⚙️ Applied user prefs for manual sell:", {
-    slippageInput: slippage,
-    slippageToUse,
-    maxSlippage: prefs?.defaultMaxSlippage,
-    priorityFee: priorityFeeToUse,
-    mevMode,
-    briberyAmount,
-  });
-
+console.log("⚙️ Applied user prefs for manual sell:", {
+  slippageInput: slippage,
+  slippageToUse,
+  maxSlippage: prefs?.defaultMaxSlippage,
+  priorityFeeToUse,         // ✅ defined now
+  mevMode,
+  bribeSol,                 // ✅ log both for clarity
+  bribeLamports,
+});
   /* rows & sellRaw calc */
   const dbWallet = await prisma.wallet.findUnique({
     where : { publicKey: wallet.publicKey.toBase58() },
@@ -630,7 +633,7 @@ async function performManualSell(opts) {
   if (!quote) throw new Error("No route.");
   let tx;
   try {
-    tx = await executeSwap({ quote, wallet, priorityFee: priorityFeeToUse, briberyAmount, shared, });
+    tx = await executeSwap({ quote, wallet, priorityFee: priorityFeeToUse, tipLamports: bribeLamports, shared, });
   } catch (err) {
     // ⛔️ removed coolOff setter for manual sell
     // _coolOffByMint[mint] = Date.now();
@@ -799,7 +802,8 @@ async function performManualSellByAmount(opts) {
     slippageToUse = Math.min(Number(slippageToUse), Number(prefs.defaultMaxSlippage));
   }
   const mevMode        = prefs?.mevMode === "secure" ? "secure" : "fast";
-  const briberyAmount  = prefs?.briberyAmount ?? 0;
+  const bribeSol      = Number(prefs?.briberyAmount ?? 0);   // stored in SOL now
+  const bribeLamports = Math.floor(bribeSol * 1e9); 
   const priorityFeeToUse = prefs?.defaultPriorityFee ?? 0;
   const shared         = mevMode === "secure";
 
@@ -809,7 +813,8 @@ async function performManualSellByAmount(opts) {
     maxSlippage: prefs?.defaultMaxSlippage,
     priorityFee: priorityFeeToUse,
     mevMode,
-    briberyAmount,
+    bribeSol,
+    bribeLamports,
   });
 
   // TTL gate for sell-by-amount clicks
@@ -837,7 +842,7 @@ async function performManualSellByAmount(opts) {
       wallet,
       shared,
       priorityFee: priorityFeeToUse,
-      briberyAmount,
+      tipLamports: bribeLamports, 
     });
   } catch (err) {
     // ⛔️ removed coolOff setter for manual sell-by-amount

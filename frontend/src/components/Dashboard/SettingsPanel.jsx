@@ -4,7 +4,7 @@ import * as Switch from "@radix-ui/react-switch";
 import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { useUserPrefs } from "@/contexts/UserPrefsContext";
-import { getPrefs, savePrefs } from "@/utils/api"; // ✅ ADDED
+// import { getPrefs, savePrefs } from "@/utils/api"; // ← no longer needed
 
 import {
   Info,
@@ -18,9 +18,6 @@ import {
 } from "lucide-react";
 
 /* ───────────────────────────────── CONFIG ────────────────────────────── */
-const PREF_KEY = "userPrefs";
-const CHAT_ID  = "default";          // 🔁 swap for real chat-id in multi-user mode
-
 const defaults = {
   confirmManual:         true,
   confirmBotStart:       true,
@@ -31,7 +28,7 @@ const defaults = {
   defaultMaxSlippage:    3.0,
   defaultPriorityFee:    1_000,      // μLAM
   mevMode:               "fast",     // fast | secure
-  briberyAmount:         0.002,      // SOL
+  briberyAmount:         0.002,      // SOL (UI units)
 };
 
 /* ────────────────────────────── Helpers ──────────────────────────────── */
@@ -70,10 +67,9 @@ function SettingsTooltip({ name, text }) {
     defaultPriorityFee:
       "Extra μLAM paid for compute priority.\n Boost compute unit priority on the Solana network.\n Normal traffic: 1 000 – 5 000.\nHeavy congestion: 10 000 +.",
     validatorBribe:
-      "Direct validator tip (MEV-style bribe)\n Lamports sent straight to validators (tipLamports).\n0.001 – 0.01 SOL helps during MEV wars.",
+      "Direct validator tip (MEV-style bribe).\nUI is in SOL.",
     /* MEV */
-mevMode: `"Fast" = normal route (fast UX, no shielding).\n"Secure" = enables MEV protection: shared accounts, adaptive compute, bribes, and shielding.\nJupiter uses private routes to prevent frontrunning.`,
-
+    mevMode: `"Fast" = normal route (fast UX, no shielding).\n"Secure" = enables MEV protection: shared accounts, adaptive compute, bribes, and shielding.\nJupiter uses private routes to prevent frontrunning.`,
   };
 
   const content = text || lookup[name] || "No help yet, ping dev.";
@@ -105,39 +101,20 @@ export default function SettingsPanel() {
   const [draftPriorityFee, setDraftPriorityFee] = useState("");
   const [draftBribe,       setDraftBribe]       = useState("");
 
-  /* bootstrap – localStorage ➜ backend ➜ context */
-  useEffect(() => {
-    (async () => {
-      const stored = JSON.parse(localStorage.getItem(PREF_KEY) || "null") ?? {};
-      updatePrefs({ ...defaults, ...stored });
-
-      try {
-        const remote = await getPrefs(CHAT_ID);
-        updatePrefs(curr => ({ ...curr, ...remote }));
-      } catch {
-        /* backend might be offline – ignore */
-      }
-    })();
-  }, []);
+  // ⚠️ No bootstrap here — Context handles it.
 
   /* hydrate draft inputs whenever prefs change */
   useEffect(() => {
     if (!prefs) return;
-    setDraftAuto(String(prefs.autoBuy.amount));
-    setDraftSlip(String(prefs.slippage));
-    setDraftDefaultSlip(String(prefs.defaultMaxSlippage));
-    setDraftPriorityFee(String(prefs.defaultPriorityFee));
-    setDraftBribe(String(prefs.briberyAmount));
+    setDraftAuto(String(prefs.autoBuy.amount ?? defaults.autoBuy.amount));
+    setDraftSlip(String(prefs.slippage ?? defaults.slippage));
+    setDraftDefaultSlip(String(prefs.defaultMaxSlippage ?? defaults.defaultMaxSlippage));
+    setDraftPriorityFee(String(prefs.defaultPriorityFee ?? defaults.defaultPriorityFee));
+    setDraftBribe(String(prefs.briberyAmount ?? defaults.briberyAmount));
   }, [prefs]);
 
-  /* persist helper */
-  const persist = next => {
-    updatePrefs(next);
-    localStorage.setItem(PREF_KEY, JSON.stringify(next));
-    savePrefs(CHAT_ID, next).catch(() =>
-      toast.error("⚠️  couldn’t save prefs on server", { role: "status" }),
-    );
-  };
+  /* persist helper — rely on context’s server/local save */
+  const persist = (next) => updatePrefs(next);
 
   if (!prefs) return null; // still loading
 
@@ -156,11 +133,11 @@ export default function SettingsPanel() {
   const parsedPriority = parseInt(draftPriorityFee)   || 0;
   const parsedBribe    = parseFloat(draftBribe)       || 0;
 
-  const autoChanged   = parsedAuto    !== prefs.autoBuy.amount;
-  const slipChanged   = parsedSlip    !== prefs.slippage;
-  const maxSlipChanged= parsedMaxSlip !== prefs.defaultMaxSlippage;
-  const prioChanged   = parsedPriority!== prefs.defaultPriorityFee;
-  const bribeChanged  = parsedBribe   !== prefs.briberyAmount;
+  const autoChanged    = parsedAuto     !== (prefs.autoBuy?.amount ?? 0);
+  const slipChanged    = parsedSlip     !== (prefs.slippage ?? 0);
+  const maxSlipChanged = parsedMaxSlip  !== (prefs.defaultMaxSlippage ?? 0);
+  const prioChanged    = parsedPriority !== (prefs.defaultPriorityFee ?? 0);
+  const bribeChanged   = parsedBribe    !== (prefs.briberyAmount ?? 0);
 
   /* save handlers */
   const saveAuto     = () => persist({ ...prefs, autoBuy: { ...prefs.autoBuy, amount: parsedAuto } });
@@ -317,7 +294,7 @@ export default function SettingsPanel() {
 
         <NumericInput
           id="validatorBribe"
-          label="Validator Bribe (Lamports)"
+          label="Validator Bribe (SOL)"
           value={draftBribe}
           onChange={setDraftBribe}
           showCheck={bribeChanged}

@@ -419,6 +419,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     quoteLatencyThresholdMs,
   } = meta;
 
+   let _lastFee = { priority: undefined, tip: undefined };
 
   if (autoPriorityFee && cuPriceMicroLamportsMax && cuPriceMicroLamportsMin &&
     cuPriceMicroLamportsMax < cuPriceMicroLamportsMin) {
@@ -854,6 +855,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             const endSlot = await conn.getSlot();
 
             if (txHash) {
+            // record the fees that actually got used
+            _lastFee.priority = fees.computeUnitPriceMicroLamports;
+            _lastFee.tip      = fees.tipLamports;
               inc('direct_fallback_ok_total', 1);
               metricsLogger.recordInclusion?.(endSlot - startSlot);
               metricsLogger.recordSuccess?.();
@@ -907,6 +911,9 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           });
           const endSlot = await conn.getSlot();
           if (txHash) {
+            // record the fees that actually got used
+            _lastFee.priority = pf.computeUnitPriceMicroLamports;
+            _lastFee.tip      = pf.tipLamports;
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             metricsLogger.recordSuccess?.();
             const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
@@ -1187,8 +1194,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         side: "buy",
         slippage: effSlippage,
         mevMode,
-        priorityFee: undefined,
-        briberyAmount: undefined,
+        priorityFee: _lastFee.priority,   // micro-lamports per CU
+        briberyAmount: _lastFee.tip,  
         mevShared: shared,
         inputMint: sizedQuote.inputMint,
         outputMint: sizedQuote.outputMint,

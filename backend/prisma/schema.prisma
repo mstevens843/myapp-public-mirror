@@ -508,7 +508,7 @@ model UserPreference {
   defaultMaxSlippage        Float    @default(2.0)    
   mevMode     String   @default("fast")     
   defaultPriorityFee        Int      @default(0)       
-  briberyAmount      Int      @default(0)         
+  briberyAmount      Float      @default(0)         
   autoBuyEnabled     Boolean  @default(false)
   autoBuyAmount      Float    @default(0.0)
   createdAt          DateTime @default(now())
