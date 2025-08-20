@@ -7,10 +7,23 @@ import { ChevronDown } from "lucide-react";
 // Instrumentation helpers (no-ops unless BREAKOUT_DEBUG=1 in localStorage)
 import { logChange, logBlur, logEffect } from "../../dev/inputDebug";
 
-/* Default advanced inputs (labels aligned with Turbo/Sniper UI) */
-const BASE_FIELDS = [
+/**
+ * Field registry for Advanced.
+ * - Add `strategies: [...]` to a field to show it ONLY for those strategies.
+ * - Omit `strategies` to show for all strategies.
+ * 
+ * NOTE: This keeps everything inline (no extra files) but gives you per-strategy
+ *       control in one place. Today we add Token Age only for `sniper`.
+ */
+const FIELD_DEFS = [
   { label: "Min Market-Cap (USD)",      name: "minMarketCap",        placeholder: "e.g. 100000" },
   { label: "Max Market-Cap (USD)",      name: "maxMarketCap",        placeholder: "e.g. 2000000" },
+
+  // 🔽 Token age moved here (Advanced) and gated to sniper only for now
+  { label: "Min Token Age (min)",       name: "minTokenAgeMinutes",  placeholder: "e.g. 60",   strategies: ["sniper"] },
+  { label: "Max Token Age (min)",       name: "maxTokenAgeMinutes",  placeholder: "e.g. 1440", strategies: ["sniper"] },
+
+  // Other commonly shared advanced knobs (kept for backwards-compat)
   { label: "Halt on Fails (#)",         name: "haltOnFailures",      placeholder: "e.g. 5" },
   { label: "Per-token Cooldown (s)",    name: "cooldown",            placeholder: "e.g. 30" },
   { label: "Max Slippage (%)",          name: "maxSlippage",         placeholder: "e.g. 0.5" },
@@ -25,10 +38,20 @@ export default function AdvancedFields({
   config = {},
   setConfig,
   disabled = false,
-  fields,               // optional override list
+  fields,               // optional override list: [{label,name,placeholder}] (bypasses strategy gating)
+  strategy,             // optional: e.g. "sniper" to include gated fields
   className = "",
 }) {
-  const usedFields = fields || BASE_FIELDS;
+  // Determine which fields to render
+  const usedFields = useMemo(() => {
+    if (fields && Array.isArray(fields)) return fields;
+    // Strategy-gated filtering
+    return FIELD_DEFS.filter(def => {
+      if (!def.strategies) return true; // shared field
+      if (!strategy) return false;      // gated field but no strategy provided
+      return def.strategies.includes(String(strategy));
+    });
+  }, [fields, strategy]);
 
   // Build a "view" model: force numbers to display as strings so typing works.
   const view = useMemo(() => {

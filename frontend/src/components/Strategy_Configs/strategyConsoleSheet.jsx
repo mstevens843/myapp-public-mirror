@@ -11,8 +11,8 @@ import {
   SheetContent,
 } from "@/components/ui/sheet";
 import { Button }               from "@/components/ui/button";
-import { useLogsStore }         from "../../state/LogsStore";
-import useSingleLogsSocket      from "../../hooks/useSingleLogsSocket";
+import { useLogsStore } from "@/state/LogsStore";;
+import useSingleLogsSocket      from "@/hooks/useSingleLogsSocket";
 import { usePrevious }          from "@/hooks/usePrevious";
 import {
   Loader2,
@@ -77,13 +77,17 @@ export default function StrategyConsoleSheet({
   const allLogs = useLogsStore((s) => s.logs);
 
   /* — derived: logs for this bot ------------------------------------- */
-  const logs = useMemo(
-    () =>
-      allLogs
-        .filter((l) => l.botId === botId)
-        .map((l) => (typeof l.text === "string" ? l.text : l.text ?? "")),
-    [allLogs, botId]
-  );
+ const logs = useMemo(() => {
+   return (Array.isArray(allLogs) ? allLogs : [])
+     .filter((l) => l.botId === botId)
+     .map((l) => {
+       const t = typeof l?.text === "string" ? l.text : l?.text;
+       return typeof t === "string" && t
+         ? t
+         : (l?.line ?? l?.message ?? (typeof l === "string" ? l : ""));
+     });
+ }, [allLogs, botId]);
+
 
   /* — refs / state ---------------------------------------------------- */
   const bottomRef        = useRef(null);

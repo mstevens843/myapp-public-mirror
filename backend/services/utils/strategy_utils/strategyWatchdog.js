@@ -53,8 +53,15 @@ function startWatchdog() {
             .filter(Boolean)
             .forEach((line) => {
               const clean = line.replace(STRIP_ANSI, "");
-              if (!clean.startsWith("[")) return;
-              const lvl = clean.slice(1, clean.indexOf("]")).toUpperCase();
+              let lvl = "INFO";
+              const tag = clean.match(/^\[([A-Za-z]+)\]/);
+              if (tag) {
+                lvl = String(tag[1]).toUpperCase();
+              } else if (/(error|exception|cannot find module|unhandled)/i.test(clean)) {
+                lvl = "ERROR";
+              } else if (/warn/i.test(clean)) {
+                lvl = "WARN";
+              }
               socketBroadcast({ botId, level: lvl, line: clean });
             });
         }

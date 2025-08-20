@@ -49,7 +49,9 @@ const MiniConsole = ({
         <p className="pt-5 text-zinc-500 italic">Waiting for log messages…</p>
       ) : (
         logs.slice(-10).map((log, idx) => {
-        const logText = typeof log === "string" ? log : log.text || "";
+         const logText = typeof log === "string"
+           ? log
+           : (log?.text ?? log?.line ?? log?.message ?? "");
 
         let bar = "bg-zinc-600";
         if (logText.includes("[ERROR]")) bar = "bg-red-500";

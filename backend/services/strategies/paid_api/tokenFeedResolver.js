@@ -1,4 +1,4 @@
-/* backend/utils/tokenFeedResolver.js
+/* 
  * ────────────────────────────────────────────────────────────────────
  * ONE place that turns   {strategyName, cfg}   →   [mint,…]
  *
@@ -13,7 +13,7 @@ const toMint = (t) =>
     ? t
     : t?.address || t?.mint || t?.mintAddress || t?.tokenAddress || null;
 
-/* ✅ Paid-API helpers (keep these paths as they exist in your repo) */
+/*  Paid-API helpers (keep these paths as they exist in your repo) */
 const getNewListings                        = require("./Token_Lists/getNewListings");
 const getTrendingTokensList                 = require("./Token_Lists/getTrendingTokensList");
 const getHighLiquidityList                  = require("./Token_Lists/getHighLiquidityList");

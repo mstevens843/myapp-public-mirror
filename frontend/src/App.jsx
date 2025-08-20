@@ -1,93 +1,23 @@
-/** Main Frontend Dashboard for Solana Trading Bot 
- * 
- * Features: 
- * - Central hun to start/stop strategies, configure settings, and view bot activity. 
- * - Supports real-tiem trade history, portfolio tracking. 
- * - Pulls trade data and daily recap from backend via REST API 
- * - Saves config, mode, and restart prefs to localStorage for persistence 
- * - Toast notifications for all major actions (start, stop, errors, etc.)
- * - Toggle between Portfolio and Trade charts
- * - Export Trades to CSV and reset logs directly from UI. 
- * 
- * - This file is the heart of the frontend: connects UI + bot control logic 
- */
-
 import React, { useEffect, useState, lazy, Suspense } from "react"
 import { useNavigate, useLocation } from "react-router-dom";
 import ConfigPanel from "@/components/Controls/ConfigPanel";
-// Lazily import heavy chart components; these chunks are fetched only
-// when the user needs them.  This reduces the initial JS bundle size
-// and helps maintain our performance budgets.
-const TradeChart     = lazy(() => import("@/components/Tables_Charts/TradeChart"));
-const PortfolioChart = lazy(() => import("@/components/Tables_Charts/PortfolioChart"));
-const HistoryPanel   = lazy(() => import("@/components/Tables_Charts/HistoryPanel"));
-import Watchlist from "@/components/Dashboard/Watchlist";
-import OpenTradesTab from "@/components/Dashboard/OpenTradesTab";
-import mockOpenTrades from "@/mock/mockOpenTrades";
-import TelegramTab from "@/components/Dashboard/TelegramTab";
 import WalletBalancePanel from "@/components/Dashboard/WalletBalancePanel"
 import TargetToken from "@/components/Controls/TargetToken";
 import { isFinite as _isFinite } from "lodash";
-import { toast, Toaster } from "sonner";
+import { toast } from "sonner";
 import "./styles/dashboard.css";
-import { dateKeycap } from "./utils/dateEmoji";
-// Lazily load dashboard panels which pull in charts and other heavy
-// dependencies.  They are only needed when rendered and therefore
-// should not block the first paint.
-const SettingsPanel = lazy(() => import("@/components/Dashboard/SettingsPanel"));
-const RecapSheet    = lazy(() => import("@/components/Tables_Charts/RecapSheet"));
-
-// Additional heavy components are also loaded lazily.  Both the
-// strategy console and bot status modal comprise complex UI and
-// business logic.  Splitting them into separate chunks prevents
-// them from affecting the dashboard's initial render.
 const LazyStrategyConsoleSheet = lazy(() => import("./components/Strategy_Configs/strategyConsoleSheet"));
 const LazyBotStatusModal       = lazy(() => import("./components/Controls/Modals/BotStatusModal"));
 import useSingleLogsSocket from "@/hooks/useSingleLogsSocket";
-import WalletsTab from "./components/Dashboard/WalletsTab";
-import logo from "@/assets/solpulse-logo.png";
-import PaymentsTab from "./components/Dashboard/PaymentsTab";
-import MyAccountTab from "@/components/Dashboard/MyAccountTab";
-import AccountMenu from "@/components/Dashboard/Account/AccountMenu";
 import { getWalletNetworth, getUserProfile, getPrefs, fetchWalletBalances } from "./utils/api"
 import { openTradesCsv, getRecentTrades } from "./utils/trades_positions"
-import { logoutUser } from "./utils/auth"; 
 import Cookies from "js-cookie";
 import { useUser } from "@/contexts/UserProvider";
 import { useUserPrefs }    from "@/contexts/UserPrefsContext";
-
-
-import {
-  Home,
-  Star,
-  FolderOpen,
-  Send,
-  Settings as SettingsIcon,
-  CircleDot,   
-  RefreshCw,
-   LogOut,  
-   User2Icon, 
-   UserIcon,
-   X,
-} from "lucide-react";
-// Direct import of StrategyConsoleSheet removed for code splitting.
-// The component is lazily imported below.
-// import StrategyConsoleSheet from "./components/Strategy_Configs/strategyConsoleSheet";
-import {
-  startStrategy,
-  stopStrategy,
-  fetchBotStatus,
-  fetchDetailedStatus,
-  pauseStrategy,
-  resumeStrategy,
-  deleteStrategy,
-
-} from "@/utils/autobotApi";
+import { CircleDot,RefreshCw, } from "lucide-react";
+import { startStrategy, stopStrategy, fetchBotStatus, fetchDetailedStatus, pauseStrategy, resumeStrategy, deleteStrategy, } from "@/utils/autobotApi";
 import FloatingBotBeacon from "./components/Dashboard/BotBeaconModal";
 
-import { listenToLogs } from "./lib/ws";
-import { startMockLogs } from "./utils/mockLogs";
-// import BotStatusModal from "./components/Controls/Modals/BotStatusModal"; // replaced by lazy import
 const sanitizeConfig = (cfg = {}) =>
   Object.fromEntries(
     Object.entries(cfg)
@@ -95,64 +25,46 @@ const sanitizeConfig = (cfg = {}) =>
       .map(([k, v]) => [
         k,
         // convert numeric strings → number
-        ["amountToSpend","snipeAmount","slippage","interval",
-         "maxTrades","takeProfit","stopLoss"].includes(k) && v !== ""
-          ? Number(v)
-          : v,
-      ]),
-  );
+        ["amountToSpend","snipeAmount","slippage","interval","maxTrades",
+      "takeProfit","stopLoss","entryThreshold","volumeThreshold",
+      "minTokenAgeMinutes","maxTokenAgeMinutes","minMarketCap","maxMarketCap",
+      "maxSlippage","haltOnFailures","cooldown","delayBeforeBuyMs",
+      "priorityFeeLamports","briberyAmount","tpPercent","slPercent"
+      ].includes(k) && v !== "" ? Number(v) : v, ]), );
 
-
-    const safeNum = (v, fallback = 0) => {
-  const n = Number(v);
+const safeNum = (v, fallback = 0) => {
+const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 };
-
-const dummyPrefs = {};
-
-
 
  const SOL_MINT  = "So11111111111111111111111111111111111111112";
  const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
  function toNum(x) {
   const n = +x;
-  return isNaN(n) ? undefined : n;
-}
-
+  return isNaN(n) ? undefined : n; }
 function isNumeric(value) {
   return !isNaN(parseFloat(value)) && isFinite(value);
 }
-
-
 /* cascade helper: ui‑value → prefs → hard‑default */
 const pick = (val, pref, hard) =>
   val != null && val !== "" ? +val : pref != null ? +pref : hard;
-
-  // Build shared base config
 // Build shared base config
 const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
   const p = cfg._prefs || {};
   // Extract user/preference slippage values first so we can clamp them below
   const rawSlippage    = pick(cfg.slippage,  p.slippage,          0.5);
   const rawMaxSlippage = pick(cfg.maxSlippage, p.defaultMaxSlippage, 0.25);
-
-  // Clamp slippage values into a sane range accepted by the backend. The API
-  // rejects configs with slippage or maxSlippage above ~10%; likewise
-  // negative values are nonsensical.  Keeping these in [0,10] prevents
-  // invalid configuration errors during bot launch (e.g. "invalid config").
+  // Clamp slippage values into a sane range accepted by the backend. The API rejects configs with slippage or maxSlippage above ~10%; likewise
+  // negative values are nonsensical.  Keeping these in [0,10] prevents invalid configuration errors during bot launch (e.g. "invalid config").
   const clampedSlippage    = Math.min(Math.max(rawSlippage,    0), 10);
   const clampedMaxSlippage = Math.min(Math.max(rawMaxSlippage, 0), 10);
-
   return {
     inputMint: cfg.buyWithUSDC ? USDC_MINT : SOL_MINT,
     monitoredTokens : cfg.useTargetToken && targetToken ? [targetToken] : [],
     walletId        : activeWallet?.id ?? null,
-    // walletPublicKeys: selectedWallets.map(w => w.publicKey),
-    // walletLabels    : resolvedWallets,
     amountToSpend   : safeNum(cfg.amountToSpend ?? cfg.amount),
     snipeAmount     : safeNum(cfg.snipeAmount   ?? cfg.amountToSpend ?? cfg.amount),
-    // Use the clamped slippage values instead of the raw ones
     slippage        : clampedSlippage,
     interval        : safeNum(cfg.interval, 3),
     maxTrades       : safeNum(cfg.maxTrades, 5),
@@ -160,6 +72,10 @@ const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
     haltOnFailures      : safeNum(cfg.haltOnFailures, 4),
     autoSell            : cfg.autoSell,   // optional object
     maxSlippage     : clampedMaxSlippage,
+    cooldown        : toNum(cfg.cooldown), 
+    maxOpenTrades: safeNum(cfg.maxOpenTrades),
+    maxTrades: safeNum(cfg.maxTrades),
+    maxDailyVolume: safeNum(cfg.maxDailyVolume),
     ...(pick(cfg.priorityFeeLamports, p.defaultPriorityFee, null) != null && {
       priorityFeeLamports: pick(cfg.priorityFeeLamports, p.defaultPriorityFee, 0),
     }),
@@ -172,7 +88,6 @@ const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
     ...(pick(cfg.briberyAmount, p.briberyAmount, null) != null && {
       briberyAmount: pick(cfg.briberyAmount, p.briberyAmount, 0),
     }),
-
     // dryRun          : true,
     ...(cfg.takeProfit != null && {
       takeProfit: safeNum(cfg.takeProfit),
@@ -196,6 +111,9 @@ const CONFIG_BUILDERS = {
     tokenFeed         : cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
     minTokenAgeMinutes: cfg.minTokenAgeMinutes,
     maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
+    delayBeforeBuyMs: toNum(cfg.delayBeforeBuyMs), 
+    minMarketCap: cfg.minMarketCap,
+    maxMarketCap: cfg.maxMarketCap,
   }),
   scalper: (cfg, wallets, target, resolved, activeWallet) => ({
     ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
@@ -203,21 +121,13 @@ const CONFIG_BUILDERS = {
     priceWindow: cfg.priceWindow,
     volumeThreshold: safeNum(cfg.volumeThreshold, 50_000),
     volumeWindow: cfg.volumeWindow,
-    // new scalper settings
-    maxDailyVolume: safeNum(cfg.maxDailyVolume),
-    maxOpenTrades: safeNum(cfg.maxOpenTrades),
-    maxTrades: safeNum(cfg.maxTrades),
-    haltOnFailures: safeNum(cfg.haltOnFailures),
-    minMarketCap: cfg.minMarketCap,
-    maxMarketCap: cfg.maxMarketCap,
-    cooldown: safeNum(cfg.cooldown),
-    takeProfitPct: safeNum(cfg.takeProfitPct),
-    stopLossPct: safeNum(cfg.stopLossPct),
     volumeSpikeMultiplier: safeNum(cfg.volumeSpikeMultiplier),
     useSignals: !!cfg.useSignals,
     maxHoldSeconds: safeNum(cfg.maxHoldSeconds),
     disableSafety: !!cfg.disableSafety,
     safetyChecks: cfg.safetyChecks,
+    minMarketCap: cfg.minMarketCap,
+    maxMarketCap: cfg.maxMarketCap,
   }),
 
   dipBuyer: (cfg, wallets, target, resolved, activeWallet) => ({
@@ -257,7 +167,6 @@ const CONFIG_BUILDERS = {
     useSignals: !!cfg.useSignals,
     maxHoldSeconds: safeNum(cfg.maxHoldSeconds),
   }),
-
   delayedSniper: (cfg, wallets, target, resolved, activeWallet) => ({
     ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
     delayBeforeBuyMs: safeNum(cfg.delayBeforeBuyMs),
@@ -287,10 +196,6 @@ const CONFIG_BUILDERS = {
     slippageMaxPct: safeNum(cfg.slippageMaxPct, 10),
     feeEscalationLamports: safeNum(cfg.feeEscalationLamports, 5_000),
     panicDumpPct: safeNum(cfg.panicDumpPct, 15),
-    // new chadMode settings
-    maxOpenTrades: safeNum(cfg.maxOpenTrades),
-    maxTrades: safeNum(cfg.maxTrades),
-    haltOnFailures: safeNum(cfg.haltOnFailures),
     autoSell: cfg.autoSell,
     useSignals: !!cfg.useSignals,
   }),
@@ -363,10 +268,6 @@ rotationBot: (cfg, selectedWallets, _target, resolvedWallets, activeWallet) => {
       minTokenAgeMinutes: cfg.minTokenAgeMinutes,
       maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
     };
-    // ✨ Added in paper-sim-upgrade
-    // Append optional simulation parameters when provided.  These fields
-    // are stripped by sanitizeConfig if empty or undefined.  They
-    // correspond directly to the backend paper execution adapter.
     return {
       ...core,
       ...(cfg.execModel ? { execModel: cfg.execModel } : {}),
@@ -385,7 +286,6 @@ stealthBot: (cfg, selectedWallets, activeWallet)  => {
     Array.isArray(cfg.wallets) && cfg.wallets.length
       ? cfg.wallets                // set by StealthBotConfig
       : selectedWallets;           // fall-back to global picker
-
   return {
       wallets: labels,
      tokenMint   : cfg.tokenMint,
@@ -407,13 +307,11 @@ scheduleLauncher: (cfg, wallets, target, resolved, activeWallet) => {
     interval            : safeNum(cfg.interval, 30),                // seconds between attempts
     maxTrades           : safeNum(cfg.maxTrades, 1),
     haltOnFailures      : safeNum(cfg.haltOnFailures, 3),
-
     limitPrices         : Array.isArray(cfg.limitPrices)
                             ? cfg.limitPrices
                                 .map(v => +v)
                                 .filter(n => Number.isFinite(n))
                             : undefined,
-
      mevMode             : cfg.mevMode || p.mevMode || "fast",
      ...(pick(cfg.briberyAmount, p.briberyAmount, null) != null && {
        briberyAmount: pick(cfg.briberyAmount, p.briberyAmount, 0),
@@ -508,32 +406,22 @@ scheduleLauncher: (cfg, wallets, target, resolved, activeWallet) => {
   },
 };
 
-// ["autoRestart", "selectedModes", "botConfig", "selectedWallets"].forEach((key) => {
-//   if (localStorage.getItem(key) === "undefined") {
-//     localStorage.removeItem(key);
-//   }
-// });
 
+  export const getChatIdFromCookie = () => {
+    return Cookies.get("chatId") || "default";
+  };
 
+  const App = () => {
+  const { activeWallet, isProtected, loading: userLoading } = useUser();
+  const { prefs } = useUserPrefs();
 
-export const getChatIdFromCookie = () => {
-  return Cookies.get("chatId") || "default";
-};
-
-const App = () => {
-const { activeWallet, isProtected, loading: userLoading } = useUser();
-const { prefs } = useUserPrefs();
-
-
-        const userCtx = useUser();
+  const userCtx = useUser();
   console.log("🧠 UserContext contents:", userCtx);
 
   
   useEffect(() => {
-    // Always attempt to load preferences using cookies for auth.  We no
-    // longer gate this on a localStorage token since authentication
-    // happens via HttpOnly cookies.  getPrefs will send the cookie and
-    // CSRF token automatically via authFetch.
+    // Always attempt to load preferences using cookies for auth.  We no longer gate this on a localStorage token since authentication happens via HttpOnly cookies.  
+    // getPrefs will send the cookie and CSRF token automatically via authFetch.
     const chatId = getChatIdFromCookie();
     getPrefs(chatId).then((prefs) => {
       console.log("✅ Loaded user prefs from cookie:", prefs);
@@ -546,96 +434,52 @@ useEffect(() => {
     if (profile?.activeWallet?.publicKey) {
       console.log("🚀 Loaded user profile:", profile);
       console.log("👛 Active wallet:", profile.activeWallet);
-
-      // ✅ SET selectedWallets early, once only
+      //  SET selectedWallets early, once only
       setSelectedWallets([profile.activeWallet.publicKey]);
-
-      // ✅ FETCH balance right away
-      fetchWalletBalance(profile.activeWallet.publicKey);
-    }
-  };
-
-  loadProfile();
-}, []);
+      //  FETCH balance right away
+      fetchWalletBalance(profile.activeWallet.publicKey); } };
+  loadProfile();}, []);
 
 
-
-  const navigate = useNavigate();
+const navigate = useNavigate();
 const location = useLocation();
-
 const currentPath = location.pathname.split("/").pop(); // e.g., 'wallets'
 
-// keep state in sync if user uses browser back/forward
-
-
-// const handleTabChange = (tabName) => {
-//   setLoading(true);
-//   setTimeout(() => {
-//     setActiveTab(tabName);
-//     setLoading(false);
-//   }, 500); // simulate 0.5s fake load
-// };
-
-
-    useSingleLogsSocket(); // initializes once on mount
-
-    
+  useSingleLogsSocket(); // initializes once on mount
   const [selectedModes, setSelectedModes] = useState(() => {
-  try {
-    const stored = localStorage.getItem("selectedModes");
-    return stored ? JSON.parse(stored) : [];
-  } catch {
-    return [];
-  }
-});
-
+  try { const stored = localStorage.getItem("selectedModes");
+    return stored ? JSON.parse(stored) : []; } catch {
+    return []; } });
   /** All live bot instances { botId, mode } */
- const [runningBots, setRunningBots] = useState([]);   // NEW
-const running = Array.isArray(runningBots) && runningBots.length > 0;
+  const [runningBots, setRunningBots] = useState([]);   // NEW
+  const running = Array.isArray(runningBots) && runningBots.length > 0;
   const [confirmed, setConfirmed] = useState(false);
   const [autoRestart, setAutoRestart] = useState(() => {
   try {
     const stored = localStorage.getItem("autoRestart");
     return stored ? JSON.parse(stored) : false;
   } catch {
-    return false;
-  }
-});
+    return false;} });
   const [loading, setLoading] = useState(false);
-
-  const [chartMode, setChartMode] = useState("trades");
   const [strategyFilter, setStrategyFilter] = useState("all");
-  const [wallets, setWallets] = useState([]);
-  // const [activeWallet, setActiveWallet] = useState(null);
-
-  const useMock = true;
-
-
   const [targetToken, setTargetToken] = useState(() => {
-    return localStorage.getItem("targetToken") || null;
-  });
+    return localStorage.getItem("targetToken") || null; });
   const [selectedWallets, setSelectedWallets] = useState(() => {
-  try {
-    const stored = localStorage.getItem("selectedWallets");
+  try { const stored = localStorage.getItem("selectedWallets");
     return stored ? JSON.parse(stored) : [];
   } catch {
-    return [];
-  }
-});
+    return []; } });
 
   useEffect(() => {
   if (selectedWallets.length > 0) {
-    fetchWalletBalance(selectedWallets[0]);   // 🔥 immediately fetch
+    fetchWalletBalance(selectedWallets[0]);   // immediately fetch
   }
 }, [selectedWallets]);    
   const [selectedWalletBalance, setSelectedWalletBalance] = useState(0);
   const [lastBalanceUpdate, setLastBalanceUpdate] = useState(null);
   const [balanceGlow, setBalanceGlow] = useState(false);
-  const [timeframe, setTimeframe] = useState(30); // Default to 30 trades
   const [consoleLogs, setConsoleLogs] = useState([]);
   const [logTarget,   setLogTarget]   = useState(null); // <- botId we care about
-  const [logs, setLogs] = useState([]);
-  const [showFullConsole, setShowFullConsole] = useState(false);
   const [showMiniConsole, setShowMiniConsole] = useState(false); 
   const [logsOpen, setLogsOpen] = useState(false); 
   const [activeLogsBotId, setActiveLogsBotId] = useState(false);
@@ -647,21 +491,24 @@ const running = Array.isArray(runningBots) && runningBots.length > 0;
   const [returnToStatusModal, setReturnToStatusModal] = useState(false);
   const [sheetTab, setSheetTab] = useState("logs");
 
-  /* 🔄 keep Beacon in-sync with whatever BotStatusModal knows */
-/* 🔄 Keep Beacon in-sync with BotStatusModal full info */
+  /* keep Beacon in-sync with whatever BotStatusModal knows */
+/* Keep Beacon in-sync with BotStatusModal full info */
 useEffect(() => {
-  if (!Array.isArray(statusData?.botIds) || statusData.botIds.length === 0) return;
-
-  setBeaconBots(
-    statusData.botIds.map((id) => ({
-      botId: id,
-      mode : statusData.botCfgs?.[id]?.mode || "unknown",
-      startTime     : statusData.botCfgs?.[id]?.startTime      ?? Date.now(),
-      tradesExecuted: statusData.botCfgs?.[id]?.tradesExecuted ?? 0,
-      maxTrades     : statusData.botCfgs?.[id]?.maxTrades      ?? null,
-      isPaused      : statusData.botCfgs?.[id]?.isPaused       ?? false,
-    }))
-  );
+  if (Array.isArray(statusData?.botIds) && statusData.botIds.length > 0) {
+    setBeaconBots(
+      statusData.botIds.map((id) => ({
+        botId: id,
+        mode : statusData.botCfgs?.[id]?.mode || "unknown",
+        startTime     : statusData.botCfgs?.[id]?.startTime      ?? Date.now(),
+        tradesExecuted: statusData.botCfgs?.[id]?.tradesExecuted ?? 0,
+        maxTrades     : statusData.botCfgs?.[id]?.maxTrades      ?? null,
+        isPaused      : statusData.botCfgs?.[id]?.isPaused       ?? false,
+      }))
+    );
+  } else {
+    // 🧹 No bots reported → clear the beacon list
+    setBeaconBots([]);
+  }
 }, [statusData]);
 
 /* 🔄 Merge runningBots into Beacon list if new ones appear */
@@ -692,8 +539,6 @@ runningBots.forEach((b) => {
     return merged;
   });
 }, [runningBots]);
-
-
 
 
 
@@ -737,13 +582,6 @@ const openBotStatusModal = async () => {
   }
 };
 
-// // Attach to window
-// useEffect(() => {
-//   const unsub = listenToLogs(addConsoleLog);
-//   return unsub;
-// // re-run if we change which bot we’re watching
-// }, []);  
-// }, [logTarget]);
 
 const addConsoleLog = ({ botId, level, line }) => {
   const ts        = new Date().toLocaleTimeString([], { hour12: false });
@@ -760,7 +598,7 @@ const addConsoleLog = ({ botId, level, line }) => {
   // keep the last 5 000 lines (≈ hours of output)
   [botId]: [...(prev[botId] ?? []).slice(-4999), formatted],
   }));
-  // 🟢 Auto-open if not open
+  //  Auto-open if not open
 };
 
 /* helper for the Sheet’s Clear-Logs button */
@@ -769,7 +607,7 @@ const clearLogsForBot = (id) =>
 
 const handleSetLogsTarget = ({ botId, strategy, config, returnAfter }) => {
   console.log("🔍 Setting log target from ViewFullRunningModal");
-  setReturnToStatusModal(!!returnAfter);   // 🆕 remember origin
+  setReturnToStatusModal(!!returnAfter);   // remember origin
   setSelectedModes([strategy]);
   if (config) setConfig(config);
   setShowMiniConsole(true);
@@ -777,16 +615,12 @@ const handleSetLogsTarget = ({ botId, strategy, config, returnAfter }) => {
   setLogTarget(botId);
   setIsBotStatusOpen(false);               // hide status modal for now
 };
-// useEffect(() => {
-//   if (import.meta.env.VITE_USE_MOCK_LOGS !== "true") return;
-//   const id = startMockLogs(l => setLogs(prev => [...prev, l]));
-//   return () => clearInterval(id);
-// }, []);
+
 
 const closeLogsConsole = () => {
   setLogsOpen(false);
   if (returnToStatusModal) {
-    setIsBotStatusOpen(true);              // 🔄 pop the modal back up
+    setIsBotStatusOpen(true);              // pop the modal back up
     setReturnToStatusModal(false);
   }
 };
@@ -831,18 +665,10 @@ useEffect(() => {
 }, []);
 
 
-// useEffect(() => {
-//   const unsub = listenToLogs((msg) => addConsoleLog(msg));
-//   return unsub;
-// }, []);
-
-
 const handleClearStratLogs = () => {
   setConsoleLogs([]);
   toast.success("🧠 Strategy console logs cleared.");
 };
-
-
 
 
 const fetchInitialNetworth = async () => {
@@ -857,10 +683,6 @@ const fetchInitialNetworth = async () => {
 
 
 useEffect(() => { fetchInitialNetworth(); }, []);   // ← runs once on page load
-
-
-
-
 
   // Config state saved to localStorage
   const [config, setConfig] = useState(() => {
@@ -880,10 +702,7 @@ useEffect(() => { fetchInitialNetworth(); }, []);   // ← runs once on page loa
       maxTrades: 3,
       useTargetToken: false,
        amountToSpend: 0.05,
-    };
-  }
-});
-
+    }; } });
 
   const [trades, setTrades] = useState([]);
 
@@ -902,8 +721,6 @@ useEffect(() => { fetchInitialNetworth(); }, []);   // ← runs once on page loa
 useEffect(() => {
   localStorage.setItem("autoRestart", JSON.stringify(autoRestart));
 }, [autoRestart]);
-
-
 
 
   // Save bot config to localStorage
@@ -937,14 +754,7 @@ useEffect(() => {
     localStorage.setItem("autoRestart", JSON.stringify(autoRestart));
   }, [autoRestart]);
 
-  // setSelectedModes((modes) => {
-  //   const newModes = Array.isArray(modes) ? modes : [modes];
-  //   setSelectedModes(newModes);
-  //   if (newModes.length === 1) {
-  //     setConfig((prev) => ({ ...prev })); // force re-render if needed
-  //   }
-  // });
-  
+
 
   /**
    * startMode - launches strategy with current config and mode. 
@@ -955,46 +765,22 @@ const startMode = async () => {
     return;
   }
   console.log("🔥 Starting bot with wallet:", activeWallet);
-
-
   if (!activeWallet?.id) {
     toast.error("🚫 Cannot start bot – no active wallet.");
     return;
   }
-
-
-
-
-  const singleWalletModes = [
-    "sniper",
-    "scalper",
-    "breakout",
-    "chadMode",
-    "dipBuyer",
-    "delayedSniper",
-    "trendFollower",
-    "rebalancer",
-    "paperTrader",
-    "scheduleLaunch",
+  const singleWalletModes = [ "sniper", "scalper", "breakout", "chadMode", "dipBuyer", "delayedSniper", "trendFollower", "rebalancer", "paperTrader","scheduleLaunch", "turboSniper", ];
     // turboSniper now supports multiple wallets via the multiWallet setting
-  ];
-
-  
 
   const multiWalletError = selectedModes.find(
-    (mode) => singleWalletModes.includes(mode) && selectedWallets.length > 1
-  );
+    (mode) => singleWalletModes.includes(mode) && selectedWallets.length > 1 );
   if (multiWalletError) {
     toast.warning(`🚫 ${multiWalletError} allows only one selected wallet.`);
     setLoading(false);
     return;
   }
 
-
-
 const resolvedWallets = selectedWallets.length ? selectedWallets : ["default"];
-
-
 
 try {
   for (const mode of selectedModes) {
@@ -1007,7 +793,6 @@ try {
 
     const finalConfig = sanitizeConfig(rawCfg);
     console.log("🚀 FINAL CONFIG SENT TO API:", { mode, finalConfig, autoRestart });
-
     const { botId } = await startStrategy(mode, finalConfig, autoRestart);
     setLogTarget(botId);
 
@@ -1015,20 +800,16 @@ try {
       const exists = prev.some((b) => b.botId === botId);
       return exists ? prev : [...prev, { botId, mode }];
     });
-
     toast.success(`🚀 ${mode} (${botId.slice(-4)}) started.`);
   }
   setShowMiniConsole(true);
 } catch (err) {
-  toast.error(`❌ ${err.message}${err.details ? " – " + err.details.join(", ") : ""}`);
-  console.error("Start error:", err);
-} finally {
-  setLoading(false);
-}
-  }
+  toast.error(`❌ ${err.message}${err.details ? " – " + err.details.join(", ") : ""}`); console.error("Start error:", err);
+} finally { setLoading(false);
+}}
 
 
-  
+
   // stopMode - halts the bot
   const stopMode = async () => {
   setLoading(true); 
@@ -1046,18 +827,11 @@ try {
   } 
 };
 
-
-
-
-
   // Apply strategy filter to trades 
   const visibleTrades = strategyFilter === "all"
   ? trades
   : trades.filter((t) => t.strategy === strategyFilter);
 
-  // useEffect(() => {
-  //   setSelectedWallets(["default"]);
-  // }, []);
 
 const fetchWalletBalance = async (pubkey) => {
   try {
@@ -1084,29 +858,8 @@ useEffect(() => {
 }, [selectedWallets]);
 
 
-
-
-
-
-  
-
-  // OPEN TRADE TAB LOGIC /////////////////////////////////////////////////////////////////////////////
-  // Fetch open trades on mount
-  
-
-
-
-
-
-
-
-
   const handleExportCSV = () => openTradesCsv();
 
-
-
-
-  ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 return (
   <div className="glow-bg min-h-screen text-white">
@@ -1158,18 +911,18 @@ return (
         />
       </div>
 
-{/* Wallet Balance */}
-<div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow space-y-3">
- <WalletBalancePanel
-   walletKeys={selectedWallets}                // harmless if unused
-   fetchWalletBalance={fetchWalletBalance}     // keep if you need it later
-   onWalletSwitched={(pubkey) => {
-     if (!pubkey) return;
-     setSelectedWallets([pubkey]);             // keep app-level pubkey in sync
-     fetchWalletBalance(pubkey);               // refresh balance immediately
-   }}
- />
- </div>
+    {/* Wallet Balance */}
+    <div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow space-y-3">
+    <WalletBalancePanel
+      walletKeys={selectedWallets}              
+      fetchWalletBalance={fetchWalletBalance}
+      onWalletSwitched={(pubkey) => {
+        if (!pubkey) return;
+        setSelectedWallets([pubkey]);             // keep app-level pubkey in sync
+        fetchWalletBalance(pubkey);               // refresh balance immediately
+      }}
+    />
+    </div>
 
       {/* Config Panel */}
       <div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow space-y-3">
@@ -1201,20 +954,7 @@ return (
           currentBotId={logTarget}
         />
       </div>
-
-      {/* History / Charts */}
-      {/* <div className="rounded-xl border border-zinc-700 bg-zinc-900 p-4 shadow space-y-3">
-        <HistoryPanel
-          chartMode={chartMode}
-          setChartMode={setChartMode}
-          timeframe={timeframe}
-          setTimeframe={setTimeframe}
-          onExportCSV={handleExportCSV}
-          onClearLogs={handleClearLogs}
-        />
-      </div> */}
     </div>
-
     {/* sheets / overlays ---------------------------------------- */}
     <Suspense
       fallback={
@@ -1250,16 +990,16 @@ return (
       />
     </Suspense>
 
-<FloatingBotBeacon
-  runningBots={beaconBots}
-  onOpenLogs={({ botId, mode }) => {
-    setActiveLogsBotId(botId);
-    setActiveLogsStrategy(mode);
-    setSheetTab("logs");
-    setLogsOpen(true);
-  }}
-  onOpenManageBots={openBotStatusModal}
-/>
+    <FloatingBotBeacon
+      runningBots={beaconBots}
+      onOpenLogs={({ botId, mode }) => {
+        setActiveLogsBotId(botId);
+        setActiveLogsStrategy(mode);
+        setSheetTab("logs");
+        setLogsOpen(true);
+      }}
+      onOpenManageBots={openBotStatusModal}
+    />
     
 
     <Suspense
@@ -1319,23 +1059,6 @@ onResume={async (id) => {
       }}
       />
     </Suspense>
-
-    {/* global toasts */}
-{/* 
-<Toaster
-  position="top-right"
-  toastOptions={{
-    classNames: {
-      toast: "bg-zinc-900 text-white border border-zinc-700 mr-[200px]",
-      actionButton: "text-white hover:text-red-400",
-    },
-    duration: 5000,
-    action: {
-      label: <X size={16} />,
-      onClick: (_toast) => toast.dismiss(_toast.id),
-    },
-  }}
-/> */}
   </div>
 );
 }

@@ -63,8 +63,8 @@ const FIELD_WRAP =
 const INP =
   "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 outline-none border-none focus:outline-none";
 
-const PRICE_WINS = ["", "1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h"];
-const VOLUME_WINS = ["", "1m", "5m", "30m", "1h", "4h", "8h", "24h"];
+const PRICE_WINS = ["1m", "5m", "30m", "1h", "2h", "4h", "6h"];
+const VOLUME_WINS = ["1m", "5m", "30m", "1h", "4h", "8h", "24h"];
 
 const Card = ({ title, right, children, className = "" }) => (
   <div
@@ -116,15 +116,17 @@ const TAB_KEYS = {
     "priceWindow",
     "volumeThreshold",
     "volumeWindow",
-    "minTokenAgeMinutes",
-    "maxTokenAgeMinutes",
-    "minMarketCap",
-    "maxMarketCap",
   ],
   execution: ["delayBeforeBuyMs", "priorityFeeLamports", "mevMode", "briberyAmount"],
   tokens: ["tokenFeed", "monitoredTokens", "overrideMonitored"],
   advanced: [],
 };
+
+const RequiredOnlyPlaceholder = () => (
+  <div className="text-sm text-zinc-400 italic p-2">
+    Hidden in Required-Only Mode. Toggle <span className="text-emerald-400 font-semibold">Required only</span> off to access these settings.
+  </div>
+);
 
 const validateSniperConfig = (cfg = {}) => {
   const errs = [];
@@ -191,30 +193,32 @@ const CoreTab = React.memo(function CoreTab({
             </div>
           </div>
 
-          {/* Pump window */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Pump Time Window</span>
-              <StrategyTooltip name="priceWindow" />
+          {/* Pump window (optional; hidden in Required-only) */}
+          {!view?.__showRequiredOnly && (
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Pump Time Window</span>
+                <StrategyTooltip name="priceWindow" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <select
+                  name="priceWindow"
+                  value={view.priceWindow}
+                  onChange={handleChange}
+                  className={`${INP} appearance-none pr-8`}
+                  disabled={disabled}
+                >
+                  <option value="">None</option>
+                  {PRICE_WINS.map((w) => (
+                    <option key={w} value={w}>
+                      {w}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+              </div>
             </div>
-            <div className={FIELD_WRAP}>
-              <select
-                name="priceWindow"
-                value={view.priceWindow}
-                onChange={handleChange}
-                className={`${INP} appearance-none pr-8`}
-                disabled={disabled}
-              >
-                <option value="">None</option>
-                {PRICE_WINS.map((w) => (
-                  <option key={w} value={w}>
-                    {w}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-            </div>
-          </div>
+          )}
 
           {/* Volume floor */}
           <div className="space-y-1">
@@ -237,103 +241,33 @@ const CoreTab = React.memo(function CoreTab({
             </div>
           </div>
 
-          {/* Volume window */}
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Volume Time Window</span>
-              <StrategyTooltip name="volumeWindow" />
+          {/* Volume window (optional; hidden in Required-only) */}
+          {!view?.__showRequiredOnly && (
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Volume Time Window</span>
+                <StrategyTooltip name="volumeWindow" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <select
+                  name="volumeWindow"
+                  value={view.volumeWindow}
+                  onChange={handleChange}
+                  disabled={disabled}
+                  className={`${INP} appearance-none pr-8`}
+                >
+                  <option value="">None</option>
+                  {VOLUME_WINS.map((w) => (
+                    <option key={w} value={w}>
+                      {w}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+              </div>
             </div>
-            <div className={FIELD_WRAP}>
-              <select
-                name="volumeWindow"
-                value={view.volumeWindow}
-                onChange={handleChange}
-                disabled={disabled}
-                className={`${INP} appearance-none pr-8`}
-              >
-                <option value="">None</option>
-                {VOLUME_WINS.map((w) => (
-                  <option key={w} value={w}>
-                    {w}
-                  </option>
-                ))}
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
-            </div>
-          </div>
+          )}
         </div>
-
-        {!view?.__showRequiredOnly && (
-          <>
-            {/* Token age */}
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              {["min", "max"].map((k) => (
-                <div key={k} className="space-y-1">
-                  <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                    <span>{k === "min" ? "Min" : "Max"} Token Age (min)</span>
-                    <StrategyTooltip name={`${k}TokenAgeMinutes`} />
-                  </div>
-                  <div className={FIELD_WRAP}>
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      name={`${k}TokenAgeMinutes`}
-                      value={view[`${k}TokenAgeMinutes`] ?? ""}
-                      onChange={handleChange}
-                      onBlur={handleBlur(`${k}TokenAgeMinutes`)}
-                      disabled={disabled}
-                      placeholder="e.g. 60"
-                      className={INP}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* Market cap */}
-            <div className="mt-4 grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1">
-                <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                  <span>Min Market Cap (USD)</span>
-                  <StrategyTooltip name="minMarketCap" />
-                </div>
-                <div className={FIELD_WRAP}>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    name="minMarketCap"
-                    value={view.minMarketCap ?? ""}
-                    onChange={handleChange}
-                    onBlur={handleBlur("minMarketCap")}
-                    disabled={disabled}
-                    placeholder="e.g. 1000000"
-                    className={INP}
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-1">
-                <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                  <span>Max Market Cap (USD)</span>
-                  <StrategyTooltip name="maxMarketCap" />
-                </div>
-                <div className={FIELD_WRAP}>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    name="maxMarketCap"
-                    value={view.maxMarketCap ?? ""}
-                    onChange={handleChange}
-                    onBlur={handleBlur("maxMarketCap")}
-                    disabled={disabled}
-                    placeholder="e.g. 10000000"
-                    className={INP}
-                  />
-                </div>
-              </div>
-            </div>
-          </>
-        )}
       </Card>
     </Section>
   );
@@ -344,92 +278,101 @@ const ExecutionTab = React.memo(function ExecutionTab({
   disabled,
   handleChange,
   handleBlur,
+  requiredOnly,
 }) {
   return (
     <Section>
       <Card title="Timing & Fees">
-        <div className="grid gap-4">
+        {requiredOnly ? (
+          <RequiredOnlyPlaceholder />
+        ) : (
+          <div className="grid gap-4">
           <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Delay Before Buy (ms)</span>
-              <StrategyTooltip name="delayBeforeBuyMs" />
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Priority Fee (μlam)</span>
+                <StrategyTooltip name="priorityFeeLamports" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="priorityFeeLamports"
+                  value={view.priorityFeeLamports ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("priorityFeeLamports")}
+                  disabled={disabled}
+                  placeholder="e.g. 20000"
+                  className={INP}
+                />
+              </div>
             </div>
-            <div className={FIELD_WRAP}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="delayBeforeBuyMs"
-                value={view.delayBeforeBuyMs ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("delayBeforeBuyMs")}
-                disabled={disabled}
-                placeholder="e.g. 5000"
-                className={INP}
-              />
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Delay Before Buy (ms)</span>
+                <StrategyTooltip name="delayBeforeBuyMs" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="delayBeforeBuyMs"
+                  value={view.delayBeforeBuyMs ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("delayBeforeBuyMs")}
+                  disabled={disabled}
+                  placeholder="e.g. 5000"
+                  className={INP}
+                />
+              </div>
             </div>
           </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Priority Fee (μlam)</span>
-              <StrategyTooltip name="priorityFeeLamports" />
-            </div>
-            <div className={FIELD_WRAP}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="priorityFeeLamports"
-                value={view.priorityFeeLamports ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("priorityFeeLamports")}
-                disabled={disabled}
-                placeholder="e.g. 20000"
-                className={INP}
-              />
-            </div>
-          </div>
-        </div>
+        )}
       </Card>
       <Card title="MEV Preferences">
-        <div className="grid gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>MEV Mode</span>
-              <StrategyTooltip name="mevMode" />
+        {requiredOnly ? (
+          <RequiredOnlyPlaceholder />
+        ) : (
+          <div className="grid gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>MEV Mode</span>
+                <StrategyTooltip name="mevMode" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <select
+                  name="mevMode"
+                  value={view.mevMode}
+                  onChange={handleChange}
+                  disabled={disabled}
+                  className={`${INP} appearance-none pr-8`}
+                >
+                  <option value="fast">fast</option>
+                  <option value="secure">secure</option>
+                </select>
+                <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+              </div>
             </div>
-            <div className={FIELD_WRAP}>
-              <select
-                name="mevMode"
-                value={view.mevMode}
-                onChange={handleChange}
-                disabled={disabled}
-                className={`${INP} appearance-none pr-8`}
-              >
-                <option value="fast">fast</option>
-                <option value="secure">secure</option>
-              </select>
-              <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Bribery (SOL)</span>
+                <StrategyTooltip name="briberyAmount" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="briberyAmount"
+                  value={view.briberyAmount ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("briberyAmount")}
+                  disabled={disabled}
+                  placeholder="e.g. 0.002"
+                  className={INP}
+                />
+              </div>
             </div>
           </div>
-          <div className="space-y-1">
-            <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-              <span>Bribery (SOL)</span>
-              <StrategyTooltip name="briberyAmount" />
-            </div>
-            <div className={FIELD_WRAP}>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="briberyAmount"
-                value={view.briberyAmount ?? ""}
-                onChange={handleChange}
-                onBlur={handleBlur("briberyAmount")}
-                disabled={disabled}
-                placeholder="e.g. 0.002"
-                className={INP}
-              />
-            </div>
-          </div>
-        </div>
+        )}
       </Card>
     </Section>
   );
@@ -451,12 +394,17 @@ const AdvancedTab = React.memo(function AdvancedTab({
   setConfig,
   disabled,
   children,
+  requiredOnly,
 }) {
   return (
     <>
       <Section>
         <Card title="Advanced" className="sm:col-span-2">
-          <AdvancedFields config={view} setConfig={setConfig} disabled={disabled} />
+          {requiredOnly ? (
+            <RequiredOnlyPlaceholder />
+          ) : (
+            <AdvancedFields config={view} setConfig={setConfig} disabled={disabled} strategy="sniper" />
+          )}
         </Card>
       </Section>
       {children}
@@ -797,13 +745,14 @@ const SniperConfig = ({
             disabled={disabled}
             handleChange={handleChange}
             handleBlur={handleBlur}
+            requiredOnly={showRequiredOnly}
           />
         )}
         {activeTab === "tokens" && (
           <TokensTab view={view} setConfig={setConfig} disabled={disabled} />
         )}
         {activeTab === "advanced" && (
-          <AdvancedTab view={view} setConfig={setConfig} disabled={disabled}>
+          <AdvancedTab view={view} setConfig={setConfig} disabled={disabled} requiredOnly={showRequiredOnly}>
             {typeof children !== "undefined" ? children : null}
           </AdvancedTab>
         )}

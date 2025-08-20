@@ -681,3 +681,19 @@ model UserRiskState {
   updatedAt      DateTime  @default(now()) @updatedAt
   user           User      @relation(fields: [userId], references: [id])
 }
+
+
+
+model StrategyCrash {
+  id        String   @id @default(uuid())
+  botId     String
+  userId    String?
+  mode      String?
+  event     String   // uncaughtException | unhandledRejection | exit | signal:SIGTERM | spawnError | ...
+  message   String?
+  stack     String?
+  createdAt DateTime @default(now())
+
+  @@index([botId, createdAt])
+  @@index([userId, createdAt])
+}

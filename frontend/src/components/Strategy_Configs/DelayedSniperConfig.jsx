@@ -46,7 +46,7 @@ const FIELD_WRAP =
 const INP =
   "w-full text-sm px-1.5 py-1.5 bg-transparent text-white placeholder:text-zinc-500 outline-none border-none focus:outline-none";
 
-const PRICE_WINS = ["", "1m", "5m", "15m", "30m", "1h"];
+const PRICE_WINS = ["", "1m", "5m", "30m", "1h"];
 const VOLUME_WINS = ["", "1m", "5m", "30m", "1h", "4h", "8h"];
 
 const Card = ({ title, right, children, className = "" }) => (

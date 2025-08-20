@@ -290,7 +290,7 @@ module.exports = async function trendFollowerStrategy(botCfg = {}) {
         /* ── NEW (add-only): multi-timeframe EMA alignment & SAR ── */
         let dir = 0; // 1 = long, -1 = short, 0 = flat/mixed
         try {
-          const tfData = await getTokenShortTermChange(null, mint, "15m", volWin);
+          const tfData = await getTokenShortTermChange(null, mint, "30m", volWin);
           let prices = [];
           if (tfData) {
             if (Array.isArray(tfData.prices)) prices = tfData.prices;

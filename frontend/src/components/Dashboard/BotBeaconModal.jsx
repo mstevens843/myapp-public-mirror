@@ -24,8 +24,7 @@ const STRATEGIES = {
   rotationBot: { label: "Rotation Bot", emoji: "🔁", icon: Bot },
   stealthBot: { label: "Stealth Bot", emoji: "🥷", icon: Bot },
 };
-
-// ✅ FIXED: Moved outside to avoid hook mismatch
+//  FIXED: Moved outside to avoid hook mismatch
 const StrategyChip = ({ mode }) => {
   const data = STRATEGIES[mode] ?? {};
   const Icon = data.icon || Bot;
@@ -37,30 +36,34 @@ const StrategyChip = ({ mode }) => {
   );
 };
 
-const FloatingBotBeacon = ({ runningBots = [], onOpenLogs, onOpenManageBots, onOpenConfig }) => {
+ const FloatingBotBeacon = ({ runningBots = [], onOpenLogs, onOpenManageBots, onOpenConfig }) => {
   const [, force] = useState(0);
   const [open, setOpen] = useState(false);
   const [showBeacon, setShowBeacon] = useState(true);
   const listRef = useRef(null);
-
-  const primaryBot = runningBots[0];
+  const hasBots = Array.isArray(runningBots) && runningBots.length > 0;
+  const primaryBot = hasBots ? runningBots[0] : null;
   const extraCount = Math.max(runningBots.length - 1, 0);
-
   useEffect(() => {
     const id = setInterval(() => force((v) => v + 1), 1000);
     return () => clearInterval(id);
   }, []);
-
   useEffect(() => {
     if (open && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [runningBots.length, open]);
+ // 🧠 Auto-hide when no bots; auto-show on first bot
+  const prevHasBots = useRef(false);
+  useEffect(() => {
+    if (hasBots && !prevHasBots.current) setShowBeacon(true); // bot started → show
+    if (!hasBots) setShowBeacon(false);                       // no bots → hide
+    prevHasBots.current = hasBots;
+  }, [hasBots]);
 
-  // ✅ Prevent UI but keep hooks stable
-  if (!primaryBot && !showBeacon) return null;
-
-  if (!showBeacon) {
+  // Nothing at all when there are no bots
+  if (!hasBots) return null;
+  if (hasBots && !showBeacon) {
     return (
       <div
         className="fixed bottom-4 right-4 z-[998] cursor-pointer group"
@@ -98,9 +101,9 @@ const FloatingBotBeacon = ({ runningBots = [], onOpenLogs, onOpenManageBots, onO
             <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-400" />
           </span>
 
-          {/* label */}
+          {/* label: show the real mode of the first (primary) bot */}
           <div className="flex items-center gap-2">
-            <StrategyChip mode="sniper" />
+            <StrategyChip mode={primaryBot?.mode ?? "sniper"} />
             <span className="text-zinc-400 text-xs">· {runningBots.length}</span>
             {extraCount > 0 && (
               <span className="text-xs text-zinc-400 font-medium">

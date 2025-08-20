@@ -1689,13 +1689,18 @@ const VALIDATORS = {
   stealthBot: (typeof validateStealthBot !== "undefined" ? validateStealthBot : undefined),
   stealthbot: (typeof validateStealthBot !== "undefined" ? validateStealthBot : undefined),
   schedulelauncher: (typeof validateScheduleLauncher !== "undefined" ? validateScheduleLauncher : undefined),
-  turboSniper: validateTurboSniper,
-  turbosniper: validateTurboSniper,
+  turboSniper: (typeof validateTurboSniper !== "undefined" ? validateTurboSniper : undefined),
 };
 
+/* ---------- main entry point ----------------------------------------- */
+function validateStrategyConfig(mode = "", cfg = {}) {
+  const fn = VALIDATORS[mode.toLowerCase()];
+  return fn ? fn(cfg) : validateSharedConfig(cfg);
+}
+
 module.exports = {
-  validateTurboSniper,
+  validateStrategyConfig,
+  validateSharedConfig,
   SmartExitMode,
   normalizeTurboConfig,
-  VALIDATORS,
 };

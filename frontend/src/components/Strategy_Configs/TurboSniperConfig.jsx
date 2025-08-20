@@ -514,7 +514,7 @@ const TurboSniperConfig = ({
   };
 
   /* select options */
-  const priceWins  = ["", "1m","5m","15m","30m","1h","2h","4h","6h"];
+  const priceWins  = ["", "1m","5m","30m","1h","2h","4h","6h"];
   const volumeWins = ["", "1m","5m","30m","1h","4h","8h","24h"];
 
   const inp =

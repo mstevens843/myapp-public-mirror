@@ -7,26 +7,22 @@
  * - Wraps the app in ErrorBoundary and global providers
  * - Keeps your existing routes and tabs
  */
-
 import { Buffer } from "buffer";
 import process from "process";
 if (!window.Buffer) window.Buffer = Buffer;
 if (!window.process) window.process = process;
-
 import React, { StrictMode, useEffect } from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { Toaster } from "sonner";
-
 /* 🔐 CSRF bootstrap */
 import useCsrfBootstrap from "@/hooks/useCsrfBootstrap";
-
 /* Supabase */
 import { supabase } from "./lib/supabase";
-
 /* Dashboard / Pages */
 import LandingPage from "./components/Dashboard/LandingPage";
-import App from "./AppWithFlags"; // Feature-flag aware app
+// import App from "./AppWithFlags"; // Feature-flag aware app
+import App from "./App";
 import WalletsTab from "./components/Dashboard/WalletsTab";
 import PaymentsTab from "./components/Dashboard/PaymentsTab";
 import MyAccountTab from "./components/Dashboard/MyAccountTab";
@@ -37,18 +33,15 @@ import OpenTradesTab from "./components/Dashboard/OpenTradesTab";
 import ChartPanelRoute from "./components/Tables_Charts/ChartPanelRoute";
 import PaymentSuccess from "./components/Dashboard/PaymentsTab/PaymentSuccess";
 import PaymentCancel from "./components/Dashboard/PaymentsTab/PaymentCancel";
-
 /* Auth */
 import Verify2FA from "./components/Auth/verify2fa";
 import ForgotPassword from "@/components/Auth/ForgotPassword";
 import ResetPassword from "@/components/Auth/ResetPassword";
 import ConfirmEmail from "./components/Auth/ConfirmEmail";
 import EmailConfirmed from "./components/Auth/EmailConfirmed";
-
 /* Legal */
 import TermsOfService from "./components/AuthWallet/TermsOfService";
 import PrivacyPolicy from "./components/AuthWallet/PrivacyPolicy";
-
 /* Layout & Providers */
 import Layout from "./Layout";
 import { SupabaseSessionProvider } from "./contexts/SupbaseSessionContext";
@@ -56,11 +49,9 @@ import { PrefsProvider } from "./contexts/prefsContext";
 import { UserProvider } from "./contexts/UserProvider";
 import { UserPrefsProvider } from "@/contexts/UserPrefsContext";
 import ErrorBoundary from "./components/ErrorBoundary";
-
 /* UI / Styles */
 import "./styles/dashboard.css";
 import "./styles/tailwind.css";
-
 /* Solana Wallet */
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
 import { PhantomWalletAdapter } from "@solana/wallet-adapter-wallets";
