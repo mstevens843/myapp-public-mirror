@@ -17,7 +17,8 @@ async function isSafeToBuyDetailed(mint, options = {}) {
   if (
     options === false ||                                     // disableSafety master flag
     (typeof options === "object" &&
-      Object.values(options).every((v) => v === false))      // every flag false
+      Object.keys(options).length > 0 &&
+      Object.values(options).every((v) => v === false))      // every flag false, but not for empty {}
   ) {
     return { passed: true };
   }

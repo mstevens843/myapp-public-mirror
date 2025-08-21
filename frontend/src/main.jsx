@@ -83,6 +83,12 @@ function AuthHandler() {
 
 /* Validate Solana RPC endpoint early to fail fast in misconfig */
 const endpoint = import.meta.env.VITE_SOLANA_RPC_URL;
+/* 🔎 Debug: dump envs at startup */
+console.log("[env check] VITE_API_BASE_URL =", import.meta.env.VITE_API_BASE_URL);
+console.log("[env check] VITE_WS_BASE_URL =", import.meta.env.VITE_WS_BASE_URL);
+console.log("[env check] VITE_WS_PATH =", import.meta.env.VITE_WS_PATH);
+
+
 if (!endpoint || !endpoint.startsWith("http")) {
   throw new Error("❌ Invalid SOLANA RPC URL: " + endpoint);
 }

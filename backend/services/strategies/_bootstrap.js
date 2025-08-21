@@ -10,6 +10,7 @@ const fs = require("fs");
 const path = require("path");
 
 const FATAL_DELAY_MS = 120;
+const BOOTSTRAP_DEBUG = false;
 
 function emit(level, line) {
   // one human line the UI already understands, plus JSON for future tooling
@@ -48,7 +49,7 @@ const absCfg    = path.isAbsolute(cfgPath)    ? cfgPath    : path.resolve(proces
 if (!fs.existsSync(absScript)) fatal(`strategy script not found at ${absScript}`);
 if (!fs.existsSync(absCfg))    fatal(`config JSON not found at ${absCfg}`);
 
-emit("INFO", `Bootstrap loading ${path.basename(absScript)} with cfg ${path.basename(absCfg)}`);
+if (BOOTSTRAP_DEBUG) emit("INFO", `Loading ${path.basename(absScript)} with cfg ${path.basename(absCfg)}`);
 
 let cfg;
 try {

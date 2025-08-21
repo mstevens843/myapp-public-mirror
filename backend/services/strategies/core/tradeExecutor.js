@@ -212,7 +212,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           : undefined,
       });
       if (!txHash) throw new Error("swap-failed: executeSwap() returned null");
-      trackPendingTrade(txHash, mint, strategy);
+      trackPendingTrade(txHash, mint, meta.botId || strategy);
     } catch (err) {
       _coolOffByMint[mint] = Date.now(); // ADD: start cooldown on any failure
       console.error("❌ Swap failed:", err.message);
@@ -236,7 +236,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
     const baseUsd = await getPriceCached(userId, quote.inputMint);
     entryPriceUSD = baseUsd ? entryPrice * baseUsd : null;
-    usdValue      = baseUsd ? +((quote.inAmount / 1e9) * baseUsd).toFixed(2) : null;
+    usdValue      = baseUsd ? +((Number(quote.inAmount) / 10 ** inDec) * baseUsd).toFixed(2) : null;
     console.log("📊 Enrichment done:", { entryPrice, entryPriceUSD, usdValue });
   } catch (err) {
     console.error("❌ Enrichment error:", err.message);
@@ -302,6 +302,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     return txHash;
   }
 
+try {
   await prisma.trade.create({
     data: {
       id: uuid(),
@@ -310,6 +311,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       entryPriceUSD,
       inAmount: BigInt(quote.inAmount),
       outAmount: BigInt(quote.outAmount),
+      closedOutAmount: BigInt(0),
       strategy,
       txHash,
       userId,
@@ -332,6 +334,11 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       outputMint: quote.outputMint,
     },
   });
+} catch (err) {
+  console.error("❌ DB write failed (trade.create):", err.message);
+  // proceed without throwing; txHash already tracked
+}
+
 
   // ======== ADD: auto-create TP/SL rule if already supplied (no new inputs) ========
   if (((Number(tp) || 0) !== 0 || (Number(sl) || 0) !== 0) && !["rotationbot", "rebalancer"].includes(String(strategy||"").toLowerCase())) {

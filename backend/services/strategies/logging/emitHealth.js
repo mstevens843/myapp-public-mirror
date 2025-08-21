@@ -46,6 +46,15 @@ function emitHealth(botId, payload = {}) {
     // from ordinary logs.
     const line = `[HEALTH]${JSON.stringify(out)}`;
     console.log(line);
+    // Pretty human line (blue glow), does not affect parent parsers
+    try {
+      if (process.stdout && process.stdout.isTTY && process.env.NO_COLOR !== '1') {
+        const BLUE = "\x1b[94m"; const BOLD="\x1b[1m"; const RESET="\x1b[0m";
+        const short = `[HEALTH] tick ok — lastTickAt=${out.lastTickAt || payload.lastTickAt || "-"}, loop=${out.loopDurationMs ?? payload.loopDurationMs ?? "-"}ms, status=${out.status || payload.status || "running"}`;
+        console.log(`${BOLD}${BLUE}${short}${RESET}`);
+      }
+    } catch {}
+
   } catch {
     /* ignore logging errors */
   }

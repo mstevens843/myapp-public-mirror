@@ -104,8 +104,11 @@ module.exports = async function sniperStrategy(botCfg = {}) {
 
   /* safety toggle */
   const SAFETY_DISABLED =
-    botCfg.disableSafety === true ||
-    (botCfg.safetyChecks && Object.values(botCfg.safetyChecks).every(v => v === false));
+    botCfg.safetyEnabled === false ||                         // new: explicit enable flag
+    botCfg.disableSafety === true ||                          // legacy flag
+    (botCfg.safetyChecks &&
+     Object.keys(botCfg.safetyChecks).length > 0 &&
+     Object.values(botCfg.safetyChecks).every(v => v === false));
 
   const snipedMints = new Set();
   const cd        = createCooldown(COOLDOWN_MS);
@@ -180,9 +183,9 @@ module.exports = async function sniperStrategy(botCfg = {}) {
         }
 
         if (MIN_TOKEN_AGE_MIN != null) {
-          const cData = await getTokenCreationTime(null, mint);
-          const ageMin = cData?.blockUnixTime
-            ? Math.floor((Date.now()/1e3 - cData.blockUnixTime) / 60)
+          const createdAtUnix = await getTokenCreationTime(mint, botCfg.userId);
+          const ageMin = createdAtUnix
+            ? Math.floor((Date.now()/1e3 - createdAtUnix) / 60)
             : null;
           if (ageMin != null && ageMin < MIN_TOKEN_AGE_MIN) {
             summary.inc("ageSkipped");
@@ -193,9 +196,9 @@ module.exports = async function sniperStrategy(botCfg = {}) {
 
         /* token-age gate */
         if (MAX_TOKEN_AGE_MIN != null) {
-          const cData = await getTokenCreationTime(null, mint);
-          const ageMin = cData?.blockUnixTime
-            ? Math.floor((Date.now()/1e3 - cData.blockUnixTime) / 60)
+          const createdAtUnix = await getTokenCreationTime(mint, botCfg.userId);
+          const ageMin = createdAtUnix
+            ? Math.floor((Date.now()/1e3 - createdAtUnix) / 60)
             : null;
           if (ageMin != null && ageMin > MAX_TOKEN_AGE_MIN) {
             summary.inc("ageSkipped");
@@ -264,6 +267,7 @@ module.exports = async function sniperStrategy(botCfg = {}) {
         summary.inc("filters");
 
         /* safety checks */
+        log("info", "[SAFETY] Running safety checks…");
         if (!SAFETY_DISABLED) {
           const safeRes = await isSafeToBuyDetailed(mint, botCfg.safetyChecks || {});
           if (logSafetyResults(mint, safeRes, log, "sniper")) {
@@ -353,6 +357,7 @@ module.exports = async function sniperStrategy(botCfg = {}) {
           walletId        : botCfg.walletId,
           // publicKey: wallet?.publicKey || null,
           userId          : botCfg.userId,
+          botId          : botId,
           slippage        : SLIPPAGE,
           category        : "Sniper",
           tpPercent       : botCfg.tpPercent ?? TAKE_PROFIT,

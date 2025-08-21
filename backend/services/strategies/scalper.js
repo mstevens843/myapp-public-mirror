@@ -100,9 +100,12 @@ module.exports = async function scalperStrategy(botCfg = {}) {
   const stopLossPct    = botCfg.stopLossPct   != null ? +botCfg.stopLossPct   : 0.01; // -1%
 
   /* safety toggle */
-  const SAFETY_DISABLED =
-    botCfg.disableSafety === true ||
-    (botCfg.safetyChecks && Object.values(botCfg.safetyChecks).every((v) => v === false));
+const SAFETY_DISABLED =
+  botCfg.safetyEnabled === false ||    // NEW explicit master toggle
+  botCfg.disableSafety === true ||     // legacy support
+  (botCfg.safetyChecks &&
+   Object.keys(botCfg.safetyChecks).length > 0 &&
+   Object.values(botCfg.safetyChecks).every(v => v === false));
   
   const snipedMints = new Set();
 

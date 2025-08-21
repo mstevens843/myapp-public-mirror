@@ -1,14 +1,20 @@
 /**
  * index.js - Dual-mode bot controller: CLI launcher or Express + WebSocket server.
  *
- * What changed (this version)
- *  - WebSocket: use ws path filter via `{ server, path }`, no manual upgrade gate.
- *  - Clear connection logs: prints Origin + path on connect.
- *  - Origin allow-list applied after successful upgrade (no more silent 1006).
- *  - Optional override: WS_ALLOW_ANY_ORIGIN=true to bypass origin checks in dev.
- *  - Removed duplicate csrfProtection registration.
- *  - Kept your API hygiene: JSON body limit, CSRF seed/protect, rate limiting,
- *    trust proxy, DDoS guardrails, metrics flag + /metrics, WS heartbeat.
+ * SUPER-DESCRIPTIVE DIAGNOSTICS added for WebSocket path/origin/heartbeat issues:
+ *   • Boot-time WS config print (PORT, WS_PATH, origin policy, allow-list)
+ *   • Connection logs include origin, URL path, remoteAddress, x-forwarded-for
+ *   • Broadcast bridge logs type + sample of payload, and recipient count
+ *   • Close/error logs include code + reason + human meaning
+ *   • Heartbeat reports culled clients and totals
+ *
+ * Toggle verbosity (defaults ON):
+ *   WS_VERBOSE=0   -> silence noisy info logs
+ *   WS_ALLOW_ANY_ORIGIN=true (dev) bypasses origin allow-list
+ *
+ * What changed vs your previous new version
+ *  - Added detailed logging around WS bootstrap, connection lifecycle, and broadcast path.
+ *  - No behavioral change to message contract (still relays payload as-is).
  */
 
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
@@ -42,6 +48,10 @@ const { ensureCsrfSeed, csrfProtection } = require('./middleware/csrf');
 
 // Unified metrics flag
 const METRICS_ENABLED = String(process.env.METRICS_ENABLED || '').trim().toLowerCase() === 'true';
+
+// Verbose switch (default ON for forensic phase)
+const WS_VERBOSE = false;
+function vinfo(...args) { if (WS_VERBOSE) console.info('[WS]', ...args); }
 
 // ----------------------------------------------------------------------------
 // Global process-level error handling
@@ -246,26 +256,76 @@ if (modeFromCLI) {
       .split(',').map(s => s.trim()).filter(Boolean)
   );
 
-  // Heartbeat
+  // Boot-time config print
+  (function printWsBootConfig() {
+    vinfo('boot', {
+      PORT,
+      WS_PATH,
+      WS_ALLOW_ANY_ORIGIN,
+      ALLOW_ORIGINS: Array.from(ALLOW_ORIGINS),
+      NODE_ENV: process.env.NODE_ENV,
+    });
+    if (!WS_ALLOW_ANY_ORIGIN && ALLOW_ORIGINS.size === 0) {
+      console.warn('[WS] No allowed origins configured. In dev you can set WS_ALLOW_ANY_ORIGIN=true or CORS_ORIGINS=http://localhost:5173');
+    }
+  })();
+
+  // Heartbeat / metrics
   let wsPingInterval;
-  const wsHealth = { connections: 0, disconnections: 0 };
+  const wsHealth = { connections: 0, disconnections: 0, culled: 0 };
 
   // Broadcast bridge
   const clients = new Set();
+  function shortSample(v) {
+    try {
+      const s = typeof v === 'string' ? v : JSON.stringify(v);
+      return s.length > 240 ? s.slice(0, 240) + '…' : s;
+    } catch { return String(v).slice(0, 240); }
+  }
   injectBroadcast((line) => {
+    const type = typeof line;
+    const msg = shortSample(line);
+    vinfo('broadcast', { type, len: (msg || '').length, sample: msg });
+    let sent = 0;
     for (const client of clients) {
       if (client.readyState === client.OPEN) {
-        try { client.send(line); } catch {}
+        try { client.send(line); sent++; } catch (e) {
+          console.warn('[WS] failed to send to a client:', e?.message);
+        }
       }
     }
+    vinfo('broadcast result', { recipients: clients.size, delivered: sent });
   });
+
+  function meaningForCloseCode(code) {
+    const map = {
+      1000: 'normal',
+      1001: 'going away',
+      1002: 'protocol error',
+      1003: 'unsupported data',
+      1005: 'no status',
+      1006: 'abnormal close (handshake drop)',
+      1007: 'invalid payload',
+      1008: 'policy violation (likely origin/CORS)',
+      1009: 'message too big',
+      1010: 'mandatory extension',
+      1011: 'internal error',
+      1012: 'service restart',
+      1013: 'try again later',
+      1015: 'TLS handshake failure',
+    };
+    return map[code] || 'unknown';
+  }
 
   wss.on('connection', (ws, req) => {
     const origin = (req.headers.origin || '').trim();
-    console.log('[WS] connection', { origin, path: req.url });
+    const xff = (req.headers['x-forwarded-for'] || '').toString();
+    const remote = req.socket?.remoteAddress || req.connection?.remoteAddress;
+
+    if (WS_VERBOSE) console.log('[WS] connection', { origin, path: req.url, xff, remote });
 
     if (!WS_ALLOW_ANY_ORIGIN && ALLOW_ORIGINS.size && origin && !ALLOW_ORIGINS.has(origin)) {
-      console.warn('[WS] closing – origin not allowed:', origin,
+      if (WS_VERBOSE) console.warn('[WS] closing – origin not allowed:', origin,
         'allowed:', Array.from(ALLOW_ORIGINS));
       try { ws.close(1008, 'origin not allowed'); } catch {}
       return;
@@ -274,15 +334,30 @@ if (modeFromCLI) {
     ws.isAlive = true;
     wsHealth.connections++;
     clients.add(ws);
-    console.log('🧠 LogsConsole connected via WebSocket');
+    if (WS_VERBOSE) console.log('🧠 LogsConsole connected via WebSocket (total clients:', clients.size, ')');
 
     ws.on('pong', () => { ws.isAlive = true; });
-    ws.on('close', () => {
+    ws.on('message', (buf) => {
+      // Usually clients don't send, but log if they do.
+      try {
+        const s = buf.toString();
+        vinfo('client->server message', { len: s.length, sample: shortSample(s) });
+      } catch {}
+    });
+    ws.on('close', (code, reasonBuf) => {
+      const reason = Buffer.isBuffer(reasonBuf) ? reasonBuf.toString() : String(reasonBuf || '');
       wsHealth.disconnections++;
       clients.delete(ws);
-      console.log('🔌 WebSocket disconnected');
+      if (WS_VERBOSE) console.warn('🔌 WebSocket disconnected', { code, meaning: meaningForCloseCode(code), reason, remaining: clients.size });
       try { metrics.recordWsDisconnect(wsHealth.connections, wsHealth.disconnections); } catch {}
     });
+    ws.on('error', (err) => {
+      if (WS_VERBOSE) console.error('[WS] socket error:', err?.message || err);
+    });
+  });
+
+  wss.on('error', (err) => {
+    if (WS_VERBOSE) console.error('[WS] server error:', err?.message || err);
   });
 
   // Heartbeat every 30s
@@ -290,18 +365,23 @@ if (modeFromCLI) {
     for (const ws of wss.clients) {
       if (ws.isAlive === false) {
         wsHealth.disconnections++;
-        console.warn('⚠️  Terminating stale WebSocket client');
+        wsHealth.culled++;
+        if (WS_VERBOSE) console.warn('⚠️  Terminating stale WebSocket client');
         try { ws.terminate(); } catch (err) {
-          console.warn('⚠️  Failed to terminate stale client:', err.message);
+          if (WS_VERBOSE) console.warn('⚠️  Failed to terminate stale client:', err.message);
         }
         try { metrics.recordWsDisconnect(wsHealth.connections, wsHealth.disconnections); } catch {}
         continue;
       }
       ws.isAlive = false;
       try { ws.ping(); } catch (e) {
-        console.warn('⚠️  Failed to ping client:', e.message);
+        if (WS_VERBOSE) console.warn('⚠️  Failed to ping client:', e.message);
       }
     }
+    vinfo('heartbeat', {
+      clients: wss.clients.size,
+      health: wsHealth,
+    });
   }, 30_000);
 
   // Graceful shutdown
@@ -338,6 +418,7 @@ if (modeFromCLI) {
   // ───────────────────────── Start server ──────────────────────
   server.listen(PORT, () => {
     console.log(`🧠 Bot controller API + WS running @ http://localhost:${PORT}${WS_PATH}`);
+    vinfo('server ready', { PORT, WS_PATH, ALLOW_ORIGINS: Array.from(ALLOW_ORIGINS), WS_ALLOW_ANY_ORIGIN });
     try {
       console.log('[boot] loading background jobs…');
       const { startBackgroundJobs } = require('./services/backgroundJobs');

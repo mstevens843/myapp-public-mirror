@@ -132,9 +132,12 @@ module.exports = async function paperTrader(cfg = {}) {
   const PRIORITY_FEE = +cfg.priorityFeeLamports   || 0;
 
   /* safety toggle */
-  const SAFETY_DISABLED =
-    cfg.disableSafety === true ||
-    (cfg.safetyChecks && Object.values(cfg.safetyChecks).every(v => v === false));
+const SAFETY_DISABLED =
+  botCfg.safetyEnabled === false ||    // NEW explicit master toggle
+  botCfg.disableSafety === true ||     // legacy support
+  (botCfg.safetyChecks &&
+   Object.keys(botCfg.safetyChecks).length > 0 &&
+   Object.values(botCfg.safetyChecks).every(v => v === false));
 
   /* ── runtime state ───────────────────────────────── */
   const cd         = createCooldown(COOLDOWN_MS);

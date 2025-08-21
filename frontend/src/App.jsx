@@ -114,6 +114,11 @@ const CONFIG_BUILDERS = {
     delayBeforeBuyMs: toNum(cfg.delayBeforeBuyMs), 
     minMarketCap: cfg.minMarketCap,
     maxMarketCap: cfg.maxMarketCap,
+    safetyEnabled     : cfg.safetyEnabled !== false,  // default ON
+    safetyChecks      : (cfg.safetyChecks && typeof cfg.safetyChecks === "object" && Object.keys(cfg.safetyChecks).length)
+                         ? cfg.safetyChecks
+                         : { simulation: true, liquidity: true, authority: true, topHolders: true },
+
   }),
   scalper: (cfg, wallets, target, resolved, activeWallet) => ({
     ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),

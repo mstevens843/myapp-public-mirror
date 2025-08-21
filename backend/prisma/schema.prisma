@@ -166,7 +166,7 @@ model Trade {
   entryPriceUSD   Float?
   inAmount        BigInt
   outAmount       BigInt
-  closedOutAmount BigInt
+  closedOutAmount BigInt @default(0)
   exitPrice       Float?
   exitPriceUSD    Float?
   strategy        String

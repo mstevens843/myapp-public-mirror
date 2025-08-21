@@ -124,9 +124,12 @@ module.exports = async function breakoutStrategy(botCfg = {}) {
   const timeOfDayFilter = botCfg.timeOfDayFilter || null; // { start:"HH:MM", end:"HH:MM" }
 
   /* safety toggle */
-  const SAFETY_DISABLED =
-    botCfg.disableSafety === true ||
-    (botCfg.safetyChecks && Object.values(botCfg.safetyChecks).every(v => v === false));
+const SAFETY_DISABLED =
+  botCfg.safetyEnabled === false ||    // NEW explicit master toggle
+  botCfg.disableSafety === true ||     // legacy support
+  (botCfg.safetyChecks &&
+   Object.keys(botCfg.safetyChecks).length > 0 &&
+   Object.values(botCfg.safetyChecks).every(v => v === false));
 
   const snipedMints = new Set();
 

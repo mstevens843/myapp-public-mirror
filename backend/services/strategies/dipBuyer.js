@@ -105,9 +105,12 @@ const MIN_TOKEN_AGE_MIN= botCfg.minTokenAgeMinutes != null
     const DELAY_MS = +botCfg.delayBeforeBuyMs || 0;
     const PRIORITY_FEE = +botCfg.priorityFeeLamports || 0;
   /* safety toggle */
-  const SAFETY_DISABLED =
-    botCfg.disableSafety === true ||
-    (botCfg.safetyChecks && Object.values(botCfg.safetyChecks).every(v => v === false));
+const SAFETY_DISABLED =
+  botCfg.safetyEnabled === false ||    // NEW explicit master toggle
+  botCfg.disableSafety === true ||     // legacy support
+  (botCfg.safetyChecks &&
+   Object.keys(botCfg.safetyChecks).length > 0 &&
+   Object.values(botCfg.safetyChecks).every(v => v === false));
 
     const snipedMints = new Set();
     const cd        = createCooldown(COOLDOWN_MS);
@@ -201,9 +204,9 @@ process.on("unhandledRejection", (reason, p) => {
         }
 
         if (MIN_TOKEN_AGE_MIN != null) {
-          const cData = await getTokenCreationTime(null, mint);
-          const ageMin = cData?.blockUnixTime
-            ? Math.floor((Date.now()/1e3 - cData.blockUnixTime) / 60)
+          const createdAtUnix = await getTokenCreationTime(mint, botCfg.userId);
+          const ageMin = createdAtUnix
+            ? Math.floor((Date.now()/1e3 - createdAtUnix) / 60)
             : null;
           if (ageMin != null && ageMin < MIN_TOKEN_AGE_MIN) {
             summary.inc("ageSkipped");
@@ -214,9 +217,9 @@ process.on("unhandledRejection", (reason, p) => {
 
         /* token-age gate */
         if (MAX_TOKEN_AGE_MIN != null) {
-      const cData = await getTokenCreationTime(null, mint);
-          const ageMin = cData?.blockUnixTime
-            ? Math.floor((Date.now()/1e3 - cData.blockUnixTime) / 60)
+          const createdAtUnix = await getTokenCreationTime(mint, botCfg.userId);
+          const ageMin = createdAtUnix
+            ? Math.floor((Date.now()/1e3 - createdAtUnix) / 60)
             : null;
           if (ageMin != null && ageMin > MAX_TOKEN_AGE_MIN) {
             summary.inc("ageSkipped");
