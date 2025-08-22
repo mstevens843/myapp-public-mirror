@@ -50,44 +50,64 @@ const EXCLUDE_MINTS = new Set([
 
 // Daily recap timezone (kept from original)
 const PDT_ZONE = "America/Los_Angeles";
-const MIN_IMPORT_USD = 0.25; 
+const MIN_IMPORT_USD = 0.25;
+const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 1000);
+const MAX_PRICE_STALENESS_SEC = Number(process.env.MAX_PRICE_STALENESS_SEC || 6*3600)
 
 router.use(requireAuth);      // all routes below are now authenticated
 
 // Inject any on-chain tokens that aren’t yet in the trades table
 // (or whose balance grew outside the app, e.g. bought on-DEX)
-const injectUntracked = async (userId) => {
+const priceMod_TRADES = require("../services/strategies/paid_api/getTokenPrice");
+const getTokenPrice_TRADES =
+  typeof priceMod_TRADES === "function" ? priceMod_TRADES : priceMod_TRADES.getTokenPrice;
+const getPricesWithLiquidityBatch_TRADES =
+  priceMod_TRADES.getPricesWithLiquidityBatch || (async (userId, mints)=>{
+    // fallback: per-mint (should not happen if file updated)
+    const out = {};
+    for (const m of mints) out[m] = { price: await getTokenPrice_TRADES(userId, m), liquidity: 0, updateUnixTime: 0 };
+    return out;
+  });
+
+
+
+async function injectUntracked(userId) {
   let wroteSomething = false;
 
-  /* ── 1. All wallets for this user ────────────────────────────── */
+  // 1) All wallets for this user
   const wallets = await prisma.wallet.findMany({
     where  : { userId },
     select : { id: true, label: true, publicKey: true }
   });
 
   for (const w of wallets) {
-    /* ── 2. Live token balances on chain ───────────────────────── */
+    // 2) Live token balances on chain
     const balances = await getTokenAccountsAndInfo(new PublicKey(w.publicKey));
+    const entries = balances
+      .filter(({ mint, amount }) => amount > 0 && !EXCLUDE_MINTS.has(mint));
 
-    for (const { mint, amount } of balances) {
-      /* Skip dust / excluded mints (amount==0 or in EXCLUDE list) */
-      if (amount <= 0 || EXCLUDE_MINTS.has(mint)) continue;
+    if (entries.length === 0) continue;
 
-      /* ── 2a. Fetch decimals & USD value ─────────────────────── */
+    // 2a) Batch quote all mints with liquidity
+    const mints = entries.map(e => e.mint);
+    const quotes = await getPricesWithLiquidityBatch_TRADES(userId, mints);
+
+    for (const { mint, amount } of entries) {
+      const q = quotes[mint] || {};
+      const price = Number(q.price || 0);
+      const liquidity = Number(q.liquidity || 0);
+      const updateUnixTime = Number(q.updateUnixTime || 0);
+      const fresh = updateUnixTime && ((Date.now()/1e3) - updateUnixTime) <= MAX_PRICE_STALENESS_SEC;
+
+      // Dust/quality gates
+      const uiAmount = Number(amount); // already UI units
+      const valueUsd = uiAmount * price;
+      if (valueUsd <= MIN_IMPORT_USD) continue;               // skip dust
+      if (!fresh || liquidity < MIN_LIQUIDITY_USD) continue;  // skip illiquid/stale
+
+      // 3) Raw balance, already-tracked amount, delta
       const decimals = await getMintDecimals(mint).catch(() => 0);
-      const price    = await getCachedPrice(mint) ??
-                       await getTokenPrice(userId, mint);
-
-      const valueUsd = (Number(amount) / 10 ** decimals) * price;
-
-      /* 🚫 Skip if worth ≤ $0.25 */
-      if (valueUsd <= MIN_IMPORT_USD) {
-        console.log(`⏭️  injectUntracked skipped ${mint} (${w.label}) — $${valueUsd.toFixed(3)}`);
-        continue;
-      }
-
-      /* ── 3. Raw balance, already-tracked amount, delta ───────── */
-      const rawBalance = BigInt(Math.floor(Number(amount) * 10 ** decimals));
+      const rawBalance = BigInt(Math.floor(uiAmount * 10 ** decimals));
 
       const trackedRows = await prisma.trade.findMany({
         where  : { walletId: w.id, mint, exitedAt: null },
@@ -99,14 +119,14 @@ const injectUntracked = async (userId) => {
         return sum + (row.outAmount - closed);
       }, 0n);
 
-      if (trackedAmt >= rawBalance) continue;            // fully covered
-
+      if (trackedAmt >= rawBalance) continue;
       const delta = rawBalance - trackedAmt;
       if (delta === 0n) continue;
 
-      /* ── 4. Inject missing Δ into trades table ──────────────── */
+      // 4) Inject missing Δ into trades table
       await prisma.trade.create({
         data: {
+          userId: userId,
           mint,
           tokenName       : await getTokenName(mint).catch(() => null),
           entryPrice      : null,
@@ -126,12 +146,13 @@ const injectUntracked = async (userId) => {
       });
 
       wroteSomething = true;
-      console.log(`🆕 Injected → ${mint} (${w.label})  Δ ${delta}`);
+      console.log(`🆕 Injected → ${mint} (${w.label})  Δ ${delta}  $${valueUsd.toFixed(2)}  liq=${liquidity}`);
     }
   }
 
   return wroteSomething;
-};
+}
+
 
 /* ───────────────────────────── 1. RECENT CLOSED TRADES ─────────────────────────── */
 router.get("/", async (req, res) => {
@@ -350,6 +371,37 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
     const solBalance = await getWalletBalance(connWallet);
     const solPrice   = await getCachedPrice(SOL_MINT, { readOnly:true });
 
+    // ── 4a) Batched token quotes (liquidity + freshness gate) ───────────────
+      const nowSec = Math.floor(Date.now() / 1e3);
+
+      // Mints currently on-chain (non-stable, non-dust)
+      const onchainMints = tokenAccounts
+        .filter(t => !STABLES.has(t.mint) && t.amount >= 1e-6)
+        .map(t => t.mint);
+
+      // “Sold but logged” mints (in DB with remaining rows; not on-chain now)
+      const soldMints = Array.from(new Set(
+        openRows.map(r => r.mint)
+      )).filter(m => !STABLES.has(m) && !onchainMints.includes(m));
+
+      // Unique list to quote
+      const mintsToQuote = Array.from(new Set([...onchainMints, ...soldMints]));
+
+      // One batched hit to Birdeye multi_price?include_liquidity=true
+      const quotes = mintsToQuote.length
+        ? await getPricesWithLiquidityBatch_TRADES(req.user.id, mintsToQuote)
+        : {};
+
+      // Gate helper
+      function priceFor(mint) {
+        const q = quotes[mint] || {};
+        const price = Number(q.price || 0);
+        const liq   = Number(q.liquidity || 0);
+        const ut    = Number(q.updateUnixTime || 0);
+        const fresh = ut && (nowSec - ut) <= MAX_PRICE_STALENESS_SEC;
+        return (fresh && liq >= MIN_LIQUIDITY_USD) ? price : 0;
+      }
+
     // const settings     = loadSettings();
     // const userSettings = settings[wallet.label] || {}; // tp/sl per wallet
     const tpSlRules = await prisma.tpSlRule.findMany({
@@ -414,7 +466,7 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
         ? +(totalCostUSD / totalTokReal).toFixed(6)
         : null;
 
-      const price   = await getTokenPrice(req.user.id, mint);
+      const price   = priceFor(mint);
       const valueUSD= +(amount * price).toFixed(2);
       const tpSl    = userSettings[mint] || null;
       console.log("🖼️ Logo for", tokenName, mint, "→", logoUri);
@@ -443,7 +495,7 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
     const seen = new Set(positions.map(p=>p.mint));
     for (const r of openRows) {
       if (seen.has(r.mint) || STABLES.has(r.mint)) continue;
-      const price = await getTokenPrice(req.user.id,r.mint);
+      const price = priceFor(r.mint);
       positions.push({
         mint : r.mint,
         name : await getTokenName(r.mint) || "Unknown",
@@ -805,6 +857,38 @@ router.delete("/open", requireAuth, async (req, res) => {
 
   res.json({ message: `${mints.length} mint(s) cleared from open trades.` });
 });
+
+
+
+// routes/trades.route.js (append near other GETs)
+router.post("/prices/batch", requireAuth, async (req, res) => {
+  try {
+    const mints = (req.body?.mints || []).filter(Boolean);
+    if (!mints.length) return res.json({});
+
+    // Reuse your existing liquidity-aware helpers:
+    const { getPricesWithLiquidityBatch } =
+      require("../services/strategies/paid_api/getTokenPrice");
+
+    // Decide thresholds centrally (env or sensible defaults)
+    const MIN_LIQ = Number(process.env.BIRDEYE_MIN_LIQ_USD || 50_000);
+    const STALE_S = Number(process.env.BIRDEYE_STALE_SEC   || 3600);
+
+    const quotes = await getPricesWithLiquidityBatch(req.user.id, mints, {
+      minLiquidityUSD: MIN_LIQ,
+      maxStaleSeconds: STALE_S,
+    });
+
+    // Normalize to { mint: price } with zeroed rejects
+    const out = {};
+    for (const mint of mints) out[mint] = quotes[mint]?.price || 0;
+    res.json(out);
+  } catch (err) {
+    console.error("batch prices failed:", err);
+    res.status(500).json({ error: err.message || "Failed to fetch quotes" });
+  }
+});
+
 
 /* ------------------------------------------------------------------------------ */
 module.exports = router;

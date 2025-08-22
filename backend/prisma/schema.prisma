@@ -103,7 +103,7 @@ model User {
   /// When the destination pubkey was verified (null if not).
   autoReturnDestVerifiedAt      DateTime?
   armSessions ArmSession[]
-
+  closedTrade   ClosedTrade[]   @relation("ClosedTrades")
   trades Trade[] @relation("UserTrades") 
 }
 
@@ -218,6 +218,8 @@ model Trade {
 
 model ClosedTrade {
   id              Int      @id @default(autoincrement())
+  userId          String
+
   mint            String
   tokenName       String?
   entryPrice      Float?
@@ -242,6 +244,8 @@ model ClosedTrade {
   timestamp       DateTime @default(now())
   walletId Int
   wallet   Wallet @relation(fields: [walletId], references: [id])
+  user     User   @relation("ClosedTrades", fields: [userId], references: [id], onDelete: Cascade)
+
 }
 
 model SavedConfigs {

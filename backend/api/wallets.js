@@ -68,9 +68,23 @@ const EXCLUDE_MINTS = new Set([
   "Es9vMFrzaCER9SADJdTjaiCviCqiSBamEn3DcSjh3rCt", // USDC legacy
 ]);
 
-const MIN_IMPORT_USD = 0.25; // 💰 dust bar
+const MIN_IMPORT_USD = 0.25;
+const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 1000);
+const MAX_PRICE_STALENESS_SEC = Number(process.env.MAX_PRICE_STALENESS_SEC || 6*3600);
 
-const injectUntracked = async (userId, walletIds = null) => {
+// Import the enhanced price helper (compatible with old default export)
+const priceMod_WALLETS = require("../services/strategies/paid_api/getTokenPrice");
+const getTokenPrice_WALLETS =
+  typeof priceMod_WALLETS === "function" ? priceMod_WALLETS : priceMod_WALLETS.getTokenPrice;
+const getPricesWithLiquidityBatch_WALLETS =
+  priceMod_WALLETS.getPricesWithLiquidityBatch || (async (userId, mints)=>{
+    const out = {};
+    for (const m of mints) out[m] = { price: await getTokenPrice_WALLETS(userId, m), liquidity: 0, updateUnixTime: 0 };
+    return out;
+  });
+
+
+async function injectUntracked(userId, walletIds = null) {
   let wrote = false;
 
   const wallets = await prisma.wallet.findMany({
@@ -80,16 +94,29 @@ const injectUntracked = async (userId, walletIds = null) => {
 
   for (const w of wallets) {
     const balances = await getTokenAccountsAndInfo(new PublicKey(w.publicKey));
+    const entries = balances
+      .filter(({ mint, amount }) => amount > 0 && !EXCLUDE_MINTS.has(mint));
 
-    for (const { mint, amount } of balances) {
-      if (amount <= 0 || EXCLUDE_MINTS.has(mint)) continue;
+    if (entries.length === 0) continue;
+
+    // Batch quotes with liquidity
+    const mints = entries.map(e => e.mint);
+    const quotes = await getPricesWithLiquidityBatch_WALLETS(userId, mints);
+
+    for (const { mint, amount } of entries) {
+      const q = quotes[mint] || {};
+      const price = Number(q.price || 0);
+      const liquidity = Number(q.liquidity || 0);
+      const updateUnixTime = Number(q.updateUnixTime || 0);
+      const fresh = updateUnixTime && ((Date.now()/1e3) - updateUnixTime) <= MAX_PRICE_STALENESS_SEC;
+
+      const uiAmount = Number(amount);
+      const valueUsd = uiAmount * price;
+      if (valueUsd <= MIN_IMPORT_USD) continue;
+      if (!fresh || liquidity < MIN_LIQUIDITY_USD) continue;
 
       const decimals = await getMintDecimals(mint).catch(() => 0);
-      const price    = await getTokenPrice(userId, mint).catch(() => 0);
-      const valueUsd = (Number(amount) / 10 ** decimals) * price;
-      if (valueUsd <= MIN_IMPORT_USD) continue; // skip dust
-
-      const rawBalance = BigInt(Math.floor(Number(amount) * 10 ** decimals));
+      const rawBalance = BigInt(Math.floor(uiAmount * 10 ** decimals));
 
       const trackedRows = await prisma.trade.findMany({
         where  : { walletId: w.id, mint, exitedAt: null },
@@ -104,6 +131,7 @@ const injectUntracked = async (userId, walletIds = null) => {
 
       await prisma.trade.create({
         data: {
+          userId: userId,
           mint,
           tokenName       : await getTokenName(mint).catch(() => null),
           entryPrice      : null,
@@ -123,11 +151,11 @@ const injectUntracked = async (userId, walletIds = null) => {
       });
 
       wrote = true;
-      console.log(`🆕 injectUntracked → ${mint} (${w.label}) Δ ${delta}`);
+      console.log(`🆕 injectUntracked → ${mint} (${w.label}) Δ ${delta}  $${valueUsd.toFixed(2)}  liq=${liquidity}`);
     }
   }
   return wrote;
-};
+}
 
 // ✅ POST /api/wallets/balance
 // Body: { label: "default" }
@@ -859,133 +887,131 @@ router.delete("/wipe", authenticate, async (req, res) => {
 });
 
 
+// GET /api/wallets/portfolio?walletId=123
 router.get("/portfolio", authenticate, async (req, res) => {
   try {
+    const userId  = req.user?.id;
     const walletId = req.query.walletId;
-        console.log(`[portfolio] Received request: walletId=${walletId}`);
+    console.log(`[portfolio] Received request: walletId=${walletId}`);
+    if (!walletId) return res.status(400).json({ error: "Missing walletId" });
 
-    if (!walletId) {
-      return res.status(400).json({ error: "Missing walletId" });
-    }
-
-   const wallet = await prisma.wallet.findUnique({
-  where: { id: parseInt(walletId, 10) },
-  select: { publicKey: true }
-});
-        console.log(`[portfolio] Found wallet:`, wallet);
-
-
-    if (!wallet) {
-      return res.status(404).json({ error: "Wallet not found" });
-    }
+    const wallet = await prisma.wallet.findUnique({
+      where: { id: parseInt(walletId, 10) },
+      select: { publicKey: true }
+    });
+    if (!wallet?.publicKey) return res.status(404).json({ error: "Wallet not found" });
+    console.log(`[portfolio] Found wallet:`, wallet);
 
     const conn  = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
     const owner = new PublicKey(wallet.publicKey);
-        console.log(`[portfolio] Querying Solana balance for pubkey: ${wallet.publicKey}`);
+    console.log(`[portfolio] Querying Solana balance for pubkey: ${wallet.publicKey}`);
 
+    // 1) On-chain token accounts (+ native SOL)
     const { value } = await conn.getParsedTokenAccountsByOwner(
       owner,
       { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") }
     );
-        console.log(`[portfolio] Parsed token accounts count: ${value.length}`);
-
-
     const tokens = value
       .map(a => a.account.data.parsed.info)
-      .filter(i => +i.tokenAmount.uiAmount > 0.1)
+      .filter(i => +i.tokenAmount.uiAmount > 0) // include small dust; we'll filter later with USD value
       .map(i => ({
-        mint     : i.mint,
-        amount   : +i.tokenAmount.uiAmount,
-        decimals : +i.tokenAmount.decimals,
+        mint: i.mint,
+        amount: +i.tokenAmount.uiAmount,
+        decimals: +i.tokenAmount.decimals
       }));
-          console.log(`[portfolio] Raw token balances:`, tokens);
-
 
     const SOL_MINT = "So11111111111111111111111111111111111111112";
-    const solLamports = await conn.getBalance(owner);
-        console.log(`[portfolio] SOL lamports: ${solLamports}, SOL: ${solLamports / 1e9}`);
+    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    const basePass = new Set([SOL_MINT, USDC_MINT]);
 
-    if (solLamports > 0) {
-      tokens.push({
-        mint     : SOL_MINT,
-        amount   : solLamports / 1e9,
-        decimals : 9,
-      });
+    const lamports = await conn.getBalance(owner);
+    if (lamports > 0) {
+      tokens.push({ mint: SOL_MINT, amount: lamports / 1e9, decimals: 9 });
     }
 
+    // 2) Token metadata (name/symbol/logo) via wallet token_list (do NOT trust its price)
     let metaMap = {
       [SOL_MINT]: {
         name: "Solana",
         symbol: "SOL",
-        logo: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
-        price: 0,
+        logo:
+          "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
       },
     };
-
     try {
-      const { data } = await axios.get("https://public-api.birdeye.so/v1/wallet/token_list", {
-        params: { wallet: owner.toBase58() },
-        headers: {
-          "x-chain": "solana",
-          "X-API-KEY": process.env.BIRDEYE_API_KEY,
-        },
-        timeout: 5000,
-      });
-
+      const { data } = await require("axios").get(
+        "https://public-api.birdeye.so/v1/wallet/token_list",
+        {
+          params: { wallet: owner.toBase58(), ui_amount_mode: "scaled" },
+          headers: { "x-chain": "solana", "X-API-KEY": process.env.BIRDEYE_API_KEY },
+          timeout: 5000,
+        }
+      );
       const items = data?.data?.items || [];
       for (const item of items) {
         metaMap[item.address] = {
           name: item.name,
           symbol: item.symbol,
           logo: item.logoURI,
-          price: item.priceUsd,
         };
       }
     } catch (err) {
-      console.warn(`⚠️ Birdeye wallet fetch failed:`, err.message);
+      console.warn("❌ Birdeye wallet portfolio fetch failed:", err.response?.status || err.message);
     }
 
-    const unresolved = tokens.filter(t => !metaMap[t.mint]?.price).map(t => t.mint);
-    await Promise.all(unresolved.map(mint =>
-      limit(async () => {
-        try {
-          const { data } = await axios.get("https://public-api.birdeye.so/defi/price", {
-            params: { address: mint },
-            headers: {
-              "x-chain": "solana",
-              "X-API-KEY": process.env.BIRDEYE_API_KEY,
-            },
-            timeout: 3000,
-          });
-          const p = data?.data?.value ?? 0;
-          if (p > 0) metaMap[mint] = { ...(metaMap[mint] || {}), price: p };
-        } catch { /* ignore */ }
-      })
-    ));
+    // 3) Batch price+liquidity+staleness for ALL mints
+    const allMints = [...new Set(tokens.map(t => t.mint))];
+    const quotes = await getPricesWithLiquidityBatch_WALLETS(userId, allMints);
 
+    const MIN_VALUE_USD        = 0.50;
+    const MIN_LIQUIDITY_USD    = Number(process.env.MIN_LIQUIDITY_USD || 1000);
+    const MAX_PRICE_STALENESS  = Number(process.env.MAX_PRICE_STALENESS_SEC || 6 * 3600);
+    const now = Math.floor(Date.now() / 1000);
+
+    // 4) Build enriched rows with gates
     const enriched = tokens
       .map(t => {
+        const q = quotes[t.mint] || {};
+        const price = Number(q.price || 0);
+        const liquidity = Number(q.liquidity || 0);
+        const updatedAt = Number(q.updateUnixTime || 0);
+        const fresh = updatedAt > 0 && (now - updatedAt) <= MAX_PRICE_STALENESS;
+
+        // Base assets (SOL/USDC) are allowed through regardless of gates
+        const pass =
+          basePass.has(t.mint) ||
+          (price > 0 && fresh && liquidity >= MIN_LIQUIDITY_USD);
+
+        if (!pass) return null;
+
+        const valueUsd = t.amount * price;
+        if (!basePass.has(t.mint) && valueUsd < MIN_VALUE_USD) return null;
+
         const meta = metaMap[t.mint] || {};
-        const price = meta.price || 0;
         return {
-          ...t,
-          name: meta.name || `${t.mint.slice(0,4)}…${t.mint.slice(-4)}`,
+          mint: t.mint,
+          amount: t.amount,
+          decimals: t.decimals,
+          name: meta.name || `${t.mint.slice(0, 4)}…${t.mint.slice(-4)}`,
           symbol: meta.symbol || "",
           logo: meta.logo || "",
           price,
-          valueUsd: +(t.amount * price).toFixed(2),
+          valueUsd: +valueUsd.toFixed(2),
+          liquidity,
+          updateUnixTime: updatedAt,
         };
       })
+      .filter(Boolean)
       .sort((a, b) => b.valueUsd - a.valueUsd);
-          console.log(`[portfolio] Enriched portfolio:`, enriched);
 
-    res.json(enriched);
-
+    console.log("[portfolio] Enriched portfolio:", enriched);
+    return res.json(enriched);
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message || "Failed to fetch portfolio" });
   }
 });
+
 
 
 

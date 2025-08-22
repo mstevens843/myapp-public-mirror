@@ -48,8 +48,7 @@ export default function TpSlModal({
     // When editing, exclude this rule’s current allocation from the total
     const currentRuleAlloc = Math.max(
       settings.tpPercent || 0,
-      settings.slPercent || 0,
-      settings.sellPct || 0
+      settings.slPercent || 0
     );
     const totalExcludingThis = Math.max(0, totalAllocated - currentRuleAlloc);
 
@@ -82,7 +81,7 @@ export default function TpSlModal({
         });
       }
 
-      toast.success("✅ TP/SL saved");
+      toast.success("TP/SL saved");
       onSaved?.();
       onClose();
     } catch (e) {

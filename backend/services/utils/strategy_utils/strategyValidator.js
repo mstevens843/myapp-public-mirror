@@ -288,8 +288,148 @@ function validateSniper(cfg = {}) {
       errors.push("Sniper: maxSlippage must be between 0 % and 10 %");
   }
 
+  if (!isUnset(cfg.minPoolUsd)) {
+  if (!isNumeric(cfg.minPoolUsd) || toNum(cfg.minPoolUsd) < 0) {
+    errors.push("Sniper: minPoolUsd must be ≥ 0 USD");
+  }
+}
+
+  /* ────────────────────────────────────────────────────────────────
+     NEW: Exit Strategy validation (smartExitMode / smartExit / postBuyWatch)
+     ──────────────────────────────────────────────────────────────── */
+
+  // smartExitMode
+  if (!isUnset(cfg.smartExitMode)) {
+    const mode = String(cfg.smartExitMode).toLowerCase();
+    const allowed = ["off", "time", "liquidity"]; // removed "none"
+    if (!allowed.includes(mode)) {
+      errors.push('Sniper: smartExitMode must be one of "off"|"time"|"liquidity"');
+    }
+  }
+
+  // smartExit (nested) – time branch
+  if (!isUnset(cfg.smartExit)) {
+    if (typeof cfg.smartExit !== "object" || Array.isArray(cfg.smartExit)) {
+      errors.push("Sniper: smartExit must be an object");
+    } else if (!isUnset(cfg.smartExit.time)) {
+      const t = cfg.smartExit.time;
+      if (typeof t !== "object" || Array.isArray(t)) {
+        errors.push("Sniper: smartExit.time must be an object");
+      } else {
+        if (!isUnset(t.maxHoldSec)) {
+          if (!Number.isInteger(toNum(t.maxHoldSec)) || toNum(t.maxHoldSec) < 1) {
+            errors.push("Sniper: smartExit.time.maxHoldSec must be an integer ≥ 1");
+          }
+        }
+        if (!isUnset(t.minPnLBeforeTimeExitPct)) {
+          const v = toNum(t.minPnLBeforeTimeExitPct);
+          if (!isNumeric(v) || v < -100 || v > 100) {
+            errors.push("Sniper: smartExit.time.minPnLBeforeTimeExitPct must be between -100 and 100");
+          }
+        }
+      }
+    }
+  }
+
+  // If mode is time, require a sane maxHoldSec (either nested or flat)
+  if (String(cfg.smartExitMode || "").toLowerCase() === "time") {
+    const t = cfg.smartExit && cfg.smartExit.time;
+    const have = t && isNumeric(t.maxHoldSec) && toNum(t.maxHoldSec) >= 1;
+    const haveFlat = isNumeric(cfg.timeMaxHoldSec) && toNum(cfg.timeMaxHoldSec) >= 1;
+    if (!have && !haveFlat) {
+      errors.push("Sniper: smartExitMode=time requires smartExit.time.maxHoldSec ≥ 1 (or timeMaxHoldSec)");
+    }
+  }
+
+  // postBuyWatch (nested)
+  if (!isUnset(cfg.postBuyWatch)) {
+    if (typeof cfg.postBuyWatch !== "object" || Array.isArray(cfg.postBuyWatch)) {
+      errors.push("Sniper: postBuyWatch must be an object");
+    } else {
+      const w = cfg.postBuyWatch;
+      if (!isUnset(w.intervalSec)) {
+        if (!Number.isInteger(toNum(w.intervalSec)) || toNum(w.intervalSec) < 1) {
+          errors.push("Sniper: postBuyWatch.intervalSec must be an integer ≥ 1");
+        }
+      }
+      if (!isUnset(w.authorityFlipExit) && typeof w.authorityFlipExit !== "boolean") {
+        errors.push("Sniper: postBuyWatch.authorityFlipExit must be boolean");
+      }
+      if (!isUnset(w.lpOutflowExitPct)) {
+        const v = toNum(w.lpOutflowExitPct);
+        if (!isNumeric(v) || v < 0 || v > 100) {
+          errors.push("Sniper: postBuyWatch.lpOutflowExitPct must be between 0 and 100");
+        }
+      }
+      if (!isUnset(w.rugDelayBlocks)) {
+        if (!Number.isInteger(toNum(w.rugDelayBlocks)) || toNum(w.rugDelayBlocks) < 0) {
+          errors.push("Sniper: postBuyWatch.rugDelayBlocks must be an integer ≥ 0");
+        }
+      }
+    }
+  }
+
+  // If mode is liquidity, require a sane lpOutflowExitPct (nested or flat, > 0)
+  if (String(cfg.smartExitMode || "").toLowerCase() === "liquidity") {
+    const w = cfg.postBuyWatch;
+    const haveNested =
+      w && !isUnset(w.lpOutflowExitPct) && isNumeric(w.lpOutflowExitPct) &&
+      toNum(w.lpOutflowExitPct) > 0 && toNum(w.lpOutflowExitPct) <= 100;
+    const haveFlat =
+      !isUnset(cfg.lpOutflowExitPct) && isNumeric(cfg.lpOutflowExitPct) &&
+      toNum(cfg.lpOutflowExitPct) > 0 && toNum(cfg.lpOutflowExitPct) <= 100;
+    if (!haveNested && !haveFlat) {
+      errors.push("Sniper: smartExitMode=liquidity requires lpOutflowExitPct (1–100)");
+    }
+  }
+
+  // Flat fallbacks (back-compat), validate if provided
+  if (isNumeric(cfg.timeMaxHoldSec) && toNum(cfg.timeMaxHoldSec) < 1) {
+    errors.push("Sniper: timeMaxHoldSec must be ≥ 1 when provided");
+  }
+  if (!isUnset(cfg.timeMinPnLBeforeTimeExitPct)) {
+    const v = toNum(cfg.timeMinPnLBeforeTimeExitPct);
+    if (!isNumeric(v) || v < -100 || v > 100) {
+      errors.push("Sniper: timeMinPnLBeforeTimeExitPct must be between -100 and 100");
+    }
+  }
+  if (!isUnset(cfg.intervalSec)) {
+    if (!Number.isInteger(toNum(cfg.intervalSec)) || toNum(cfg.intervalSec) < 1) {
+      errors.push("Sniper: intervalSec must be an integer ≥ 1");
+    }
+  }
+  if (!isUnset(cfg.lpOutflowExitPct)) {
+    const v = toNum(cfg.lpOutflowExitPct);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("Sniper: lpOutflowExitPct must be between 0 and 100");
+    }
+  }
+  if (!isUnset(cfg.rugDelayBlocks)) {
+    if (!Number.isInteger(toNum(cfg.rugDelayBlocks)) || toNum(cfg.rugDelayBlocks) < 0) {
+      errors.push("Sniper: rugDelayBlocks must be an integer ≥ 0");
+    }
+  }
+  if (!isUnset(cfg.authorityFlipExit) && typeof cfg.authorityFlipExit !== "boolean") {
+    errors.push("Sniper: authorityFlipExit must be boolean");
+  }
+
+  /* TP/SL sell amounts (optional; validated only if present) */
+  if (!isUnset(cfg.tpPercent)) {
+    const v = toNum(cfg.tpPercent);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("Sniper: tpPercent must be between 0 and 100");
+    }
+  }
+  if (!isUnset(cfg.slPercent)) {
+    const v = toNum(cfg.slPercent);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("Sniper: slPercent must be between 0 and 100");
+    }
+  }
+
   return errors;
 }
+
 
 
 

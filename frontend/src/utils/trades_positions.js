@@ -256,46 +256,44 @@ export const savePrefs = (chatId, obj) =>
     body   : JSON.stringify(obj),
   }).then(r => r ? r.json() : null);
 
-/* ───────────────────────── Wallet balance helpers (plural) ────────────────────── */
 
-// /** Single: POST /api/wallets/balance */
-// export async function fetchWalletBalance({ pubkey, walletId, walletLabel, label } = {}) {
-//   const body = {};
-//   if (pubkey) body.pubkey = pubkey;
-//   else if (walletId != null) body.walletId = Number(walletId);
-//   else if (walletLabel || label) body.walletLabel = walletLabel ?? label;
 
-//   const res = await authFetch(`/api/wallets/balance`, {
-//     method: "POST",
-//     body: JSON.stringify(body),
-//   });
+  // Batch token meta (name/symbol/logo) for a list of mints
+export async function fetchTokenMeta(mints = []) {
+  const unique = [...new Set(mints.filter(Boolean))];
+  if (!unique.length) return {};
+  const res = await authFetch("/api/wallets/token-meta", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mints: unique }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to fetch token metadata");
+  const arr = JSON.parse(text);
+  // Normalize → { [mint]: { name, symbol, logo } }
+  const map = {};
+  for (const t of arr || []) {
+    map[t.mint] = {
+      name: t.name || "",
+      symbol: t.symbol || "",
+      logo: t.logoURI || t.logo || "",
+    };
+  }
+  return map;
+}
 
-//   const text = await res.text();
-//   let data; try { data = JSON.parse(text); } catch { throw new Error("Invalid server response"); }
-//   if (!res.ok) throw new Error(data?.error || `Balance fetch failed (${res.status})`);
 
-//   return {
-//     balance: Number(data.balance),
-//     price: Number(data.price),
-//     valueUsd: Number(data.valueUsd),
-//     publicKey: data.publicKey || null,
-//   };
-// }
 
-// /**
-//  * Plural convenience: fetch balances for multiple labels/pubkeys in parallel.
-//  * Accepts: array of { pubkey? | walletId? | walletLabel? | label? } OR strings (treated as label).
-//  * Returns: [{ input, ok, data|null, error|null }]
-//  */
-// export async function fetchWalletBalances(inputs = []) {
-//   const tasks = (inputs || []).map(async (it) => {
-//     const param = typeof it === "string" ? { walletLabel: it } : it;
-//     try {
-//       const data = await fetchWalletBalance(param);
-//       return { input: it, ok: true, data, error: null };
-//     } catch (e) {
-//       return { input: it, ok: false, data: null, error: e?.message || String(e) };
-//     }
-//   });
-//   return Promise.all(tasks);
-// }
+// utils/trades_positions.js
+export async function fetchPricesBatch(mints = []) {
+  const unique = [...new Set(mints.filter(Boolean))];
+  if (!unique.length) return {};
+  const res  = await authFetch("/api/trades/prices/batch", {
+    method : "POST",
+    headers: { "Content-Type": "application/json" },
+    body   : JSON.stringify({ mints: unique }),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to fetch batch prices");
+  return JSON.parse(text); // { [mint]: number }
+}

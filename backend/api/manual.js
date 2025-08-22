@@ -217,29 +217,29 @@ router.post("/buy-old", requireAuth, csrfProtection, validate({ body: buySchema 
   }
 
   /* ───────── TP/SL rule creation ───────── */
-  if (tp != null || sl != null) {
-    console.log("📥 Creating new TP/SL rule:", { tp, sl, tpPercent, slPercent });
+  // if (tp != null || sl != null) {
+  //   console.log("📥 Creating new TP/SL rule:", { tp, sl, tpPercent, slPercent });
 
-    await prisma.tpSlRule.create({
-      data: {
-        id        : uuid(),
-        mint,
-        walletId  : wallet.id,
-        userId    : req.user.id,
-        strategy,
-        tp,
-        sl,
-        tpPercent,
-        slPercent,
-        entryPrice: result.entryPrice,
-        force     : false,
-        enabled   : true,
-        status    : "active",
-        failCount : 0,
-      },
-    });
-    console.log(`✅ Created new independent TP/SL rule for ${mint}`);
-  }
+  //   await prisma.tpSlRule.create({
+  //     data: {
+  //       id        : uuid(),
+  //       mint,
+  //       walletId  : wallet.id,
+  //       userId    : req.user.id,
+  //       strategy,
+  //       tp,
+  //       sl,
+  //       tpPercent,
+  //       slPercent,
+  //       entryPrice: result.entryPrice,
+  //       force     : false,
+  //       enabled   : true,
+  //       status    : "active",
+  //       failCount : 0,
+  //     },
+  //   });
+  //   console.log(`✅ Created new independent TP/SL rule for ${mint}`);
+  // }
 
   return res.json({ success: true, result });
 
@@ -560,30 +560,6 @@ router.post("/buy", requireAuth, csrfProtection, validate({ body: buySchema }), 
           return { status: 401, response: { error: "Automation not armed", needsArm: true, walletId: wallet.id } };
         }
         throw e;
-      }
-
-      // TP/SL rule creation
-      if (tp != null || sl != null) {
-        console.log("📥 Creating new TP/SL rule:", { tp, sl, tpPercent, slPercent });
-        await prisma.tpSlRule.create({
-          data: {
-            id        : uuid(),
-            mint,
-            walletId  : wallet.id,
-            userId    : req.user.id,
-            strategy,
-            tp,
-            sl,
-            tpPercent,
-            slPercent,
-            entryPrice: result.entryPrice,
-            force     : false,
-            enabled   : true,
-            status    : "active",
-            failCount : 0,
-          },
-        });
-        console.log(`✅ Created new independent TP/SL rule for ${mint}`);
       }
 
       // Record exposure after successful buy (best-effort)

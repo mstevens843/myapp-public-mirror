@@ -18,6 +18,7 @@ async function main() {
     const inAmount = outAmount * 0.07;
     await prisma.trade.create({
       data: {
+        userId: userId,
         mint,
         tokenName: "TestToken",
         entryPrice: 0.0004,

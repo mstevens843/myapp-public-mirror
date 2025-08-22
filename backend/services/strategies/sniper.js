@@ -18,7 +18,7 @@ const wm                       = require("./core/walletManager");
 const guards                   = require("./core/tradeGuards");
 const createCooldown           = require("./core/cooldown");
 const { getSafeQuote }         = require("./core/quoteHelper");
-const { liveBuy, simulateBuy } = require("./core/tradeExecutor");
+const { liveBuy, simulateBuy } = require("./core/tradeExecutorSniper");
 const { passes, explainFilterFail } = require("./core/passes");
 const { createSummary, tradeExecuted } = require("./core/alerts");
 const runLoop                  = require("./core/loopDriver");
@@ -26,6 +26,7 @@ const { initTxWatcher }        = require("./core/txTracker");
 /* misc utils still needed directly */
 const { getWalletBalance, isAboveMinBalance } = require("../utils");
 const { sendAlert }            = require("../../telegram/alerts");
+const { getPriceAndLiquidity } = require("./paid_api/getTokenPrice");
 
 /* ── fatal/diagnostics scaffolding (added) ─────────────────────────────── */
 const FATAL_DELAY_MS = 80; // small delay so stdout/stderr flush before exit
@@ -101,6 +102,7 @@ module.exports = async function sniperStrategy(botCfg = {}) {
   // ── universal mode extensions ─────────────────────────
   const DELAY_MS         = +botCfg.delayBeforeBuyMs || 0;
   const PRIORITY_FEE     = +botCfg.priorityFeeLamports || 0;
+  const MIN_POOL_USD = botCfg.minPoolUsd != null ? +botCfg.minPoolUsd : 50_000;
 
   /* safety toggle */
   const SAFETY_DISABLED =
@@ -263,6 +265,22 @@ module.exports = async function sniperStrategy(botCfg = {}) {
 
         const overview = res.overview;
         log("info", "✅ Passed price/volume/mcap checks");
+
+        /* Liquidity check (configurable) */
+        try {
+          const { liquidity = 0, updateUnixTime = 0 } = await getPriceAndLiquidity(botCfg.userId, mint);
+          log("info", `Liquidity = $${Number(liquidity).toFixed(0)} (threshold $${Number(MIN_POOL_USD).toFixed(0)})`);
+          if (!(Number.isFinite(liquidity) && liquidity >= MIN_POOL_USD)) {
+            log("warn", `⛔ Insufficient pool liquidity ($${Number(liquidity).toFixed(0)} < $${Number(MIN_POOL_USD).toFixed(0)}) — skip`);
+            summary.inc("liqSkipped");
+            continue;
+          }
+        } catch (e) {
+          log("warn", `⚠️ Liquidity check failed (${e.message}) — skip`);
+          summary.inc("liqCheckFail");
+          continue;
+        }
+
         log("info", `[🎯 TARGET FOUND] ${mint}`);
         summary.inc("filters");
 
@@ -366,7 +384,11 @@ module.exports = async function sniperStrategy(botCfg = {}) {
           sl              : botCfg.stopLoss,
           priorityFeeLamports: +botCfg.priorityFeeLamports || 0,
           openTradeExtras : { strategy: "sniper" },
-        };
+              // pull through UI-configured Smart Exit when present
+              ...(botCfg.smartExitMode ? { smartExitMode: String(botCfg.smartExitMode).toLowerCase() } : {}),
+              ...(botCfg.smartExit     ? { smartExit: botCfg.smartExit } : {}),
+              ...(botCfg.postBuyWatch  ? { postBuyWatch: botCfg.postBuyWatch } : {}),
+            };
 
         /* execute or simulate */
         /* 3️⃣  execute (or simulate) the buy */
@@ -464,16 +486,7 @@ module.exports = async function sniperStrategy(botCfg = {}) {
       }
       summary.inc("errors");
       log("error", err?.message || String(err));
-      await tradeExecuted({
-        userId     : botCfg.userId,
-        mint,
-        tx         : txHash,
-        wl         : botCfg.walletLabel || "default",
-        category   : "Sniper",
-        simulated  : DRY_RUN,
-        amountFmt  : `${(SNIPE_LAMPORTS / 1e9).toFixed(3)} ${BASE_MINT === SOL_MINT ? "SOL" : "USDC"}`,
-        impactPct  : (quote?.priceImpactPct || 0) * 100,
-      });
+
     }
 
     /* early-exit outside the for-loop */

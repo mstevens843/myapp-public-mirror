@@ -1,3 +1,4 @@
+
 // src/components/strategies/SniperConfig.jsx
 // SniperConfig.jsx — tabs hoisted to module scope to prevent input remount/focus loss
 import React, {
@@ -40,6 +41,16 @@ export const OPTIONAL_FIELDS = [
   "priorityFeeLamports",
   "mevMode",
   "briberyAmount",
+  // Exit Strategy (new)
+  "smartExitMode",
+  "intervalSec",
+  "authorityFlipExit",
+  "lpOutflowExitPct",
+  "rugDelayBlocks",
+  "timeMaxHoldSec",
+  "timeMinPnLBeforeTimeExitPct",
+  "tpPercent",
+  "slPercent",
 ];
 
 export const REQUIRED_FIELDS = ["entryThreshold", "volumeThreshold"];
@@ -55,6 +66,14 @@ const NUM_FIELDS = [
   "delayBeforeBuyMs",
   "priorityFeeLamports",
   "briberyAmount",
+  // Exit Strategy (new)
+  "intervalSec",
+  "lpOutflowExitPct",
+  "rugDelayBlocks",
+  "timeMaxHoldSec",
+  "timeMinPnLBeforeTimeExitPct",
+  "tpPercent",
+  "slPercent",
 ];
 
 /* ---------- UI helpers (module scope; stable identities) ---------- */
@@ -120,6 +139,18 @@ const TAB_KEYS = {
   execution: ["delayBeforeBuyMs", "priorityFeeLamports", "mevMode", "briberyAmount"],
   tokens: ["tokenFeed", "monitoredTokens", "overrideMonitored"],
   advanced: [],
+  // Exit Strategy (new)
+  exit: [
+    "smartExitMode",
+    "intervalSec",
+    "authorityFlipExit",
+    "lpOutflowExitPct",
+    "rugDelayBlocks",
+    "timeMaxHoldSec",
+    "timeMinPnLBeforeTimeExitPct",
+    "tpPercent",
+    "slPercent",
+  ],
 };
 
 const RequiredOnlyPlaceholder = () => (
@@ -149,7 +180,7 @@ const validateSniperConfig = (cfg = {}) => {
 
 const countErrorsForTab = (errors) => {
   const lower = errors.map((e) => String(e).toLowerCase());
-  const counts = { core: 0, execution: 0, tokens: 0, advanced: 0 };
+  const counts = { core: 0, execution: 0, tokens: 0, advanced: 0, exit: 0 };
   for (const tab of Object.keys(TAB_KEYS)) {
     const keys = TAB_KEYS[tab];
     counts[tab] = lower.filter((msg) =>
@@ -389,6 +420,228 @@ const TokensTab = React.memo(function TokensTab({ view, setConfig, disabled }) {
   );
 });
 
+const ExitStrategyTab = React.memo(function ExitStrategyTab({
+  view,
+  disabled,
+  handleChange,
+  handleBlur,
+  requiredOnly,
+}) {
+  return (
+    <Section>
+            {/* TP/SL Sell Amounts */}
+      <Card title="TP / SL Sell Amounts">
+        {requiredOnly ? (
+          <RequiredOnlyPlaceholder />
+        ) : (
+          <div className="grid gap-4">
+            {/* TP Sell Amount (%) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>TP Sell Amount (%)</span>
+                <StrategyTooltip name="tpPercent" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="tpPercent"
+                  value={view.tpPercent ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("tpPercent")}
+                  disabled={disabled}
+                  placeholder="e.g. 100"
+                  className={INP}
+                />
+              </div>
+            </div>
+
+            {/* SL Sell Amount (%) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>SL Sell Amount (%)</span>
+                <StrategyTooltip name="slPercent" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="slPercent"
+                  value={view.slPercent ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("slPercent")}
+                  disabled={disabled}
+                  placeholder="e.g. 100"
+                  className={INP}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+      <Card title="Smart Exit">
+        {requiredOnly ? (
+          <RequiredOnlyPlaceholder />
+        ) : (
+          <div className="grid gap-4">
+            {/* Mode */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Smart Exit Mode</span>
+                <StrategyTooltip name="smartExitMode" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <select
+                  name="smartExitMode"
+                  value={view.smartExitMode ?? "off"}
+                  onChange={handleChange}
+                  disabled={disabled}
+                  className={`${INP} appearance-none pr-8`}
+                >
+                  <option value="off">off</option>
+                  <option value="time">time</option>
+                  <option value="liquidity">liquidity</option>
+                </select>
+                <ChevronDown className="absolute right-2 top-2.5 w-4 h-4 text-zinc-400 pointer-events-none" />
+              </div>
+            </div>
+
+            {/* Interval (sec) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Check Interval (sec)</span>
+                <StrategyTooltip name="intervalSec" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="intervalSec"
+                  value={view.intervalSec ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("intervalSec")}
+                  disabled={disabled}
+                  placeholder="e.g. 5"
+                  className={INP}
+                />
+              </div>
+            </div>
+
+            {/* Authority Flip Exit */}
+            <label className="flex items-center gap-2 text-sm font-medium text-zinc-300">
+              <input
+                type="checkbox"
+                name="authorityFlipExit"
+                checked={!!view.authorityFlipExit}
+                onChange={handleChange}
+                disabled={disabled}
+                className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+              />
+              Authority-Flip Exit
+              <StrategyTooltip name="authorityFlipExit" />
+            </label>
+
+            {/* LP Outflow Exit (%) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>LP Outflow Exit (%)</span>
+                <StrategyTooltip name="lpOutflowExitPct" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="lpOutflowExitPct"
+                  value={view.lpOutflowExitPct ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("lpOutflowExitPct")}
+                  disabled={disabled}
+                  placeholder="e.g. 50"
+                  className={INP}
+                />
+              </div>
+            </div>
+
+            {/* Rug Delay (blocks) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Rug Delay (blocks)</span>
+                <StrategyTooltip name="rugDelayBlocks" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="rugDelayBlocks"
+                  value={view.rugDelayBlocks ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("rugDelayBlocks")}
+                  disabled={disabled}
+                  placeholder="e.g. 0"
+                  className={INP}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Time Mode Settings */}
+      <Card title="Time Exit Settings">
+        {requiredOnly ? (
+          <RequiredOnlyPlaceholder />
+        ) : (
+          <div className="grid gap-4">
+            {/* Max Hold (sec) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Max Hold (sec)</span>
+                <StrategyTooltip name="timeMaxHoldSec" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="timeMaxHoldSec"
+                  value={view.timeMaxHoldSec ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("timeMaxHoldSec")}
+                  disabled={disabled}
+                  placeholder="e.g. 120"
+                  className={INP}
+                />
+              </div>
+            </div>
+
+            {/* Min PnL before time-exit (%) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>Min PnL before time-exit (%)</span>
+                <StrategyTooltip name="timeMinPnLBeforeTimeExitPct" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="timeMinPnLBeforeTimeExitPct"
+                  value={view.timeMinPnLBeforeTimeExitPct ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("timeMinPnLBeforeTimeExitPct")}
+                  disabled={disabled}
+                  placeholder="e.g. 0"
+                  className={INP}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+
+
+    </Section>
+  );
+});
+
 const AdvancedTab = React.memo(function AdvancedTab({
   view,
   setConfig,
@@ -441,6 +694,16 @@ const SniperConfig = ({
     // Advanced (passed-through to AdvancedFields)
     tpLadder: "",
     trailingStopPct: "",
+    // Exit Strategy (new)
+    smartExitMode: "off",
+    intervalSec: 5,
+    authorityFlipExit: false,
+    lpOutflowExitPct: 50,
+    rugDelayBlocks: 0,
+    timeMaxHoldSec: "",
+    timeMinPnLBeforeTimeExitPct: "",
+    tpPercent: "",
+    slPercent: "",
   };
 
   // Merge defaults with incoming config
@@ -716,6 +979,13 @@ const SniperConfig = ({
           >
             Advanced
           </TabButton>
+          <TabButton
+            active={activeTab === "exit"}
+            onClick={() => setActiveTab("exit")}
+            badge={tabErr.exit}
+          >
+            Exit Strategy
+          </TabButton>
         </div>
       </div>
       {/* Content */}
@@ -755,6 +1025,15 @@ const SniperConfig = ({
           <AdvancedTab view={view} setConfig={setConfig} disabled={disabled} requiredOnly={showRequiredOnly}>
             {typeof children !== "undefined" ? children : null}
           </AdvancedTab>
+        )}
+        {activeTab === "exit" && (
+          <ExitStrategyTab
+            view={view}
+            disabled={disabled}
+            handleChange={handleChange}
+            handleBlur={handleBlur}
+            requiredOnly={showRequiredOnly}
+          />
         )}
         {/* Strategy Summary */}
         <div className="mt-6 bg-zinc-900 rounded-md p-3">

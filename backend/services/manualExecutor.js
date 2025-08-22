@@ -365,6 +365,7 @@ console.log("⚙️ Applied user prefs for manual sell:", {
     // 2) trade row
     await prisma.trade.create({
       data: {
+        userId: userId,
         mint,
         tokenName: null,
         entryPrice: entryPriceSOL,

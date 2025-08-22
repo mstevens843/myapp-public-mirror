@@ -32,6 +32,8 @@ const FIELD_DEFS = [
   { label: "MEV Mode",                  name: "mevMode",             placeholder: "fast / secure" },
   { label: "TP Sell Amount (%)",        name: "tpPercent",           placeholder: "e.g. 100" },
   { label: "SL Sell Amount (%)",        name: "slPercent",           placeholder: "e.g. 100" },
+  { label: "Min Pool Liquidity (USD)", name: "minPoolUsd", placeholder: "e.g. 50000", strategies: ["sniper"] }
+
 ];
 
 export default function AdvancedFields({

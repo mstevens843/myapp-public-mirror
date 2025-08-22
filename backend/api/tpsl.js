@@ -117,7 +117,7 @@ router.put("/:mint-old", requireAuth, csrfProtection, validate({ body: ruleSchem
     });
 
     const currentAllocated = existingRules.reduce((total, r) => {
-      const max = Math.max(r.tpPercent || 0, r.slPercent || 0, r.sellPct || 0);
+      const max = Math.max(r.tpPercent || 0, r.slPercent || 0);
       return total + max;
     }, 0);
 
@@ -227,7 +227,7 @@ router.put("/by-id/:id", requireAuth, csrfProtection, async (req, res) => {
     });
 
     const allocated = otherRules.reduce((total, r) => {
-      const max = Math.max(r.tpPercent || 0, r.slPercent || 0, r.sellPct || 0);
+      const max = Math.max(r.tpPercent || 0, r.slPercent || 0);
       return total + max;
     }, 0);
 
@@ -327,7 +327,7 @@ router.put("/:mint", requireAuth, csrfProtection, validate({ body: ruleSchema })
           select: { tpPercent: true, slPercent: true, sellPct: true }
         });
         const currentAllocated = existingRules.reduce((total, r) => {
-          const max = Math.max(r.tpPercent || 0, r.slPercent || 0, r.sellPct || 0);
+          const max = Math.max(r.tpPercent || 0, r.slPercent || 0);
           return total + max;
         }, 0);
         if (currentAllocated + newRuleAllocation > 100) {
@@ -387,42 +387,47 @@ router.put("/:mint", requireAuth, csrfProtection, validate({ body: ruleSchema })
 
 
 // routes/trades.route.js
-// GET /api/check-position?mint=xxxxx&strategy=manual
+// /api/tpsl/check-position
 router.get("/check-position", requireAuth, async (req, res) => {
-  const { mint, strategy } = req.query;
+  const { mint, strategy = "manual" } = req.query;
   const userId = req.user.id;
-
-  if (!mint || !strategy) {
-    return res.status(400).json({ error: "Mint and strategy required" });
-  }
+  if (!mint || !strategy) return res.status(400).json({ error: "Mint and strategy required" });
 
   try {
-    // const exists = await prisma.trade.findFirst({
-    //   where: {
-    //     userId,
-    //     mint,
-    //     strategy,
-    //     exitedAt: null // still open
-    //   },
-    // });
-    const exists = await prisma.trade.findFirst({
-  where: {
-    mint,
-    strategy,
-    exitedAt: null,
-    wallet: {
-      userId: userId,   // ✅ indirect join through Wallet
-    },
-  },
-});
+    const trades = await prisma.trade.findMany({
+      where: {
+        mint,
+        strategy,
+        exitedAt: null,
+        type: "buy",
+        side: "buy",
+        wallet: { userId },
+        NOT: { strategy: "import" }, // ignore bookkeeping rows
+      },
+      select: { outAmount: true, closedOutAmount: true, decimals: true },
+    });
 
-    res.json({ exists: !!exists });
+    // consider dust as "not holding"
+    const DUST_BPS = 50; // 0.50%
+    const ABS_DUST = (d = 9) => (d >= 9 ? 10_000n : 1_000n);
+
+    const live = trades.some((t) => {
+      const out = BigInt(t.outAmount ?? 0);
+      const closed = BigInt(t.closedOutAmount ?? 0);
+      const remaining = out > closed ? out - closed : 0n;
+      if (remaining === 0n) return false;
+
+      const isDustRel = out > 0n && (remaining * 10_000n) <= (out * BigInt(DUST_BPS));
+      const isDustAbs = remaining <= ABS_DUST(t.decimals ?? 9);
+      return !(isDustRel || isDustAbs);
+    });
+
+    res.json({ exists: live });
   } catch (err) {
     console.error("❌ check-position failed:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
-
 
 
 

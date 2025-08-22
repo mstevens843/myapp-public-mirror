@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 import { manualBuy } from "../../utils/api";
-import { fetchCurrentPrice, getOpenTrades } from "../../utils/trades_positions";
+import { getOpenTrades, fetchPricesBatch } from "../../utils/trades_positions";
 import { getWalletNetworth } from "../../utils/api";
 
 // Wallet APIs
@@ -85,28 +85,20 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
       }
 
       if (openRes.status === "fulfilled") {
-        const STABLE_MINTS = new Set([
-          USDC_MINT,
-          "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-          "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",
-          "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT",
-        ]);
         const scoped = (openRes.value || []).filter(t => t.walletId === activeWalletId);
         const trades = scoped.filter((t) => !STABLE_MINTS.has(t.mint));
 
-        let totalUSD = 0;
-        await Promise.all(
-          trades.map(async (t) => {
-            let usd = t.usdValue;
-            if (typeof usd !== "number") {
-              try {
-                const price = await fetchCurrentPrice(t.mint);
-                usd = price * Number(t.outAmount ?? 0) / 10 ** (t.decimals ?? 9);
-              } catch { usd = 0; }
-            }
-            totalUSD += usd;
-          })
-        );
+        const mints = [...new Set(trades.map(t => t.mint))];
+        let priceMap = {};
+        try { priceMap = await fetchPricesBatch(mints); } catch (_) {}
+
+        let totalUSD = 0; // <-- missing before
+        for (const t of trades) {
+          const usd = (typeof t.usdValue === "number")
+            ? t.usdValue
+            : (Number(priceMap[t.mint] || 0) * Number(t.outAmount ?? 0)) / 10 ** (t.decimals ?? 9);
+          totalUSD += usd;
+        }
         setOpen({ count: trades.length, value: +totalUSD.toFixed(2) });
       } else {
         console.warn("⚠️ open trades fetch failed:", openRes.reason);
@@ -159,7 +151,7 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
   /* ---------------- Swap helpers ---------------- */
   const sol = net?.tokenValues?.find((t) => t.name === "SOL") ?? {};
   const usdc = net?.tokenValues?.find((t) => t.mint === USDC_MINT) ?? {};
-  const displayNet = net ? (net.totalValueUSD + open.value).toFixed(2) : "0.00";
+  const displayNet = net ? net.totalValueUSD.toFixed(2) : "0.00";
 
   const setMax = () => {
     if (direction === "usdcToSol") {

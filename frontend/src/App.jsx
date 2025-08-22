@@ -24,13 +24,19 @@ const sanitizeConfig = (cfg = {}) =>
       .filter(([, v]) => v !== "" && v !== null && v !== undefined)
       .map(([k, v]) => [
         k,
-        // convert numeric strings → number
-        ["amountToSpend","snipeAmount","slippage","interval","maxTrades",
-      "takeProfit","stopLoss","entryThreshold","volumeThreshold",
-      "minTokenAgeMinutes","maxTokenAgeMinutes","minMarketCap","maxMarketCap",
-      "maxSlippage","haltOnFailures","cooldown","delayBeforeBuyMs",
-      "priorityFeeLamports","briberyAmount","tpPercent","slPercent"
-      ].includes(k) && v !== "" ? Number(v) : v, ]), );
+        [
+          "amountToSpend","snipeAmount","slippage","interval","maxTrades",
+          "takeProfit","stopLoss","entryThreshold","volumeThreshold",
+          "minTokenAgeMinutes","maxTokenAgeMinutes","minMarketCap","maxMarketCap",
+          "maxSlippage","haltOnFailures","cooldown","delayBeforeBuyMs",
+          "priorityFeeLamports","briberyAmount","tpPercent","slPercent",
+          "intervalSec","lpOutflowExitPct","rugDelayBlocks", "minPoolUsd",
+          "timeMaxHoldSec","timeMinPnLBeforeTimeExitPct",
+        ].includes(k) && v !== "" ? Number(v) : v,
+      ])
+  );
+
+
 
 const safeNum = (v, fallback = 0) => {
 const n = Number(v);
@@ -74,7 +80,12 @@ const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
     maxSlippage     : clampedMaxSlippage,
     cooldown        : toNum(cfg.cooldown), 
     maxOpenTrades: safeNum(cfg.maxOpenTrades),
-    maxTrades: safeNum(cfg.maxTrades),
+    minPoolUsd: isUnset(cfg.minPoolUsd) ? 50_000 : Number(cfg.minPoolUsd),
+
+    safetyEnabled     : cfg.safetyEnabled !== false,  // default ON
+    safetyChecks      : (cfg.safetyChecks && typeof cfg.safetyChecks === "object" && Object.keys(cfg.safetyChecks).length)
+                         ? cfg.safetyChecks
+                         : { simulation: true, liquidity: true, authority: true, topHolders: true },
     maxDailyVolume: safeNum(cfg.maxDailyVolume),
     ...(pick(cfg.priorityFeeLamports, p.defaultPriorityFee, null) != null && {
       priorityFeeLamports: pick(cfg.priorityFeeLamports, p.defaultPriorityFee, 0),
@@ -102,24 +113,52 @@ const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
 
 
 const CONFIG_BUILDERS = {
- sniper: (cfg, wallets, target, resolved, activeWallet) => ({
-  ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
-    entryThreshold    : safeNum(cfg.entryThreshold, 3),
-    volumeThreshold   : safeNum(cfg.volumeThreshold, 50000),
-    priceWindow       : cfg.priceWindow,
-    volumeWindow      : cfg.volumeWindow,
-    tokenFeed         : cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
-    minTokenAgeMinutes: cfg.minTokenAgeMinutes,
-    maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
-    delayBeforeBuyMs: toNum(cfg.delayBeforeBuyMs), 
-    minMarketCap: cfg.minMarketCap,
-    maxMarketCap: cfg.maxMarketCap,
-    safetyEnabled     : cfg.safetyEnabled !== false,  // default ON
-    safetyChecks      : (cfg.safetyChecks && typeof cfg.safetyChecks === "object" && Object.keys(cfg.safetyChecks).length)
-                         ? cfg.safetyChecks
-                         : { simulation: true, liquidity: true, authority: true, topHolders: true },
+ sniper: (cfg, wallets, target, resolved, activeWallet) => {
+    const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
 
-  }),
+    // Inline smart-exit mapping from flat UI fields
+    const smartExitMode =
+      typeof cfg.smartExitMode === "string" ? cfg.smartExitMode : "off";
+
+    const smartExit =
+      cfg.timeMaxHoldSec || cfg.timeMinPnLBeforeTimeExitPct
+        ? {
+            time: {
+              maxHoldSec: Number(cfg.timeMaxHoldSec || 0),
+              minPnLBeforeTimeExitPct: Number(cfg.timeMinPnLBeforeTimeExitPct || 0),
+            },
+          }
+        : undefined;
+
+    const postBuyWatch =
+      cfg.intervalSec || cfg.authorityFlipExit || cfg.lpOutflowExitPct || cfg.rugDelayBlocks
+        ? {
+            intervalSec: Number(cfg.intervalSec ?? 5),
+            authorityFlipExit: !!cfg.authorityFlipExit,
+            lpOutflowExitPct: Number(cfg.lpOutflowExitPct ?? 50),
+            rugDelayBlocks: Number(cfg.rugDelayBlocks ?? 0),
+          }
+        : undefined;
+
+    return {
+      ...base,
+      entryThreshold    : safeNum(cfg.entryThreshold, 3),
+      volumeThreshold   : safeNum(cfg.volumeThreshold, 50_000),
+      priceWindow       : cfg.priceWindow,
+      volumeWindow      : cfg.volumeWindow,
+      tokenFeed         : cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
+      minTokenAgeMinutes: cfg.minTokenAgeMinutes,
+      maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
+      delayBeforeBuyMs  : toNum(cfg.delayBeforeBuyMs),
+      minMarketCap      : cfg.minMarketCap,
+      maxMarketCap      : cfg.maxMarketCap,
+
+      // NEW: Sniper-only smart-exit wiring
+      ...(smartExitMode && smartExitMode !== "off" ? { smartExitMode } : {}),
+      ...(smartExit ? { smartExit } : {}),
+      ...(postBuyWatch ? { postBuyWatch } : {}),
+    };
+  },
   scalper: (cfg, wallets, target, resolved, activeWallet) => ({
     ...buildBaseConfig(cfg, wallets, target, resolved, activeWallet),
     entryThreshold: safeNum(cfg.entryThreshold, 3),

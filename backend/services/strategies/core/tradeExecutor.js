@@ -306,6 +306,7 @@ try {
   await prisma.trade.create({
     data: {
       id: uuid(),
+      userId: userId,
       mint,
       entryPrice,
       entryPriceUSD,

@@ -123,6 +123,7 @@ if (!resolvedWalletId && !resolvedLabel) {
   // 4. create fresh row
   await prisma.trade.create({
     data: {
+      userId: userId,
       mint,
       tokenName: null,
       entryPrice,

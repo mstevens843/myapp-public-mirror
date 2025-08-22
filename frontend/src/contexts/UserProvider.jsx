@@ -1,5 +1,5 @@
 // UserProvider.jsx
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { getUserProfile } from "@/utils/api";
 import { toast } from "sonner";
 import { setOnNeedsArm, authFetch } from "@/utils/authFetch";
@@ -99,22 +99,31 @@ export const UserProvider = ({ children }) => {
     };
   };
 
+  // --- Single-flight guard for /auth/me + StrictMode-safe initial load ----
+  const inflightMeRef = useRef(null);
+
   // Public: refresh from /auth/me (canonical source)
   const refreshProfile = async () => {
-    try {
-      const data = await getUserProfile(); // ← /auth/me payload
-      if (!data) {
+    if (inflightMeRef.current) return inflightMeRef.current; // single-flight
+
+    inflightMeRef.current = (async () => {
+      try {
+        const data = await getUserProfile(); // ← /auth/me payload
+        if (!data) return null;
+        const flat = flattenProfile(normalizeToMeShape(data));
+        setProfile(flat);
+        return flat;
+      } catch (err) {
+        console.error("❌ Failed to load user profile:", err);
+        toast.error("Failed to load user profile.");
+        return null;
+      } finally {
         setLoading(false);
-        return;
+        inflightMeRef.current = null;
       }
-      const flat = flattenProfile(normalizeToMeShape(data));
-      setProfile(flat);
-    } catch (err) {
-      console.error("❌ Failed to load user profile:", err);
-      toast.error("Failed to load user profile.");
-    } finally {
-      setLoading(false);
-    }
+    })();
+
+    return inflightMeRef.current;
   };
 
   // Public: hydrate immediately from a login response (no fetch)
@@ -131,24 +140,27 @@ export const UserProvider = ({ children }) => {
     }
   };
 
-  // Initial load
+  // Initial load — run only once even in React 18 StrictMode
+  const didInit = useRef(false);
   useEffect(() => {
-    refreshProfile();
+    if (didInit.current) return;
+    didInit.current = true;
+    void refreshProfile(); // will run only once, even in StrictMode
   }, []);
 
- // Keep profile in sync when wallet is switched from the balance panel
- useEffect(() => {
-   const onWalletChanged = (e) => {
-     const id = e?.detail?.walletId ?? null;
-     if (!id) return;
-     // optimistic update so UI flips immediately
-     setProfile((p) => ({ ...p, activeWalletId: id, activeWallet: (p.wallets || []).find(w => w.id === id) || p.activeWallet }));
-     // then refresh canonical data (activeWallet object, counts, etc.)
-     refreshProfile();
-   };
-   window.addEventListener("user:activeWalletChanged", onWalletChanged);
-   return () => window.removeEventListener("user:activeWalletChanged", onWalletChanged);
- }, []);
+  // Keep profile in sync when wallet is switched from the balance panel
+  useEffect(() => {
+    const onWalletChanged = (e) => {
+      const id = e?.detail?.walletId ?? null;
+      if (!id) return;
+      // optimistic update so UI flips immediately
+      setProfile((p) => ({ ...p, activeWalletId: id, activeWallet: (p.wallets || []).find(w => w.id === id) || p.activeWallet }));
+      // then refresh canonical data (activeWallet object, counts, etc.)
+      void refreshProfile();
+    };
+    window.addEventListener("user:activeWalletChanged", onWalletChanged);
+    return () => window.removeEventListener("user:activeWalletChanged", onWalletChanged);
+  }, []);
 
   // Listen for auth events so we can hydrate immediately on sign-in,
   // and clear state on sign-out.
@@ -160,7 +172,7 @@ export const UserProvider = ({ children }) => {
         hydrateFromLogin(payload);
       } else {
         setLoading(true);
-        refreshProfile();
+        void refreshProfile();
       }
     };
     const onLogout = () => {

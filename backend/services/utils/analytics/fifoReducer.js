@@ -12,10 +12,7 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
   } = opts;
   if (!exitPrice || !exitPriceUSD) throw new Error("exitPrice + exitPriceUSD required");
 
-  // let rows = await prisma.trade.findMany({
-  //   where  : { mint, walletId, strategy, walletLabel },
-  //   orderBy: { timestamp: "asc" }
-  // });
+  // Pull candidate rows (FIFO) for this wallet/mint/strategy (+label if set)
   let rows = await prisma.trade.findMany({
     where  : {
       mint,
@@ -44,8 +41,20 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
 
   console.log(`🧮 Will sell ~${Number(tokToSell)/10**decimals} tokens out of ${Number(totalTok)/10**decimals}`);
 
-  /* ── Perform FIFO reductions ──────────────────────── */
-  const dustRaw = BigInt(Math.round(10 ** decimals * 0.01));
+  /* ── Dust thresholds ───────────────────────────────── */
+  const DUST_BPS = 100n; // 1.00% of the row's original size
+  const pow10n = (d) => {
+    let r = 1n;
+    for (let i = 0; i < d; i++) r *= 10n;
+    return r;
+  };
+  // ≈ 0.01 tokens in raw units (per-row decimals; floor to 1 unit for low decimals)
+  const absDustRawFor = (d) => {
+    const di = Number.isFinite(d) ? Number(d) : 9;
+    return di <= 2 ? 1n : pow10n(di - 2);
+  };
+
+  /* ── Perform FIFO reductions ───────────────────────── */
   let still = tokToSell;
   const closedRows = [];
 
@@ -53,13 +62,17 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
     for (const r of rows) {
       if (still <= 0n) break;
 
-      const remainingTok = BigInt(r.outAmount);
-      const slice = remainingTok < still ? remainingTok : still;
+      const rowOrigOut  = BigInt(r.outAmount);   // original size of this row before slicing
+      const rowDecimals = r.decimals ?? decimals;
 
-      const ratio = Number(slice) / Number(r.outAmount);
+      const remainingTokBefore = rowOrigOut;
+      const slice = remainingTokBefore < still ? remainingTokBefore : still;
+
+      // Proportional cost basis to reduce for this slice
+      const ratio    = Number(slice) / Number(r.outAmount);
       const costTrim = BigInt(Math.round(Number(r.inAmount) * ratio));
 
-      console.log(`➡️ Taking ${Number(slice)/10**decimals} tokens from row ${r.id} (had ${Number(remainingTok)/10**decimals})`);
+      console.log(`➡️ Taking ${Number(slice)/10**rowDecimals} tokens from row ${r.id} (had ${Number(remainingTokBefore)/10**rowDecimals})`);
 
       await tx.trade.update({
         where: { id: r.id },
@@ -67,22 +80,43 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
           closedOutAmount: { increment: costTrim },
           inAmount       : { decrement: costTrim },
           outAmount      : { decrement: slice },
-          usdValue       : { decrement: Number(slice) / 10 ** decimals * r.entryPriceUSD }
+          usdValue       : { decrement: Number(slice) / 10 ** rowDecimals * (r.entryPriceUSD || 0) }
         }
       });
 
       still -= slice;
 
-      const updated = await tx.trade.findUnique({ where: { id: r.id }});
+      // Re-check row after trimming
+      const updated     = await tx.trade.findUnique({ where: { id: r.id }});
       const residualTok = BigInt(updated.outAmount);
+      const costRem     = BigInt(updated.inAmount); // remaining cost basis on row (if any)
 
-      if (residualTok === 0n || residualTok < dustRaw) {
-        console.log(`⚠️ Removing dust row ${r.id}, left=${Number(residualTok)/10**decimals}`);
-        await tx.trade.delete({ where: { id: r.id } });
+      // Dust tests: relative (≤1% of original) OR absolute (~0.01 tokens)
+      const isDustRel = (rowOrigOut > 0n) && (residualTok * 10_000n <= rowOrigOut * DUST_BPS);
+      const isDustAbs = residualTok <= absDustRawFor(rowDecimals);
+
+      if (residualTok === 0n || isDustRel || isDustAbs) {
+        // 🔁 AUTO-CLOSE IN PLACE — do NOT create a closedTrade for dust
+        console.log(`🧹 Dust sweep for row ${r.id} (left=${Number(residualTok)/10**rowDecimals}). Closing row.`);
+        await tx.trade.update({
+          where: { id: r.id },
+          data: {
+            outAmount : 0n,
+            // move remaining cost basis into closedOutAmount
+            ...(costRem > 0n ? { closedOutAmount: { increment: costRem }, inAmount: { decrement: costRem } } : {}),
+            usdValue  : { decrement: Number(residualTok) / 10 ** rowDecimals * (r.entryPriceUSD || 0) },
+            exitedAt  : new Date(),
+            reasonCode: "dust_swept"
+          }
+        });
+      } else {
+        console.log(`ℹ️ Residual on row ${r.id} not dust: ${Number(residualTok)/10**rowDecimals}`);
       }
 
+      // Record the normal (non-dust) slice as a closedTrade
       closedRows.push(await tx.closedTrade.create({
         data: {
+          userId,
           mint,
           tokenName      : r.tokenName,
           entryPrice     : r.entryPrice,
@@ -94,8 +128,8 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
           strategy, walletLabel,
           txHash         : txHash ? `${txHash}-${uuid()}` : uuid(),
           unit           : r.unit,
-          slippage, decimals,
-          usdValue       : Number(slice) / 10 ** decimals * exitPriceUSD,
+          slippage, decimals: rowDecimals,
+          usdValue       : Number(slice) / 10 ** rowDecimals * exitPriceUSD,
           type           : "sell",
           side           : "sell",
           botId          : r.botId,
@@ -109,72 +143,71 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
 
   console.log(`✅ Finished: actually sold ${(Number(tokToSell - still) / 10 ** decimals).toFixed(6)} tokens`);
 
-
   // 🔥 SMART REBALANCE of TP/SL allocations
-const rules = await prisma.tpSlRule.findMany({
-  where: {
-    userId,
-    walletId,
-    mint,
-    strategy,
-    enabled: true
-  }
-});
-
-if (rules.length > 0) {
-  const originalSum = rules.reduce((acc, r) => acc + (r.sellPct ?? r.tpPercent ?? r.slPercent ?? 0), 0);
-  
-  // Now recalc actual allocation left after this sell
-  // e.g. if you sold 25% out of total 100%, that's 25% of total, remove proportionally
-  const soldFraction = Number(tokToSell - still) / Number(totalTok);
-  const newRuleSum = originalSum * (1 - soldFraction);
-
-  console.log(`📊 Original TP/SL rule sum: ${originalSum}%`);
-  console.log(`📉 Sold fraction of total: ${(soldFraction*100).toFixed(2)}%`);
-  console.log(`🧮 New effective rule sum: ${newRuleSum.toFixed(2)}%`);
-
-  if (newRuleSum > 0) {
-    for (const r of rules) {
-      const orig = r.sellPct ?? r.tpPercent ?? r.slPercent ?? 0;
-      const newAlloc = +(orig / newRuleSum * 100).toFixed(2);
-
-      console.log(`🔄 Rule ${r.id}: ${orig}% → ${newAlloc}%`);
-
-      await prisma.tpSlRule.update({
-        where: { id: r.id },
-        data: {
-          sellPct: newAlloc,
-          tpPercent: newAlloc,
-          slPercent: newAlloc,
-          updatedAt: new Date()
-        }
-      });
-    }
-  } else {
-    console.log("⚠️ Effective rule sum zero, skipping rebalance.");
-  }
-}
-
-  // ✅ AFTER your FIFO reductions, disable matching TP/SL rules
-const stillOpen = await prisma.trade.findMany({
-  where: {
-    walletId,
-    mint,
-    strategy,
-    outAmount: { gt: 0 }
-  }
-});
-
-if (stillOpen.length === 0) {
-  console.log(`🧹 No open trades left for ${mint}, deleting TP/SL rules...`);
-  await prisma.tpSlRule.deleteMany({
+  const rules = await prisma.tpSlRule.findMany({
     where: {
       userId,
       walletId,
       mint,
-      strategy
+      strategy,
+      enabled: true
     }
   });
-}
+
+  if (rules.length > 0) {
+    const originalSum = rules.reduce((acc, r) => acc + (r.sellPct ?? r.tpPercent ?? r.slPercent ?? 0), 0);
+
+    // Now recalc actual allocation left after this sell
+    const soldFraction = Number(tokToSell - still) / Number(totalTok);
+    const newRuleSum = originalSum * (1 - soldFraction);
+
+    console.log(`📊 Original TP/SL rule sum: ${originalSum}%`);
+    console.log(`📉 Sold fraction of total: ${(soldFraction*100).toFixed(2)}%`);
+    console.log(`🧮 New effective rule sum: ${newRuleSum.toFixed(2)}%`);
+
+    if (newRuleSum > 0) {
+      for (const r of rules) {
+        const orig = r.sellPct ?? r.tpPercent ?? r.slPercent ?? 0;
+        const newAlloc = +(orig / newRuleSum * 100).toFixed(2);
+
+        console.log(`🔄 Rule ${r.id}: ${orig}% → ${newAlloc}%`);
+
+        await prisma.tpSlRule.update({
+          where: { id: r.id },
+          data: {
+            sellPct: newAlloc,
+            tpPercent: newAlloc,
+            slPercent: newAlloc,
+            updatedAt: new Date()
+          }
+        });
+      }
+    } else {
+      console.log("⚠️ Effective rule sum zero, skipping rebalance.");
+    }
+  }
+
+  // ✅ AFTER your FIFO reductions, disable matching TP/SL rules
+  const stillOpen = await prisma.trade.findMany({
+    where: {
+      walletId,
+      mint,
+      strategy,
+      outAmount: { gt: 0 }
+    }
+  });
+
+  if (stillOpen.length === 0) {
+    console.log(`🧹 No open trades left for ${mint}, deleting TP/SL rules...`);
+    await prisma.tpSlRule.deleteMany({
+      where: {
+        userId,
+        walletId,
+        mint,
+        strategy
+      }
+    });
+  }
+
   return { closedRows, soldTok: Number(tokToSell - still) };
 };

@@ -2,17 +2,20 @@ require("dotenv").config({ path: __dirname + "/../../../.env" });
 const { Connection, PublicKey } = require("@solana/web3.js");
 const { birdeyeCUCounter } = require("./birdeyeCUCounter");
 const CU_TABLE = require("./cuTable");
-const pLimit = require("p-limit");
+
+// ✅ Use your existing liquidity-aware batch helper
+const priceMod = require("./getTokenPrice");
+const getPricesWithLiquidityBatch = priceMod.getPricesWithLiquidityBatch;
 
 const RPC_URL = process.env.SOLANA_RPC_URL;
 const MIN_VALUE_USD = 0.50;
-const MIN_PRICE_USD = 0;                // <─ used later in the filter
-const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
+const MIN_PRICE_USD = 0; // <─ used later in the filter
+
+// Thresholds for fallback gating (same knobs used elsewhere in your app)
+const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 1000);
+const MAX_PRICE_STALENESS_SEC = Number(process.env.MAX_PRICE_STALENESS_SEC || 6 * 3600);
 
 const ENDPOINT = "https://public-api.birdeye.so/v1/wallet/token_list";
-const PRICE_ENDPOINT = "https://public-api.birdeye.so/defi/price";
-
-const limit = pLimit(4);       // avoid hammering Birdeye
 
 async function getWalletTokensWithMeta(walletPubkey, userId = null) {
   const conn = new Connection(RPC_URL, "confirmed");
@@ -43,20 +46,20 @@ async function getWalletTokensWithMeta(walletPubkey, userId = null) {
     });
   }
 
-  // Then get Birdeye meta
+  // Then get Birdeye meta (batched for the whole wallet)
   let metaMap = {};
   metaMap[SOL_MINT] = {
     name: "Solana",
     symbol: "SOL",
     logo: "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
-    price: 0,              // Birdeye will overwrite if it supports SOL
+    price: 0, // Birdeye may overwrite
   };
 
   try {
     const data = await birdeyeCUCounter({
       url: ENDPOINT,
-      params: { wallet: walletPubkey },
-      cuCost: CU_TABLE["/defi/tokenlist"],   // 🔷 centralized CU value
+      params: { wallet: walletPubkey, ui_amount_mode: "scaled" },
+      cuCost: CU_TABLE["/defi/tokenlist"], // 🔷 centralized CU value
       userId,
     });
 
@@ -65,57 +68,53 @@ async function getWalletTokensWithMeta(walletPubkey, userId = null) {
       metaMap[item.address] = {
         name: item.name,
         symbol: item.symbol,
-        logo: item.logoURI,
-        price: item.priceUsd
+        logo: item.logoURI || item.icon || "",
+        price: Number(item.priceUsd || 0),
       };
     }
   } catch (err) {
-    console.warn("❌ Birdeye portfolio fetch failed:", err.response?.status || err.message);
+    console.warn("❌ Birdeye wallet token_list failed:", err.response?.status || err.message);
   }
 
-  // ── ❶ SOL price fallback – now uses /defi/price
-  if (metaMap[SOL_MINT].price === 0) {
-    try {
-      const { data } = await require("axios").get(PRICE_ENDPOINT, {
-        params: { address: SOL_MINT, ui_amount_mode: "raw" },
-        headers: { "x-chain": "solana", "X-API-KEY": BIRDEYE_API_KEY },
-        timeout: 3000,
-      });
-      const p = data?.data?.value ?? 0;
-      if (p > 0) metaMap[SOL_MINT].price = p;
-    } catch { /* silent */ }
-  }
-
-  // ── ❷ Per-token fallback for anything Birdeye skipped
+  // ── ❷ Batched fallback pricing for anything Birdeye skipped
+  // (One request total; applies liquidity + freshness gates)
   const missing = tokens
-    .filter(t => !metaMap[t.mint]?.price)
+    .filter(t => !(metaMap[t.mint]?.price > 0))
     .map(t => t.mint);
 
-  await Promise.all(missing.map(mint =>
-    limit(async () => {
-      try {
-        const { data } = await require("axios").get(PRICE_ENDPOINT, {
-          params: { address: mint, ui_amount_mode: "raw" },
-          headers: { "x-chain": "solana", "X-API-KEY": BIRDEYE_API_KEY },
-          timeout: 3000,
-        });
-        const p = data?.data?.value ?? 0;
-        if (p > 0) metaMap[mint] = { ...(metaMap[mint] || {}), price: p };
-      } catch { /* ignore */ }
-    })
-  ));
+  if (missing.length) {
+    try {
+      const quotes = await getPricesWithLiquidityBatch(userId, missing);
+      const nowSec = Math.floor(Date.now() / 1e3);
+
+      for (const mint of missing) {
+        const q = quotes[mint] || {};
+        const price = Number(q.price || 0);
+        const liq   = Number(q.liquidity || 0);
+        const ut    = Number(q.updateUnixTime || 0);
+        const fresh = ut && (nowSec - ut) <= MAX_PRICE_STALENESS_SEC;
+
+        if (price > 0 && fresh && liq >= MIN_LIQUIDITY_USD) {
+          metaMap[mint] = { ...(metaMap[mint] || {}), price };
+        }
+      }
+    } catch (e) {
+      console.warn("batched price fallback failed:", e?.message || e);
+    }
+  }
 
   // Merge on-chain + Birdeye data
   return tokens
     .map(tok => {
-      const price = metaMap[tok.mint]?.price || 0;
+      const meta = metaMap[tok.mint] || {};
+      const price = Number(meta.price || 0);
       return {
         mint: tok.mint,
         amount: tok.amount,
         decimals: tok.decimals,
-        name: metaMap[tok.mint]?.name || `${tok.mint.slice(0, 4)}…${tok.mint.slice(-4)}`,
-        symbol: metaMap[tok.mint]?.symbol || "",
-        logo: metaMap[tok.mint]?.logo || "",
+        name: meta.name || `${tok.mint.slice(0, 4)}…${tok.mint.slice(-4)}`,
+        symbol: meta.symbol || "",
+        logo: meta.logo || "",
         price,
         valueUsd: tok.amount * price,
       };
@@ -124,7 +123,7 @@ async function getWalletTokensWithMeta(walletPubkey, userId = null) {
       t.mint === SOL_MINT ||
       (t.price > MIN_PRICE_USD && t.valueUsd >= MIN_VALUE_USD)
     )
-    .sort((a, b) => b.valueUsd - a.valueUsd);  // high → low
+    .sort((a, b) => b.valueUsd - a.valueUsd); // high → low
 }
 
 module.exports = getWalletTokensWithMeta;
