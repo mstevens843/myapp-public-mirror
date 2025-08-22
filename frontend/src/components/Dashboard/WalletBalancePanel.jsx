@@ -49,7 +49,7 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
 
   const STABLE_MINTS = new Set([
     USDC_MINT,
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
     "USDH1SM1ojwWUga67PGrgFWUHibbjqMvuMaDkRJTgkX",
     "7kbnvuGBxxj8AG9qp8Scn56muWGaRaFqxg1FsRp3PaFT",
   ]);
@@ -73,7 +73,7 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
     setLoading(true);
     try {
       const [netRes, openRes] = await Promise.allSettled([
-        getWalletNetworth(),
+        getWalletNetworth(), // server may include extra spl/dust; we'll compute display sum ourselves
         getOpenTrades({ take: 100, skip: 0, walletId: activeWalletId }),
       ]);
 
@@ -92,7 +92,7 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
         let priceMap = {};
         try { priceMap = await fetchPricesBatch(mints); } catch (_) {}
 
-        let totalUSD = 0; // <-- missing before
+        let totalUSD = 0;
         for (const t of trades) {
           const usd = (typeof t.usdValue === "number")
             ? t.usdValue
@@ -151,7 +151,16 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
   /* ---------------- Swap helpers ---------------- */
   const sol = net?.tokenValues?.find((t) => t.name === "SOL") ?? {};
   const usdc = net?.tokenValues?.find((t) => t.mint === USDC_MINT) ?? {};
-  const displayNet = net ? net.totalValueUSD.toFixed(2) : "0.00";
+
+  // Compute Net Worth as SOL + USDC + Open (strictly what the UI shows)
+  const computedNetUSD = (() => {
+    const a = Number(sol?.valueUSD ?? 0);
+    const b = Number(usdc?.valueUSD ?? 0);
+    const c = Number(open?.value ?? 0);
+    const sum = a + b + c;
+    if (!isFinite(sum)) return "0.00";
+    return sum.toFixed(2);
+  })();
 
   const setMax = () => {
     if (direction === "usdcToSol") {
@@ -330,7 +339,8 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
               <ClipboardList size={18} className="text-purple-400" />
               <span>Net Worth</span>
             </div>
-            <div className="text-white font-bold">${displayNet}</div>
+            {/* Net Worth shown as SOL + USDC + Open */}
+            <div className="text-white font-bold">${computedNetUSD}</div>
           </div>
         </div>
       )}

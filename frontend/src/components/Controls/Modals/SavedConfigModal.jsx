@@ -29,191 +29,86 @@ import StrategyTooltip from "../../Strategy_Configs/StrategyTooltip";
 /* icons */
 import { Save, BarChart3, Edit2, Info } from "lucide-react";
 
-/* ────────────────────────────────────────────────────────── */
 /* ---- SECTION BUCKETS (mirrors buildBaseConfig logic) ---- */
 const CONFIG_FIELDS = [
   "inputMint","monitoredTokens","walletId","amountToSpend","snipeAmount",
   "slippage","interval","maxTrades","tokenFeed","haltOnFailures","autoSell",
-  "maxSlippage","priorityFeeLamports","mevMode","briberyAmount",
+  "maxSlippage","priorityFeeLamports","mevMode","briberyAmount","cooldown",
+  "maxOpenTrades","minPoolUsd","safetyEnabled","safetyChecks","maxDailyVolume",
 ];
 
-const TP_FIELDS      = ["takeProfit","tpPercent","stopLoss","slPercent"];
-const ADV_FIELDS     = [
-  "defaultMaxSlippage","skipSafety","feeEscalationLamports",
-  "slippageMaxPct","priorityFee","maxDailyVolume","extras",
+const TP_FIELDS  = ["takeProfit","tpPercent","stopLoss","slPercent"];
+
+const ADV_FIELDS = [
+  "defaultMaxSlippage","skipSafety","feeEscalationLamports","slippageMaxPct",
+  "priorityFee","extras",
 ];
 
-/* Strategy-specific extras (pulled straight from the JS builders) */
 export const STRAT_EXTRAS = {
   sniper: [
-    "entryThreshold",
-    "volumeThreshold",
-    "priceWindow",
-    "volumeWindow",
-    "minTokenAgeMinutes",
-    "maxTokenAgeMinutes",
+    "entryThreshold","volumeThreshold","priceWindow","volumeWindow",
+    "minTokenAgeMinutes","maxTokenAgeMinutes","delayBeforeBuyMs",
+    "minMarketCap","maxMarketCap","smartExitMode","smartExit","postBuyWatch",
   ],
   scalper: [
-    "entryThreshold",
-    "volumeThreshold",
-    "priceWindow",
-    "volumeWindow",
-    // new scalper fields
-    "maxDailyVolume",
-    "maxOpenTrades",
-    "maxTrades",
-    "haltOnFailures",
-    "minMarketCap",
-    "maxMarketCap",
-    "cooldown",
-    "takeProfitPct",
-    "stopLossPct",
-    "volumeSpikeMultiplier",
-    "useSignals",
-    "maxHoldSeconds",
-    "disableSafety",
-    "safetyChecks",
+    "entryThreshold","volumeThreshold","priceWindow","volumeWindow",
+    "maxDailyVolume","maxOpenTrades","maxTrades","haltOnFailures","minMarketCap","maxMarketCap",
+    "cooldown","takeProfitPct","stopLossPct","volumeSpikeMultiplier","useSignals","maxHoldSeconds",
+    "disableSafety","safetyChecks",
   ],
-  dipBuyer: [
-    "dipThreshold",
-    "recoveryWindow",
-    "volumeWindow",
-    "volumeThreshold",
-  ],
-  breakout: [
-    "breakoutThreshold",
-    "volumeThreshold",
-    "volumeWindow",
-    "priceWindow",
-  ],
+  dipBuyer: ["dipThreshold","recoveryWindow","volumeThreshold","volumeWindow"],
+  breakout: ["breakoutThreshold","volumeThreshold","priceWindow","volumeWindow"],
   trendFollower: [
-    "entryThreshold",
-    "volumeThreshold",
-    "trendWindow",
-    "priceWindow",
-    "volumeWindow",
-    // new trend follower fields
-    "emaPeriods",
-    "trailingPct",
-    "sarEnabled",
-    "pyramidEnabled",
-    "riskPerAdd",
-    "maxRisk",
-    "delayBeforeBuyMs",
-    "maxOpenTrades",
-    "maxDailyVolume",
-    "minMarketCap",
-    "maxMarketCap",
-    "useSignals",
-    "maxHoldSeconds",
+    "entryThreshold","volumeThreshold","trendWindow","priceWindow","volumeWindow",
+    "emaPeriods","trailingPct","sarEnabled","pyramidEnabled","riskPerAdd","maxRisk",
+    "delayBeforeBuyMs","maxOpenTrades","maxDailyVolume","minMarketCap","maxMarketCap",
+    "useSignals","maxHoldSeconds",
   ],
   delayedSniper: [
-    "delayBeforeBuyMs",
-    "entryThreshold",
-    "volumeThreshold",
-    "priceWindow",
-    "volumeWindow",
-    "minTokenAgeMinutes",
-    "maxTokenAgeMinutes",
-    // new delayed sniper fields
-    "breakoutPct",
-    "pullbackPct",
-    "ignoreBlocks",
-    "maxOpenTrades",
-    "maxDailyVolume",
-    "minMarketCap",
-    "maxMarketCap",
+    "delayBeforeBuyMs","entryThreshold","volumeThreshold","priceWindow","volumeWindow",
+    "minTokenAgeMinutes","maxTokenAgeMinutes","breakoutPct","pullbackPct","ignoreBlocks",
+    "maxOpenTrades","maxDailyVolume","minMarketCap","maxMarketCap",
   ],
   chadMode: [
-    // existing fields
-    "minVolumeRequired",
-    "slippageMaxPct",
-    "feeEscalationLamports",
-    "panicDumpPct",
-    "priorityFeeLamports",
-    // new chad mode fields
-    "maxOpenTrades",
-    "maxTrades",
-    "haltOnFailures",
-    "autoSell",
-    "useSignals",
+    "useMultiTargets","outputMint","targetTokens","minVolumeRequired","priorityFeeLamports",
+    "slippageMaxPct","feeEscalationLamports","panicDumpPct","maxOpenTrades","maxTrades",
+    "haltOnFailures","autoSell","useSignals",
   ],
   rotationBot: [
-    "rotationInterval",
-    "priceChangeWindow",
-    "minMomentum",
-    "positionSize",
-    "cooldown",
-    "maxRotations",
-    "maxTrades",
-    "slippage",
-    "maxSlippage",
-    "priorityFeeLamports",
-    "haltOnFailures",
+    "wallets","tokens","sectors","rotationInterval","priceChangeWindow","minMomentum",
+    "positionSize","cooldown","maxRotations","maxTrades","slippage","maxSlippage",
+    "priorityFeeLamports","haltOnFailures",
   ],
   rebalancer: [
-    "maxRebalances",
-    "rebalanceThreshold",
-    "rebalanceInterval",
-    "targetAllocations",
+    "walletLabels","maxRebalances","slippage","targetAllocations","rebalanceThreshold",
+    "rebalanceInterval","maxSlippage","priorityFeeLamports","autoWallet","haltOnFailures",
   ],
   paperTrader: [
-    "maxSpendPerToken",
-    "entryThreshold",
-    "volumeThreshold",
-    "priceWindow",
-    "volumeWindow",
+    "outputMint","maxSpendPerToken","entryThreshold","volumeThreshold","priceWindow","volumeWindow",
+    "tokenFeed","minTokenAgeMinutes","maxTokenAgeMinutes","execModel","seed","slippageBpsCap",
+    "latency","failureRates","partials","enableShadowMode",
   ],
-  stealthBot: ["tokenMint", "positionSize"],
-  scheduleLauncher: ["startTime", "interval", "maxTrades", "limitPrices"],
-  // brand new turbo sniper extras.  Include all toggles to ensure users can
-  // view and edit saved turbo configurations.
+  stealthBot: ["wallets","tokenMint","positionSize","slippage","maxSlippage","priorityFeeLamports","dryRun"],
+  scheduleLauncher: [
+    "outputMint","startTime","interval","maxTrades","haltOnFailures","limitPrices",
+    "mevMode","briberyAmount","priorityFeeLamports","takeProfit","tpPercent","stopLoss","slPercent",
+  ],
   turboSniper: [
-    "entryThreshold",
-    "volumeThreshold",
-    "priceWindow",
-    "volumeWindow",
-    "minTokenAgeMinutes",
-    "maxTokenAgeMinutes",
-    "minMarketCap",
-    "maxMarketCap",
-    "ghostMode",
-    "coverWalletId",
-    "multiBuy",
-    "multiBuyCount",
-    "prewarmAccounts",
-    "multiRoute",
-    "autoRug",
-    "useJitoBundle",
-    "jitoTipLamports",
-    "jitoRelayUrl",
-    "autoPriorityFee",
-    "rpcEndpoints",
-    "rpcMaxErrors",
-    "killSwitch",
-    "killThreshold",
-    "poolDetection",
-    "allowedDexes",
-    "excludedDexes",
-    "splitTrade",
-    "tpLadder",
-    "trailingStopPct",
-    "turboMode",
-    "autoRiskManage",
-    "privateRpcUrl",
-    "maxOpenTrades",
-    "delayBeforeBuyMs",
-    "priorityFeeLamports",
+    "entryThreshold","volumeThreshold","priceWindow","volumeWindow","minTokenAgeMinutes","maxTokenAgeMinutes",
+    "minMarketCap","maxMarketCap","ghostMode","coverWalletId","multiBuy","multiBuyCount","prewarmAccounts",
+    "multiRoute","autoRug","useJitoBundle","jitoTipLamports","jitoRelayUrl","autoPriorityFee","rpcEndpoints",
+    "rpcMaxErrors","killSwitch","killThreshold","poolDetection","allowedDexes","excludedDexes","splitTrade",
+    "tpLadder","trailingStopPct","turboMode","autoRiskManage","privateRpcUrl","maxOpenTrades","delayBeforeBuyMs",
+    "priorityFeeLamports","smartExitMode","smartExit","liqGate","postBuyWatch","ui",
   ],
 };
 
-
 const SECTION_ORDER = [
-    "Strategy Settings",
   "Config Settings",
+  "Strategy Settings",
   "TP/SL",
   "Advanced Settings",
-  "Other",
+  "Exit Strategy",
 ];
 
 /* ────────────────────────────────────────────────────────── */
@@ -235,22 +130,36 @@ export default function SavedConfigModal({
   const [editing,  setEditing]  = useState(null);  // { id, name, strategy, config }
   const [localInput, setLocalInput] = useState({});
 
+  // helper to safely read strategy key
+  const getStrat = (c) => (c?.strategy || c?.strategyName || "").toString();
+
   /* ───────── FETCH LIST ───────── */
   useEffect(() => {
     if (!open) return;
     (async () => {
-      try { setConfigs(await listSavedConfigs()); }
-      catch { toast.error("Failed to fetch saved configs."); }
+      try {
+        const list = await listSavedConfigs();
+        setConfigs(Array.isArray(list) ? list : []);
+      } catch {
+        toast.error("Failed to fetch saved configs.");
+      }
     })();
   }, [open]);
 
   /* ───────── FILTER / SORT ────── */
   useEffect(() => {
     let arr = Array.isArray(configs) ? [...configs] : [];
-    if(query) arr = arr.filter(c => c.strategy.toLowerCase().includes(query.toLowerCase()));
-    arr.sort(sortBy==="fields"
-      ? (a,b)=>Object.keys(b.config).length - Object.keys(a.config).length
-      : (a,b)=>a.strategy.localeCompare(b.strategy));
+    if (query) {
+      const q = query.toLowerCase();
+      arr = arr.filter((c) => getStrat(c).toLowerCase().includes(q));
+    }
+    arr.sort(
+      sortBy === "fields"
+        ? (a, b) =>
+            Object.keys(b?.config || {}).length -
+            Object.keys(a?.config || {}).length
+        : (a, b) => getStrat(a).localeCompare(getStrat(b))
+    );
     setFiltered(arr);
   }, [configs, query, sortBy]);
 
@@ -281,9 +190,7 @@ export default function SavedConfigModal({
 
       const pruned = Object.fromEntries(Object.entries(currentConfig).filter(keep));
 
-      // Attach the optional note to the saved config. Note is stored on the
-      // config object itself (within extras) so it doesn't affect runtime
-      // behaviour. Empty notes are omitted.
+      // Optional note stored on the config object
       if (configNote?.trim()) {
         pruned.note = configNote.trim();
       }
@@ -295,7 +202,6 @@ export default function SavedConfigModal({
       toast.error(e.message || "Failed to save config.");
     } finally {
       setLoading(false);
-      // reset inputs when done
       setConfigName("");
       setConfigNote("");
     }
@@ -322,16 +228,16 @@ export default function SavedConfigModal({
   };
 
   /** one-liner so we don't repeat markup  */
-const L = (txt, tipKey = txt) => (
-  <span className="flex items-center gap-1">
-    {txt}
-    <StrategyTooltip name={tipKey} />
-  </span>
-);
+  const L = (txt, tipKey = txt) => (
+    <span className="flex items-center gap-1">
+      {txt}
+      <StrategyTooltip name={tipKey} />
+    </span>
+  );
 
   /* ───────── FIELD RENDERER ───── */
   const Field = ({ k, v }) => {
-      const [tempVal, setTempVal] = useState(v?.toString?.() ?? "");
+    const [tempVal, setTempVal] = useState(v?.toString?.() ?? "");
     const wrap = "mt-4 flex flex-col";
     const label = "pb-1 flex items-center gap-1 text-[13px] font-medium text-zinc-400";
     const commonInput =
@@ -349,160 +255,159 @@ const L = (txt, tipKey = txt) => (
     }
 
     const SAFETY_KEYS = [
-  "authority",
-  "liquidity",
-  "simulation",
-  "topHolders",
-];
+      "authority",
+      "liquidity",
+      "simulation",
+      "topHolders",
+    ];
 
-if (k.startsWith("safetyChecks.")) {
-  const [, subKey] = k.split(".");
-  const isFirst = subKey === Object.keys(editing.config?.safetyChecks || {})[0];
+    if (k.startsWith("safetyChecks.")) {
+      const [, subKey] = k.split(".");
+      const isFirst = subKey === Object.keys(editing.config?.safetyChecks || {})[0];
 
-  return (
-    <div key={k} className="mt-2">
-{isFirst && (
-  <label className="mb-1 flex items-center gap-1 px-1 pt-2 text-xs font-semibold text-zinc-400">
-    {L("Safety Checks", "safetyChecks")}
-  </label>
-)}
-<div className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
-  <span className="flex items-center gap-1">
-    {L(subKey)}
-  </span>
-        <span
-          className={`inline-flex h-5 w-10 items-center rounded-full transition ${
-            editing.config.safetyChecks?.[subKey] ? "bg-emerald-500" : "bg-zinc-600"
-          }`}
-          role="switch"
-          aria-checked={editing.config.safetyChecks?.[subKey]}
-          onClick={() =>
-            setEditing((p) => ({
-              ...p,
-              config: {
-                ...p.config,
-                safetyChecks: {
-                  ...p.config.safetyChecks,
-                  [subKey]: !p.config.safetyChecks?.[subKey],
-                },
-              },
-            }))
-          }
-        >
-          <span
-            className={`h-4 w-4 transform rounded-full bg-white transition ${
-              editing.config.safetyChecks?.[subKey] ? "translate-x-5" : "translate-x-1"
-            }`}
-          />
-        </span>
-      </div>
-    </div>
-  );
-}
-if (SAFETY_KEYS.includes(k)) {
-  return (
-    <div key={k} className={wrap}>
-      <label className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
-{L(k)}
-        <span
-          className={`inline-flex h-5 w-10 items-center rounded-full transition ${
-            editing.config[k] ? "bg-emerald-500" : "bg-zinc-600"
-          }`}
-          role="switch"
-          aria-checked={editing.config[k]}
-          onClick={() =>
-            setEditing((p) => ({
-              ...p,
-              config: { ...p.config, [k]: !p.config[k] },
-            }))
-          }
-        >
-          <span
-            className={`h-4 w-4 transform rounded-full bg-white transition ${
-              editing.config[k] ? "translate-x-5" : "translate-x-1"
-            }`}
-          />
-        </span>
-      </label>
-    </div>
-  );
-}
+      return (
+        <div key={k} className="mt-2">
+          {isFirst && (
+            <label className="mb-1 flex items-center gap-1 px-1 pt-2 text-xs font-semibold text-zinc-400">
+              {L("Safety Checks", "safetyChecks")}
+            </label>
+          )}
+          <div className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
+            <span className="flex items-center gap-1">
+              {L(subKey)}
+            </span>
+            <span
+              className={`inline-flex h-5 w-10 items-center rounded-full transition ${
+                editing.config.safetyChecks?.[subKey] ? "bg-emerald-500" : "bg-zinc-600"
+              }`}
+              role="switch"
+              aria-checked={editing.config.safetyChecks?.[subKey]}
+              onClick={() =>
+                setEditing((p) => ({
+                  ...p,
+                  config: {
+                    ...p.config,
+                    safetyChecks: {
+                      ...p.config.safetyChecks,
+                      [subKey]: !p.config.safetyChecks?.[subKey],
+                    },
+                  },
+                }))
+              }
+            >
+              <span
+                className={`h-4 w-4 transform rounded-full bg-white transition ${
+                  editing.config.safetyChecks?.[subKey] ? "translate-x-5" : "translate-x-1"
+                }`}
+              />
+            </span>
+          </div>
+        </div>
+      );
+    }
+    if (SAFETY_KEYS.includes(k)) {
+      return (
+        <div key={k} className={wrap}>
+          <label className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
+            {L(k)}
+            <span
+              className={`inline-flex h-5 w-10 items-center rounded-full transition ${
+                editing.config[k] ? "bg-emerald-500" : "bg-zinc-600"
+              }`}
+              role="switch"
+              aria-checked={editing.config[k]}
+              onClick={() =>
+                setEditing((p) => ({
+                  ...p,
+                  config: { ...p.config, [k]: !p.config[k] },
+                }))
+              }
+            >
+              <span
+                className={`h-4 w-4 transform rounded-full bg-white transition ${
+                  editing.config[k] ? "translate-x-5" : "translate-x-1"
+                }`}
+              />
+            </span>
+          </label>
+        </div>
+      );
+    }
 
+    if (typeof v === "boolean") {
+      return (
+        <div key={k} className={wrap}>
+          <label className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
+            <span className="flex items-center gap-1">{L(k)}</span>
+            <span
+              className={`inline-flex h-5 w-10 items-center rounded-full transition ${
+                editing.config[k] ? "bg-emerald-500" : "bg-zinc-600"
+              }`}
+              role="switch"
+              aria-checked={editing.config[k]}
+              onClick={() =>
+                setEditing((p) => ({
+                  ...p,
+                  config: { ...p.config, [k]: !p.config[k] },
+                }))
+              }
+            >
+              <span
+                className={`h-4 w-4 transform rounded-full bg-white transition ${
+                  editing.config[k] ? "translate-x-5" : "translate-x-1"
+                }`}
+              />
+            </span>
+          </label>
+        </div>
+      );
+    }
 
-if (typeof v === "boolean") {
-  return (
-    <div key={k} className={wrap}>
-      <label className="flex items-center justify-between gap-4 px-1 pb-1 text-xs font-medium text-zinc-300">
-        <span className="flex items-center gap-1">{L(k)}</span>
-        <span
-          className={`inline-flex h-5 w-10 items-center rounded-full transition ${
-            editing.config[k] ? "bg-emerald-500" : "bg-zinc-600"
-          }`}
-          role="switch"
-          aria-checked={editing.config[k]}
-          onClick={() =>
-            setEditing((p) => ({
-              ...p,
-              config: { ...p.config, [k]: !p.config[k] },
-            }))
-          }
-        >
-          <span
-            className={`h-4 w-4 transform rounded-full bg-white transition ${
-              editing.config[k] ? "translate-x-5" : "translate-x-1"
-            }`}
-          />
-        </span>
-      </label>
-    </div>
-  );
-}
     // Special dropdown for mevMode
-if (k === "mevMode") {
-  return (
-    <div key={k} className={wrap}>
-<label className={label}>{L("mevMode")}</label>
-      <select
-        value={editing.config[k]}
-        onChange={(e) =>
-          setEditing((prev) => ({
-            ...prev,
-            config: { ...prev.config, [k]: e.target.value },
-          }))
-        }
-        className={`${commonInput} cursor-pointer`}
-      >
-        <option value="fast">⚡ fast — fast finality</option>
-        <option value="secure">🛡 secure — MEV protected</option>
-      </select>
-    </div>
-  );
-}
+    if (k === "mevMode") {
+      return (
+        <div key={k} className={wrap}>
+          <label className={label}>{L("mevMode")}</label>
+          <select
+            value={editing.config[k]}
+            onChange={(e) =>
+              setEditing((prev) => ({
+                ...prev,
+                config: { ...prev.config, [k]: e.target.value },
+              }))
+            }
+            className={`${commonInput} cursor-pointer`}
+          >
+            <option value="fast">⚡ fast — fast finality</option>
+            <option value="secure">🛡 secure — MEV protected</option>
+          </select>
+        </div>
+      );
+    }
 
-// inside Field
-if (!isNaN(+v)) {
-    return (
-      <div key={k} className={wrap}>
-<label className={label}>{L(k)}</label>
-
-        <input
-          type="number"
-          value={tempVal}
-          onChange={(e) => setTempVal(e.target.value)}
-          onBlur={() => {
-            setEditing((prev) => ({
-              ...prev,
-              config: {
-                ...prev.config,
-                [k]: tempVal === "" ? 0 : +tempVal,
-              },
-            }));
-          }}
-          className={commonInput}
-        />
-      </div>
-    );
-  }
+    // inside Field
+    if (!isNaN(+v)) {
+      return (
+        <div key={k} className={wrap}>
+          <label className={label}>{L(k)}</label>
+          <input
+            type="number"
+            value={tempVal}
+            onChange={(e) => setTempVal(e.target.value)}
+            onBlur={() => {
+              setEditing((prev) => ({
+                ...prev,
+                config: {
+                  ...prev.config,
+                  [k]: tempVal === "" ? 0 : +tempVal,
+                },
+              }));
+            }}
+            className={commonInput}
+          />
+        </div>
+      );
+    }
 
     /* string dropdown with custom fallback */
     const baseList = Array.isArray(configs) ? configs : [];
@@ -548,25 +453,23 @@ if (!isNaN(+v)) {
     return "Other";
   };
 
-const grouped = editing ? Object.entries(editing.config).reduce((a, [k, v]) => {
-  const sec = sectionOf(k, editing.strategy);
-
-  if (k === "safetyChecks" && typeof v === "object") {
-    for (const [subKey, subVal] of Object.entries(v)) {
-      const compoundKey = `safetyChecks.${subKey}`;
-      (a[sec] ||= []).push([compoundKey, subVal]);
+  const grouped = editing ? Object.entries(editing.config).reduce((a, [k, v]) => {
+    const sec = sectionOf(k, editing.strategy);
+    if (k === "safetyChecks" && typeof v === "object") {
+      for (const [subKey, subVal] of Object.entries(v)) {
+        const compoundKey = `safetyChecks.${subKey}`;
+        (a[sec] ||= []).push([compoundKey, subVal]);
+      }
+    } else {
+      (a[sec] ||= []).push([k, v]);
     }
-  } else {
-    (a[sec] ||= []).push([k, v]);
-  }
-
-  return a;
-}, {}) : {};
+    return a;
+  }, {}) : {};
 
   /* ───────── UI ───────── */
   return (
     <>
-      {/* Main list modal (unchanged from prior versions) */}
+      {/* Main list modal */}
       <Dialog open={open} onClose={onClose} className="fixed inset-0 z-50 overflow-y-auto">
         <div className="flex min-h-screen items-center justify-center bg-black/60 px-4">
           <Dialog.Panel
@@ -599,26 +502,18 @@ const grouped = editing ? Object.entries(editing.config).reduce((a, [k, v]) => {
             </div>
 
             {/* list */}
-            {/*
-              Extend the height of the configs list so users can see more saved
-              configurations at once. The original height only allowed
-              approximately one and a half cards to appear without scrolling.
-              Increase it to ~480px to comfortably show roughly three cards on
-              most displays. Keeping overflow-y-auto preserves scroll
-              behaviour for longer lists.
-            */}
             <div className="max-h-[480px] space-y-6 overflow-y-auto pr-1">
               {Object.entries(groupConfigs(filtered)).map(([strategy,list])=>(
-                <div key={strategy}>
+                <div key={strategy || 'unknown'}>
                   <p className="mb-1 text-xs font-semibold text-zinc-500">
-                    {STRAT_LABELS[strategy] || strategy} ({list.length})
+                    {STRAT_LABELS[strategy] || strategy || "Unknown"} ({list.length})
                   </p>
                   <div className="space-y-2">
                     {list.map(c=>(
                       <SavedConfigCard
                         key={c.id}
                         config={c}
-                        onLoad   ={()=>handleLoad(c.strategy,c.config)}
+                        onLoad   ={()=>handleLoad(getStrat(c), c.config)}
                         onDelete ={()=>handleDelete(c.id)}
                         onViewDetails={()=>setViewing(c)}
                         onEdit={()=>openEdit(c)}
@@ -631,15 +526,12 @@ const grouped = editing ? Object.entries(editing.config).reduce((a, [k, v]) => {
 
             {/* save current */}
             <div className="border-t border-zinc-700 pt-4">
-              {/* Name field for saved configuration */}
               <input
                 className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 placeholder="Optional config name…"
                 value={configName}
                 onChange={e => setConfigName(e.target.value)}
               />
-              {/* Optional note field – stores arbitrary text alongside the preset
-                  for personal reference. It does not affect runtime behaviour. */}
               <textarea
                 className="mb-3 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 resize-none"
                 rows={3}
@@ -683,7 +575,7 @@ const grouped = editing ? Object.entries(editing.config).reduce((a, [k, v]) => {
               {/* title + name */}
               <div className="space-y-3">
                 <Dialog.Title className="flex items-center gap-2 text-lg font-bold text-white">
-                  <Edit2 size={18}/> Edit Saved Config – {editing.strategy}
+                  <Edit2 size={18}/> Edit Saved Config – {editing.strategy || getStrat(editing)}
                 </Dialog.Title>
                 {/* Name input */}
                 <input
@@ -692,9 +584,7 @@ const grouped = editing ? Object.entries(editing.config).reduce((a, [k, v]) => {
                   onChange={e => setEditing(p => ({ ...p, name: e.target.value }))}
                   placeholder="Name (optional)"
                 />
-                {/* Note input for editing the optional note. The note lives on the
-                    config object itself (extras.note) and is saved when the
-                    preset is updated. */}
+                {/* Note input */}
                 <textarea
                   className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-emerald-500 resize-none"
                   rows={3}
@@ -749,8 +639,10 @@ const STRAT_LABELS = {
 };
 
 function groupConfigs(arr=[]) {
+  const getStrat = (c) => (c?.strategy || c?.strategyName || "").toString();
   return arr.reduce((acc,item)=>{
-    (acc[item.strategy] ||= []).push(item);
+    const key = getStrat(item);
+    (acc[key] ||= []).push(item);
     return acc;
   },{});
 }

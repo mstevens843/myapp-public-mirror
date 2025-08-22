@@ -304,7 +304,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   try {
     await prisma.trade.create({
       data: {
-        id: uuid(),
         userId,
         mint,
         entryPrice,

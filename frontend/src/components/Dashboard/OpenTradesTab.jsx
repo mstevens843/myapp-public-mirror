@@ -169,6 +169,14 @@ export default function OpenTradesTab({ onRefresh }) {
 
         // Normalize smart-exit metadata for the cell
         const m = b.smartExit || {};
+
+        // Derive explicit hold seconds so ExitRuleCell can show a live countdown
+        const timeMaxHoldSec =
+          (m && m.time && Number(m.time.maxHoldSec)) ||
+          Number(b.timeMaxHoldSec) ||
+          (Number(m.smartExitTimeMins) ? Math.floor(Number(m.smartExitTimeMins) * 60) : undefined) ||
+          (Number(b.smartExitTimeMins) ? Math.floor(Number(b.smartExitTimeMins) * 60) : undefined);
+
         const smartExit = {
           mode: m.mode ?? b.smartExitMode ?? m.smartExitMode ?? "none",
           smartExitTimeMins: m.smartExitTimeMins ?? b.smartExitTimeMins,
@@ -176,8 +184,8 @@ export default function OpenTradesTab({ onRefresh }) {
           smartVolThreshold: m.smartVolThreshold ?? b.smartVolThreshold,
           smartLiqLookbackSec: m.smartLiqLookbackSec ?? b.smartLiqLookbackSec,
           smartLiqDropPct: m.smartLiqDropPct ?? b.smartLiqDropPct,
+          timeMaxHoldSec: timeMaxHoldSec || undefined,
         };
-
         return {
           mint: b.mint,
           name: posMatch.name || b.tokenName || "Unknown",
@@ -568,15 +576,16 @@ export default function OpenTradesTab({ onRefresh }) {
 
                       {/* Exit Rules (TP/SL + Smart Exit) */}
                       <td className="py-2 px-3 text-left">
-                        <ExitRuleCell
-                          mint={r.mint}
-                          strategy={r.strategy}
-                          walletId={r.walletId}
-                          walletLabel={r.walletLabel}
-                          rules={rulesForThisRow}
-                          smartExit={r.smartExit}
-                          onSaved={refresh}
-                        />
+                          <ExitRuleCell
+                            mint={r.mint}
+                            strategy={r.strategy}
+                            walletId={r.walletId}
+                            walletLabel={r.walletLabel}
+                            rules={rulesForThisRow}
+                            smartExit={r.smartExit}
+                            entryTs={r.timestamp}
+                            onSaved={refresh}
+                          />
                       </td>
 
                       {/* sell */}

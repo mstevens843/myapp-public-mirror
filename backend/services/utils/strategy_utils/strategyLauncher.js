@@ -165,7 +165,9 @@ async function startStrategy(mode, config, autoRestart = false) {
         CRASH_USER_ID: config.userId || "",
         CRASH_CFG_PATH: cfgPath,
         CRASH_RUNTIME_DIR: runtimeDir,
-      },
+      
+      CRASH_LOG_DIR: process.env.CRASH_LOG_DIR || require("path").join(__dirname, "../crashlogs")
+    },
     }
   );
 

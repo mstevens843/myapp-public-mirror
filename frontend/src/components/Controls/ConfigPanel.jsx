@@ -539,6 +539,17 @@ const ConfigPanel = ({
     }
   }, [railSelection, multiModeEnabled, selectedMode, setSelectedMode]);
 
+
+  useEffect(() => {
+  try {
+    const raw = localStorage.getItem(`botConfig:${selectedMode}`);
+    if (raw) {
+      const perMode = JSON.parse(raw);
+      setConfig(perMode);
+    }
+  } catch {}
+}, [selectedMode]);
+
   useEffect(() => {
     const handler = (e) => {
       const { mode, config } = e.detail;
@@ -1544,12 +1555,18 @@ const ConfigPanel = ({
             dialogWidth={selectedMode === "turboSniper" ? "w-[880px]" : "w-[440px]"}
             config={tempConfig}
             setConfig={setTempConfig}
-            onSave={(finalConfig) => {
-              setConfig(finalConfig);
+            disabled={disabled}
+            onClose={() => setIsConfigModalOpen(false)}
+            onSave={(final) => {
+              setConfig(final);
+              try {
+                localStorage.setItem(
+                  `botConfig:${selectedMode}`,
+                  JSON.stringify(final)
+                );
+              } catch {}
               setIsConfigModalOpen(false);
             }}
-            onClose={() => setIsConfigModalOpen(false)}
-            disabled={disabled}
           >
             <StrategyConfigLoader
               strategy={selectedMode}
@@ -1561,7 +1578,6 @@ const ConfigPanel = ({
           </ConfigModal>
         </>
       )}
-
       <SavedConfigModal
         open={isSavedConfigModalOpen}
         onClose={() => setIsSavedConfigModalOpen(false)}

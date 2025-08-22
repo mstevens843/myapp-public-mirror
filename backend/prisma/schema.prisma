@@ -250,17 +250,17 @@ model ClosedTrade {
 
 model SavedConfigs {
   /// Primary key
-  id          Int      @id @default(autoincrement())
+  id             Int       @id @default(autoincrement())
   /// Owning user (optional)
-  userId      String?
-  isSaved       Boolean  @default(true) 
+  userId         String?
+  isSaved        Boolean   @default(true)
   /// Name of the saved configuration
-  name        String?
+  name           String?
   /// Strategy this config applies to
-  strategy    String?
-  strategyName String? 
-  // -----------------------------------------------------------------------
-  // Existing config fields (common to many strategies)
+  strategy       String?
+  strategyName   String?
+
+  // ───────────────────────── Common / Base ─────────────────────────
   amountToSpend        Float?
   snipeAmount          Float?
   slippage             Float?
@@ -271,12 +271,18 @@ model SavedConfigs {
   haltOnFailures       Boolean?
   autoSell             Json?
   priorityFeeLamports  Int?
+  /// NOTE: keep the legacy boolean for compatibility; see mevModeStr below
   mevMode              Boolean?
+  /// Preferred: string mode (e.g. "fast", "secure")
+  mevModeStr           String?
   briberyAmount        Float?
   takeProfit           Float?
   stopLoss             Float?
   takeProfitPct        Float?
   stopLossPct          Float?
+  tpPercent           Float?
+  slPercent           Float?
+  
   cooldown             Int?
   maxDailyVolume       Float?
   minTokenAgeMinutes   Int?
@@ -285,36 +291,104 @@ model SavedConfigs {
   maxMarketCap         Float?
   risk                 Float?
   volumeSpikeMultiplier Float?
-  // -----------------------------------------------------------------------
-  // New general fields shared across multiple strategies
-  /// Maximum number of concurrent open trades
+
+  /// New common/base fields from builders
+  monitoredTokens      Json?
+  safetyEnabled        Boolean?
+  safetyChecks         Json?
   maxOpenTrades        Int?
-  /// Enable use of external signals
-  useSignals           Boolean?
-  /// Maximum hold time for a position in seconds
-  maxHoldSeconds       Int?
-  /// An array of EMA periods for trend following
-  emaPeriods           Json?
-  /// Percentage used for trailing stops on trend following
-  trailingPct          Float?
-  /// Enable the parabolic SAR indicator in trend following
-  sarEnabled           Boolean?
-  /// Enable pyramiding (adding to winners) in trend following
-  pyramidEnabled       Boolean?
-  /// Risk percentage for each additional pyramid position
-  riskPerAdd           Float?
-  /// Maximum cumulative risk allowed in trend following
-  maxRisk              Float?
-  /// Milliseconds to wait before executing a buy order
+  /// Configurable liquidity floor (USD) – default handled in builder/runtime
+  minPoolUsd           Float?
+
+  // ───────────────────────── Sniper (and shared) ─────────────────────────
+  entryThreshold       Float?
+  volumeThreshold      Float?
+  priceWindow          String?
+  volumeWindow         String?
+
+  /// Smart Exit (flat & nested)
+  smartExitMode        String?  // "off" | "time" | "liquidity" | ...
+  smartExit            Json?    // { time: { maxHoldSec, minPnLBeforeTimeExitPct }, ... }
+
+  /// Post-buy watcher (flat fallbacks + nested)
+  postBuyWatch         Json?    // { intervalSec, authorityFlipExit, lpOutflowExitPct, rugDelayBlocks }
+  intervalSec          Int?
+  authorityFlipExit    Boolean?
+  lpOutflowExitPct     Float?
+  rugDelayBlocks       Int?
+
+  /// Flat time-exit fallbacks used by sanitizer/validator
+  timeMaxHoldSec                     Int?
+  timeMinPnLBeforeTimeExitPct        Float?
+
   delayBeforeBuyMs     Int?
-  /// Percentage for breakout buy threshold (delayed sniper)
+
+  // ───────────────────────── Dip Buyer ─────────────────────────
+  dipThreshold         Float?
+  recoveryWindow       String?
+
+  // ───────────────────────── Breakout ─────────────────────────
+  breakoutThreshold    Float?
+
+  // ───────────────────────── Trend Follower ─────────────────────────
+  priceChangeThreshold Float?
+  trendWindow          String?
+  emaPeriods           Json?
+  trailingPct          Float?
+  sarEnabled           Boolean?
+  pyramidEnabled       Boolean?
+  riskPerAdd           Float?
+  maxRisk              Float?
+  maxHoldSeconds       Int?
+  useSignals           Boolean?
+
+  // ───────────────────────── Delayed Sniper ─────────────────────────
+  // (you already had delayBeforeBuyMs above)
   breakoutPct          Float?
-  /// Percentage for pullback buy threshold (delayed sniper)
   pullbackPct          Float?
-  /// Number of blocks to ignore before executing a trade (delayed sniper)
   ignoreBlocks         Int?
-  // -----------------------------------------------------------------------
-  // Turbo sniper specific fields
+
+  // ───────────────────────── Chad Mode / Multi-target ─────────────────────────
+  outputMint           String?
+  outputMints          Json?
+  targetTokens         Json?
+  minVolumeRequired    Float?
+  slippageMaxPct       Float?
+  feeEscalationLamports Int?
+  panicDumpPct         Float?
+
+  // ───────────────────────── Rebalancer ─────────────────────────
+  walletLabels         Json?
+  maxRebalances        Int?
+  targetAllocations    Json?
+  targetWeights        Json?
+  rebalanceThreshold   Float?
+  rebalanceInterval    Int?
+  autoWallet           Boolean?
+
+  // ───────────────────────── Rotation Bot ─────────────────────────
+  wallets              Json?
+  sectors              Json?
+  tokens               Json?
+  rotationInterval     Int?
+  priceChangeWindow    String?
+  minMomentum          Float?
+  positionSize         Float?
+  maxRotations         Int?
+
+  // ───────────────────────── Paper Trader ─────────────────────────
+  dryRun               Boolean?
+  maxSpendPerToken     Float?
+  slippageBpsCap       Int?
+  latency              Json?
+  failureRates         Json?
+  partials             Json?
+  enableShadowMode     Boolean?
+  execModel            String?
+  seed                 String?
+
+
+  // ───────────────────────── Turbo Sniper specific (already present, ensure full coverage)
   ghostMode            Boolean?
   coverWalletId        String?
   multiBuy             Boolean?
@@ -339,15 +413,17 @@ model SavedConfigs {
   turboMode            Boolean?
   autoRiskManage       Boolean?
   privateRpcUrl        String?
-  /// Catch-all field for any additional strategy-specific settings not yet modelled
-  extras      Json?
-  savedAt       DateTime @default(now())
-  createdAt   DateTime @default(now())
-  trades      Trade[]   @relation("TradeConfig")
-  User User[]
+  /// optional future wiring (some builds refer to liqGate/ui objects)
+  liqGate              Json?
+  ui                   Json?
+  // ───────────────────────── Misc/Infra ─────────────────────────
+  extras               Json?
+  savedAt              DateTime  @default(now())
+  createdAt            DateTime  @default(now())
 
+  trades               Trade[]   @relation("TradeConfig")
+  User                 User[]
 }
-
 
 model StrategyRunStatus {
   id          String   @id @default(uuid())

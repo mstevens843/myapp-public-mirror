@@ -83,9 +83,9 @@ async function fetchFeed(userId, src) {
 module.exports = async function tokenFeedResolver(strategyName, cfg = {}, userId = null) {
   const mon = Array.isArray(cfg.monitoredTokens) ? cfg.monitoredTokens.map(toMint) : [];
 
-  console.log("[resolver] ⚙️  cfg.tokenFeed:", cfg.tokenFeed);
-  console.log("[resolver] 🧪 cfg.monitoredTokens:", cfg.monitoredTokens);
-  console.log("[resolver] 🧪 cfg.overrideMonitored:", cfg.overrideMonitored);
+  // console.log("[resolver] ⚙️  cfg.tokenFeed:", cfg.tokenFeed);
+  // console.log("[resolver] 🧪 cfg.monitoredTokens:", cfg.monitoredTokens);
+  // console.log("[resolver] 🧪 cfg.overrideMonitored:", cfg.overrideMonitored);
 
   /* 1️⃣ hard override */
   if (cfg.overrideMonitored && mon.length) return uniq(mon);
@@ -93,8 +93,8 @@ module.exports = async function tokenFeedResolver(strategyName, cfg = {}, userId
   const feedKey = cfg.tokenFeed || DEFAULTS[strategyName] || "trending";
   const apiMints = await fetchFeed(cfg.userId || userId, feedKey);
 
-  console.log("[resolver] 📥 apiMints from", feedKey, "=", apiMints);
-  console.log("[resolver] 🧾 Final mint list:", [...apiMints, ...mon]);
+  // console.log("[resolver] 📥 apiMints from", feedKey, "=", apiMints);
+  // console.log("[resolver] 🧾 Final mint list:", [...apiMints, ...mon]);
 
   return uniq([...apiMints, ...mon]);
 };

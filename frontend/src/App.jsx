@@ -18,22 +18,53 @@ import { CircleDot,RefreshCw, } from "lucide-react";
 import { startStrategy, stopStrategy, fetchBotStatus, fetchDetailedStatus, pauseStrategy, resumeStrategy, deleteStrategy, } from "@/utils/autobotApi";
 import FloatingBotBeacon from "./components/Dashboard/BotBeaconModal";
 
+// App.jsx — put these helpers near your other utils
+const parseFlexibleNumber = (v) => {
+  if (v === "" || v == null) return undefined;
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+
+  let s = String(v).trim().toLowerCase();
+
+  // strip trailing % (we keep the value as-is: "5%" -> 5)
+  if (s.endsWith("%")) s = s.slice(0, -1).trim();
+
+  // remove separators
+  s = s.replace(/[,_\s]/g, "");
+
+  // suffix multipliers
+  let mult = 1;
+  if (s.endsWith("k")) { mult = 1e3; s = s.slice(0, -1); }
+  else if (s.endsWith("m")) { mult = 1e6; s = s.slice(0, -1); }
+  else if (s.endsWith("b")) { mult = 1e9; s = s.slice(0, -1); }
+
+  const num = parseFloat(s);
+  if (!Number.isFinite(num)) return undefined;
+  return num * mult;
+};
+
+// REPLACE your sanitizeConfig mapper with this version:
 const sanitizeConfig = (cfg = {}) =>
   Object.fromEntries(
     Object.entries(cfg)
       .filter(([, v]) => v !== "" && v !== null && v !== undefined)
-      .map(([k, v]) => [
-        k,
-        [
+      .map(([k, v]) => {
+        const numericKeys = new Set([
           "amountToSpend","snipeAmount","slippage","interval","maxTrades",
           "takeProfit","stopLoss","entryThreshold","volumeThreshold",
           "minTokenAgeMinutes","maxTokenAgeMinutes","minMarketCap","maxMarketCap",
           "maxSlippage","haltOnFailures","cooldown","delayBeforeBuyMs",
           "priorityFeeLamports","briberyAmount","tpPercent","slPercent",
-          "intervalSec","lpOutflowExitPct","rugDelayBlocks", "minPoolUsd",
-          "timeMaxHoldSec","timeMinPnLBeforeTimeExitPct",
-        ].includes(k) && v !== "" ? Number(v) : v,
-      ])
+          "intervalSec","lpOutflowExitPct","rugDelayBlocks","minPoolUsd",
+          "timeMaxHoldSec","timeMinPnLBeforeTimeExitPct","maxOpenTrades","maxDailyVolume",
+          "positionSize","rebalanceInterval","rebalanceThreshold","slippageBpsCap",
+          "feeEscalationLamports","slippageMaxPct","panicDumpPct","minVolumeRequired",
+        ]);
+        if (numericKeys.has(k)) {
+          const parsed = parseFlexibleNumber(v);
+          return [k, parsed !== undefined ? parsed : ""]; // blank invalids
+        }
+        return [k, v];
+      })
   );
 
 
@@ -80,8 +111,7 @@ const buildBaseConfig = (cfg, selectedWallets, targetToken, activeWallet) => {
     maxSlippage     : clampedMaxSlippage,
     cooldown        : toNum(cfg.cooldown), 
     maxOpenTrades: safeNum(cfg.maxOpenTrades),
-    minPoolUsd: isUnset(cfg.minPoolUsd) ? 50_000 : Number(cfg.minPoolUsd),
-
+    minPoolUsd: safeNum(cfg.minPoolUsd),
     safetyEnabled     : cfg.safetyEnabled !== false,  // default ON
     safetyChecks      : (cfg.safetyChecks && typeof cfg.safetyChecks === "object" && Object.keys(cfg.safetyChecks).length)
                          ? cfg.safetyChecks

@@ -1168,7 +1168,6 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   if (!dup && txHash) {
     await prisma.trade.create({
       data: {
-        id: uuid(),
         userId: userId,
         mint,
         tokenName: tokenName ?? null,

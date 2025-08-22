@@ -1,6 +1,7 @@
 // components/Dashboard/OpenTrades/ExitRuleCell.jsx
 // Unified Exit Rules cell: TP/SL + Smart Exit (time | volume | liquidity)
-import React, { useMemo, useState } from "react";
+// Aug 22, 2025 — Add live countdown for Smart-time using trade timestamp + hold seconds
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { FaPencilAlt } from "react-icons/fa";
 import TpSlModal from "./TpSlModal";
 
@@ -11,6 +12,7 @@ export default function ExitRuleCell({
   strategy,
   rules = [],
   smartExit = {},
+  entryTs,              // ⇐ new: trade timestamp (ms or ISO) to anchor countdown
   onSaved,
 }) {
   const [showModal, setShowModal] = useState(false);
@@ -27,13 +29,21 @@ export default function ExitRuleCell({
     [rules]
   );
 
-  // Smart-exit line
+  // Smart-exit mode + label (static)
   const smartMode = smartExit?.mode ?? smartExit?.smartExitMode ?? "none";
   const smartLine =
     smartMode && smartMode !== "none"
       ? (function () {
-          if (smartMode === "time" && smartExit.smartExitTimeMins != null) {
-            return `Smart-time: ${smartExit.smartExitTimeMins}m`;
+          if (smartMode === "time") {
+            // Prefer explicit seconds if provided; fall back to minutes for the label
+            const sec = Number(smartExit?.timeMaxHoldSec);
+            if (Number.isFinite(sec) && sec > 0) {
+              const mins = Math.floor(sec / 60);
+              return `Smart-time: ${mins > 0 ? `${mins}m` : `${sec}s`}`;
+            }
+            if (smartExit.smartExitTimeMins != null) {
+              return `Smart-time: ${smartExit.smartExitTimeMins}m`;
+            }
           }
           if (smartMode === "volume" && smartExit.smartVolThreshold != null) {
             return `Smart-volume: ${smartExit.smartVolThreshold}`;
@@ -45,6 +55,64 @@ export default function ExitRuleCell({
           return `Smart-${smartMode}`;
         })()
       : null;
+
+  // ───────────────────────── Live countdown (TIME smart-exit) ─────────────────────────
+  // We derive expiry = entryTs + holdSec (in seconds). Backend handles the actual exit;
+  // this is a *visualization* so the user sees the remaining time.
+  const startMs = useMemo(() => {
+    if (!entryTs) return null;
+    const t = typeof entryTs === "number" ? entryTs : Date.parse(entryTs);
+    return Number.isFinite(t) ? t : null;
+  }, [entryTs]);
+
+  const holdSec = useMemo(() => {
+    // Prefer explicit seconds if present on the object; else compute from minutes
+    const sec = Number(smartExit?.timeMaxHoldSec);
+    if (Number.isFinite(sec) && sec > 0) return Math.floor(sec);
+    const mins = Number(smartExit?.smartExitTimeMins);
+    if (Number.isFinite(mins) && mins > 0) return Math.floor(mins * 60);
+    return null;
+  }, [smartExit]);
+
+  const [now, setNow] = useState(() => Date.now());
+  const firedRefreshRef = useRef(false);
+
+  useEffect(() => {
+    if (smartMode !== "time" || !startMs || !holdSec) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [smartMode, startMs, holdSec]);
+
+  const expiryMs = useMemo(() => {
+    if (!startMs || !holdSec) return null;
+    return startMs + holdSec * 1000;
+  }, [startMs, holdSec]);
+
+  const remainingSec = useMemo(() => {
+    if (!expiryMs) return null;
+    const diff = Math.ceil((expiryMs - now) / 1000);
+    return diff > 0 ? diff : 0;
+  }, [expiryMs, now]);
+
+  // When countdown hits zero, ask parent to refresh once (so the row disappears quickly)
+  useEffect(() => {
+    if (remainingSec === 0 && !firedRefreshRef.current) {
+      firedRefreshRef.current = true;
+      // slight delay to let backend perform the sell & API reflect it
+      setTimeout(() => onSaved?.(), 1200);
+    }
+  }, [remainingSec, onSaved]);
+
+  function fmtHMS(totalSec) {
+    const s = Math.max(0, Math.floor(totalSec || 0));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    return `${m}:${String(ss).padStart(2, "0")}`;
+  }
+
+  const showCountdown = smartMode === "time" && startMs && holdSec;
 
   return (
     <>
@@ -67,91 +135,76 @@ export default function ExitRuleCell({
                     <div className="flex-1 flex flex-col gap-0.5">
                       {hasTpSell && (
                         <div className="text-zinc-200 whitespace-nowrap">
-                          Sell{" "}
-                          <span className="font-semibold text-emerald-300">{tpPct}%</span>{" "}
-                          at{" "}
-                          <span className="font-semibold text-emerald-300">
-                            +{Number(tp)}% TP
-                          </span>
+                          Sell <span className="font-semibold text-emerald-300">{tpPct}%</span>{" "}
+                          at <span className="font-semibold">+{tp}% TP</span>
                         </div>
                       )}
                       {hasSlSell && (
                         <div className="text-zinc-200 whitespace-nowrap">
-                          Sell{" "}
-                          <span className="font-semibold text-rose-300">{slPct}%</span>{" "}
-                          at{" "}
-                          <span className="font-semibold text-rose-300">
-                            -{Number(sl)}% SL
-                          </span>
+                          Sell <span className="font-semibold text-rose-300">{slPct}%</span>{" "}
+                          at <span className="font-semibold">-{sl}% SL</span>
                         </div>
                       )}
-                      {!hasTpSell && !hasSlSell && (
-                        <div className="text-zinc-400">No TP/SL sell set</div>
-                      )}
                     </div>
-
-                    {/* One edit pencil per rule (opens TP/SL modal) */}
-                    <button
-                      onClick={() => {
-                        setEditingSettings(rule);
-                        setShowModal(true);
-                      }}
-                      title="Edit TP/SL"
-                      className="text-white hover:text-emerald-400 hover:scale-110 transition"
-                    >
-                      <FaPencilAlt size={12} />
-                    </button>
                   </div>
                 </div>
               );
             })}
-
-            <div className="text-blue-400 text-xs font-semibold mt-1 w-full">
-              Total: {Math.min(totalAllocated, 100)}% allocated
-            </div>
-            <div className="w-full h-1 bg-zinc-700 rounded mt-1">
-              <div
-                className="h-1 bg-blue-500 rounded transition-all"
-                style={{ width: `${Math.min(totalAllocated, 100)}%` }}
-              />
-            </div>
           </>
         ) : (
           <div className="text-zinc-400">No TP/SL rules</div>
         )}
 
-        {/* Smart-exit (shown beneath TP/SL if present) */}
+        {/* Smart Exit summary + countdown (if time-mode) */}
         {smartLine && (
-          <div className="mt-1 inline-flex items-center gap-1 rounded-full px-2 py-[1px] text-[10px] font-semibold bg-emerald-600/20 text-emerald-300 border border-emerald-500">
-            {smartLine}
+          <div className="flex items-center gap-2 mt-1">
+            <span className="px-2 py-[1px] rounded-full text-xs font-semibold border bg-sky-600/20 text-sky-200 border-sky-500">
+              {smartLine}
+            </span>
+            {showCountdown && (
+              <span
+                className={
+                  "font-mono text-sm px-2 py-[1px] rounded border " +
+                  (remainingSec <= 20
+                    ? "border-rose-500 text-rose-300 bg-rose-600/20 animate-pulse"
+                    : "border-emerald-500 text-emerald-300 bg-emerald-600/20")
+                }
+                title="Time left until Smart-time exit"
+              >
+                ⏳ {fmtHMS(remainingSec)}
+              </span>
+            )}
           </div>
         )}
 
-        {/* Unified CTA label */}
+        {/* Edit button */}
         <button
           onClick={() => {
-            setEditingSettings({});
-            setShowModal(true); // Currently edits TP/SL; Smart-exit editing can be added later here
+            setEditingSettings({ rules, smartExit });
+            setShowModal(true);
           }}
-          className="mt-1 text-emerald-400 hover:text-emerald-200 text-xs underline"
+          className="mt-1 inline-flex items-center gap-1 text-[10px] text-zinc-300 hover:text-white"
         >
-          + Add Exit Rule
+          <FaPencilAlt className="w-3 h-3" /> Edit Exit Rules
         </button>
       </div>
 
-      {/* Existing TP/SL modal for editing/adding threshold rules */}
-      <TpSlModal
-        open={showModal}
-        onClose={() => setShowModal(false)}
-        mint={mint}
-        strategy={strategy}
-        settings={editingSettings}
-        onSaved={onSaved}
-        userId="web"
-        walletId={walletId}
-        walletLabel={walletLabel}
-        totalAllocated={totalAllocated}
-      />
+      {/* Modal (unchanged behavior) */}
+      {showModal && (
+        <TpSlModal
+          isOpen={showModal}
+          onClose={() => setShowModal(false)}
+          walletId={walletId}
+          walletLabel={walletLabel}
+          mint={mint}
+          strategy={strategy}
+          initialSettings={editingSettings}
+          onSaved={() => {
+            setShowModal(false);
+            onSaved?.();
+          }}
+        />
+      )}
     </>
   );
 }

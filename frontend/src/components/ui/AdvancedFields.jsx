@@ -24,14 +24,15 @@ const FIELD_DEFS = [
   { label: "Max Token Age (min)",       name: "maxTokenAgeMinutes",  placeholder: "e.g. 1440", strategies: ["sniper"] },
 
   // Other commonly shared advanced knobs (kept for backwards-compat)
-  { label: "Halt on Fails (#)",         name: "haltOnFailures",      placeholder: "e.g. 5" },
-  { label: "Per-token Cooldown (s)",    name: "cooldown",            placeholder: "e.g. 30" },
   { label: "Max Slippage (%)",          name: "maxSlippage",         placeholder: "e.g. 0.5" },
-  { label: "Priority Fee (μlam)",       name: "priorityFeeLamports", placeholder: "e.g. 20000" },
-  { label: "Bribery (SOL)",             name: "briberyAmount",       placeholder: "e.g. 0.002" },
-  { label: "MEV Mode",                  name: "mevMode",             placeholder: "fast / secure" },
+      { label: "Per-token Cooldown (s)",    name: "cooldown",            placeholder: "e.g. 30" },
+
+  // { label: "Priority Fee (μlam)",       name: "priorityFeeLamports", placeholder: "e.g. 20000" },
+  // { label: "Bribery (SOL)",             name: "briberyAmount",       placeholder: "e.g. 0.002" },
+  // { label: "MEV Mode",                  name: "mevMode",             placeholder: "fast / secure" },
   { label: "TP Sell Amount (%)",        name: "tpPercent",           placeholder: "e.g. 100" },
   { label: "SL Sell Amount (%)",        name: "slPercent",           placeholder: "e.g. 100" },
+    { label: "Halt on Fails (#)",         name: "haltOnFailures",      placeholder: "e.g. 5" },
   { label: "Min Pool Liquidity (USD)", name: "minPoolUsd", placeholder: "e.g. 50000", strategies: ["sniper"] }
 
 ];

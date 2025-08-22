@@ -15,10 +15,19 @@ const {
   CRASH_USER_ID = "",
   CRASH_CFG_PATH = "",
   CRASH_RUNTIME_DIR = "",
+  CRASH_LOG_DIR = "",
 } = process.env;
 
 const BOT   = CRASH_BOT_ID || "unknown-bot";
 const RDIR  = CRASH_RUNTIME_DIR || (CRASH_CFG_PATH ? path.dirname(CRASH_CFG_PATH) : process.cwd());
+
+/* ---------- Dedicated crash log directory (Option 1) ---------- */
+const crashDir = (CRASH_LOG_DIR && CRASH_LOG_DIR.trim())
+  ? CRASH_LOG_DIR.trim()
+  : path.join(__dirname, "../../crashlogs");
+try {
+  if (!fs.existsSync(crashDir)) fs.mkdirSync(crashDir, { recursive: true });
+} catch {}
 
 /* ---------- Keep a trail of recent module loads ---------- */
 const moduleTrail = [];
@@ -51,8 +60,9 @@ function tryIPC(payload) {
 
 function writeArtifact(payload) {
   try {
-    const base = CRASH_CFG_PATH || path.join(RDIR, `${BOT}.json`);
-    const out  = `${base}.crash.json`;
+    let baseName = path.basename(CRASH_CFG_PATH || `${BOT}.json`);
+    if (baseName.endsWith(".json")) baseName = baseName.slice(0, -5);
+    const out = path.join(crashDir, `${baseName}.${Date.now()}.crash.json`);
     fs.writeFileSync(out, JSON.stringify(payload, null, 2));
   } catch {}
 }
@@ -81,8 +91,8 @@ function report(event, data, extra = {}) {
 
   const payload = buildPayload(event, data, extra);
 
-  emitBracket(event.startsWith("signal") || event === "exit" ? "ERROR" : "ERROR",
-              `BOT CRASH (${event}) — ${payload.message || "no message"}`);
+  emitBracket("ERROR",
+    `BOT CRASH (${event}) — ${payload.message || "no message"}`);
 
   tryIPC(payload);
   writeArtifact(payload);
@@ -114,7 +124,7 @@ process.on("unhandledRejection", (reason) => {
 ["SIGINT","SIGTERM","SIGHUP"].forEach(sig => {
   process.on(sig, () => {
     report(`signal:${sig}`, { message: `${sig} received` });
-    process.exitCode = 1;
+    try { realExit(1); } catch {}
   });
 });
 
