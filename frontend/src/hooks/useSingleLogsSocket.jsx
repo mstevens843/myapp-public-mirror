@@ -340,7 +340,8 @@ export default function useSingleLogsSocket(flags) {
         } catch {}
 
         try {
-          window.dispatchEvent(new CustomEvent("logs:message", { detail: evData }));
+          window.dispatchEvent(new CustomEvent("logs:message", { detail: evData }))
+          try { console.debug("[logs-ws] → dispatch logs:message", evData); } catch {}
         } catch {}
 
         push({ ...data, text });

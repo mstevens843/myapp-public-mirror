@@ -10,8 +10,11 @@ module.exports.closePositionFIFO = async function closePositionFIFO(opts) {
     exitPrice, exitPriceUSD,
     txHash, slippage, decimals = 9,
   } = opts;
-  if (!exitPrice || !exitPriceUSD) throw new Error("exitPrice + exitPriceUSD required");
-
+  // if (!exitPrice || !exitPriceUSD) throw new Error("exitPrice + exitPriceUSD required");
+  if (exitPrice == null) throw new Error("exitPrice required");
+ if (exitPriceUSD == null || !Number.isFinite(exitPriceUSD)) {
+   exitPriceUSD = 0; // fallback when USD side unavailable
+ }
   // Pull candidate rows (FIFO) for this wallet/mint/strategy (+label if set)
   let rows = await prisma.trade.findMany({
     where  : {

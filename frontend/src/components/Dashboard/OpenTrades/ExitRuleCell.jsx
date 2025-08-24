@@ -119,13 +119,20 @@ export default function ExitRuleCell({
     return diff > 0 ? diff : 0;
   }, [expiryMs, now]);
 
+  // persist across remounts to avoid “0s → remount → 0s → remount…” loops
+  const zeroGuardKey = useMemo(() => `seZero:${tradeId}`, [tradeId]);
+
   // After countdown reaches zero, trigger one refresh so the row disappears quickly
-  useEffect(() => {
-    if (remainingSec === 0 && smartMode === "time" && !firedRefreshRef.current) {
+ useEffect(() => {
+    if (remainingSec !== 0 || smartMode !== "time") return;
+    if (firedRefreshRef.current) return;
+    const last = Number(sessionStorage.getItem(zeroGuardKey) || 0);
+    if (!last || Date.now() - last > 30_000) {
       firedRefreshRef.current = true;
-      setTimeout(() => onSaved?.(), 900); // show 0:00 briefly, then refresh
+      sessionStorage.setItem(zeroGuardKey, String(Date.now()));
+      setTimeout(() => onSaved?.(), 900);
     }
-  }, [remainingSec, smartMode, onSaved]);
+  }, [remainingSec, smartMode, onSaved, zeroGuardKey]);
 
   const showCountdown = smartMode === "time" && startMs && holdSec;
 

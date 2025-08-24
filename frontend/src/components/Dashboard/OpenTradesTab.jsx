@@ -7,7 +7,6 @@
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
-  getPositions,
   getOpenTrades,
   clearDustTrades,
   deleteOpenTrades,
@@ -110,175 +109,167 @@ export default function OpenTradesTab({ onRefresh }) {
   };
 
   /* ─── data loader ─── */
-  const load = async () => {
-    setLoading(true);
-    try {
-      // 1) positions snapshot (for fallback price/meta)
-      const posSnap = await getPositions();
-      if (posSnap?.refetchOpenTrades) {
-        // slight debounce if backend says it's refreshing
-        await new Promise((r) => setTimeout(r, 300));
-      }
-      const posArr = Array.isArray(posSnap?.positions) ? posSnap.positions : [];
+const load = async () => {
+  setLoading(true);
+  try {
+    // 1) server-enriched open trades (already includes name/symbol/logo/priceUSD)
+    const openTrades = await getOpenTrades();
 
-      // quick lookups from snapshot
-      const snapPrice = {};
-      const snapMeta = {};
-      posArr.forEach((p) => {
-        if (!p?.mint) return;
-        snapPrice[p.mint] = Number(p.price ?? p.priceUSD ?? 0);
-        snapMeta[p.mint] = { name: p.name, symbol: p.symbol, logo: p.logo, url: p.url };
-      });
-
-      // 2) server-enriched open trades (already includes name/symbol/logo/priceUSD)
-      const openTrades = await getOpenTrades();
-
-      // Build a price map seeded from snapshot, then prefer server priceUSD
-      const priceMap = { ...snapPrice };
-      for (const t of openTrades || []) {
-        if (!t?.mint) continue;
-        const p = Number(t.priceUSD);
-        if (Number.isFinite(p) && p > 0) priceMap[t.mint] = p;
-      }
-
-      // 3) Bucket by (mint, strategy, walletId)
-      const buckets = {};
-      for (const t of openTrades || []) {
-        if (!t?.mint || t.outAmount == null) continue;
-        if (EXCLUDED_MINTS.has(t.mint)) continue;
-
-        const key = `${t.mint}_${t.strategy || "manual"}`;
-        if (!buckets[key]) {
-          buckets[key] = {
-            id: t.id,
-            mint: t.mint,
-            strategy: t.strategy,
-            walletLabel: t.walletLabel,
-            walletId: t.walletId,
-            extras: t.extras || {},
-            decimals: t.decimals ?? 9,
-            createdAt: t.createdAt,
-            timestamp: t.timestamp || t.createdAt,
-            entryPriceUSD: Number(t.entryPriceUSD || 0),
-            // prefer server meta; fall back to snapshot meta
-            name: t.name || t.tokenName || snapMeta[t.mint]?.name || "Unknown",
-            symbol: t.symbol || snapMeta[t.mint]?.symbol || "",
-            logo: t.logo || snapMeta[t.mint]?.logo || "",
-            url: snapMeta[t.mint]?.url || "",
-            tokens: 0,
-            spentUSD: 0,
-          };
-        }
-
-        const dec = buckets[key].decimals;
-        const out = toBigInt(t.outAmount);
-        const closed = toBigInt(t.closedOutAmount || 0);
-        const remainingRawBI = biMax0(out - closed);
-        if (remainingRawBI <= 0n) continue;
-
-        const remainingRaw = Number(remainingRawBI);
-        const remTokens = remainingRaw / 10 ** dec;
-        buckets[key].tokens += remTokens;
-
-        // entry USD for this row: convert inAmount → USD (based on unit), then prorate by remaining fraction
-        const solUSD = Number(posSnap?.sol?.price || 0);
-        const rowCostUSD =
-          t.unit === "sol" ? (Number(t.inAmount) / 1e9) * solUSD : Number(t.inAmount) / 1e6;
-        const remFrac = Number(out) > 0 ? remainingRaw / Number(out) : 0;
-        buckets[key].spentUSD += rowCostUSD * remFrac;
-      }
-
-      // 4) Build final rows (PnL/value math)
-      const built = Object.values(buckets).map((b) => {
-        if (b.tokens <= 0) return null;
-        const priceUSD = Number(priceMap[b.mint] || 0);
-        const valueUSD = +(b.tokens * priceUSD).toFixed(2);
-        const pnlUSD = +(valueUSD - b.spentUSD).toFixed(2);
-        const pnlPct = b.spentUSD ? (pnlUSD / b.spentUSD) * 100 : 0;
-        const entryUSD = b.spentUSD && b.tokens ? b.spentUSD / b.tokens : null;
-
-        // Normalize smart-exit metadata for the cell (from extras or legacy fields)
-        const m = (b.extras || b.smartExit || {});
-
-        // explicit seconds; else minutes → seconds
-        const timeMaxHoldSec =
-          (m && m.time && Number(m.time.maxHoldSec)) ||
-          Number(b.extras?.timeMaxHoldSec) ||
-          (Number(m.smartExitTimeMins) ? Math.floor(Number(m.smartExitTimeMins) * 60) : undefined) ||
-          (Number(b.smartExitTimeMins) ? Math.floor(Number(b.smartExitTimeMins) * 60) : undefined);
-
-        // coalesce, then parse "50" / "50%" → 50
-        const minGateRaw =
-          m?.time?.minPnLBeforeTimeExitPct ??
-          m?.minPnLBeforeTimeExitPct ??
-          b?.extras?.timeMinPnLBeforeTimeExitPct ??
-          b?.extras?.minPnLBeforeTimeExitPct ??
-          b?.minPnLBeforeTimeExitPct ??
-          m?.timeMinPnLBeforeTimeExitPct;
-        const toNumOrNull = (v) => {
-          if (v == null) return null;
-          let s = String(v).trim();
-          if (s.endsWith("%")) s = s.slice(0, -1).trim();
-          const n = Number(s);
-          return Number.isFinite(n) ? n : null;
-        };
-        const minPnLBeforeTimeExitPct = toNumOrNull(minGateRaw);
-
-        const smartExit = {
-          mode: m.mode ?? m.smartExitMode ?? b.extras?.smartExitMode ?? b.smartExitMode ?? "none",
-          smartExitTimeMins: m.smartExitTimeMins ?? b.smartExitTimeMins,
-          smartVolLookbackSec: m.smartVolLookbackSec ?? b.smartVolLookbackSec,
-          smartVolThreshold: m.smartVolThreshold ?? b.smartVolThreshold,
-          smartLiqLookbackSec: m.smartLiqLookbackSec ?? b.smartLiqLookbackSec,
-          smartLiqDropPct: m.smartLiqDropPct ?? b.smartLiqDropPct,
-          timeMaxHoldSec: timeMaxHoldSec || undefined,
-          time:
-            (timeMaxHoldSec || minPnLBeforeTimeExitPct != null)
-              ? { maxHoldSec: timeMaxHoldSec, minPnLBeforeTimeExitPct }
-              : undefined,
-          minPnLBeforeTimeExitPct,
-        };
-
-        return {
-          // keep identity + extras
-          id: b.id,
-          walletLabel: b.walletLabel,
-          walletId: b.walletId,
-          extras: b.extras || {},
-
-          mint: b.mint,
-          name: b.name,
-          symbol: b.symbol,
-          url: b.url,
-          logo: b.logo,
-          strategy: b.strategy,
-          entryUSD,
-          priceUSD,
-          spentUSD: b.spentUSD === 0 ? 0 : b.spentUSD,
-          valueUSD,
-          pnlUSD,
-          pnlPct,
-          tokens: b.tokens,
-
-          // Timestamp for countdown correctness
-          timestamp: b.timestamp,
-          createdAt: b.createdAt,
-          smartExit,
-        };
-      });
-
-      // No client metadata or price enrichment here:
-      // - prices come from server (priceUSD) with snapshot fallback already merged
-      // - metadata (name/symbol/logo) is provided by server and reused as-is
-
-      setRows(built.filter(Boolean));
-      setSelected(new Set());
-    } catch (err) {
-      console.warn("⚠️ OpenTradesTab.load failed:", err?.message || String(err));
-    } finally {
-      setLoading(false);
+    // Build a price map from server payload
+    const priceMap = {};
+    for (const t of openTrades || []) {
+      if (!t?.mint) continue;
+      const p = Number(t.priceUSD);
+      if (Number.isFinite(p) && p > 0) priceMap[t.mint] = p;
     }
-  };
+
+    // 2) Bucket by (mint, strategy, walletId)
+    const buckets = {};
+    for (const t of openTrades || []) {
+      if (!t?.mint || t.outAmount == null) continue;
+      if (EXCLUDED_MINTS.has(t.mint)) continue;
+
+      const key = `${t.mint}_${t.strategy || "manual"}`;
+      if (!buckets[key]) {
+        buckets[key] = {
+          id: t.id,
+          mint: t.mint,
+          strategy: t.strategy,
+          walletLabel: t.walletLabel,
+          walletId: t.walletId,
+          extras: t.extras || {},
+          decimals: t.decimals ?? 9,
+          createdAt: t.createdAt,
+          timestamp: t.timestamp || t.createdAt,
+          entryPriceUSD: Number(t.entryPriceUSD || t.entryPrice || 0),
+          // prefer server meta
+          name: t.name || t.tokenName || "Unknown",
+          symbol: t.symbol || "",
+          logo: t.logo || "",
+          url: t.url || t.extras?.url || "",
+          tokens: 0,
+          spentUSD: 0,
+        };
+      }
+
+      const dec = buckets[key].decimals;
+      const out = toBigInt(t.outAmount);
+      const closed = toBigInt(t.closedOutAmount || 0);
+      const remainingRawBI = biMax0(out - closed);
+      if (remainingRawBI <= 0n) continue;
+
+      const remainingRaw = Number(remainingRawBI);
+      const remTokens = remainingRaw / 10 ** dec;
+      buckets[key].tokens += remTokens;
+
+      // entry USD for this row: prefer entryPriceUSD * tokens; else fall back to unit-based calc
+      const entryPriceUSD = Number(t.entryPriceUSD ?? t.entryPrice);
+      let rowCostUSD;
+      if (Number.isFinite(entryPriceUSD) && entryPriceUSD > 0) {
+        const totalTokens = Number(out) / 10 ** dec; // total tokens acquired at entry
+        rowCostUSD = totalTokens * entryPriceUSD;
+      } else if (t.unit === "usdc") {
+        // USDC ~ $1; inAmount is in 1e6
+        rowCostUSD = Number(t.inAmount) / 1e6;
+      } else if (t.unit === "sol") {
+        // no SOL-USD snapshot here; conservative fallback to 0 if entry price is unknown
+        rowCostUSD = 0;
+      } else {
+        rowCostUSD = 0;
+      }
+
+      const remFrac = Number(out) > 0 ? remainingRaw / Number(out) : 0;
+      buckets[key].spentUSD += rowCostUSD * remFrac;
+    }
+
+    // 3) Build final rows (PnL/value math)
+    const built = Object.values(buckets).map((b) => {
+      if (b.tokens <= 0) return null;
+      const priceUSD = Number(priceMap[b.mint] || 0);
+      const valueUSD = +(b.tokens * priceUSD).toFixed(2);
+      const pnlUSD = +(valueUSD - b.spentUSD).toFixed(2);
+      const pnlPct = b.spentUSD ? (pnlUSD / b.spentUSD) * 100 : 0;
+      const entryUSD = b.spentUSD && b.tokens ? b.spentUSD / b.tokens : null;
+
+      // Normalize smart-exit metadata for the cell (from extras or legacy fields)
+      const m = (b.extras || b.smartExit || {});
+
+      // explicit seconds; else minutes → seconds
+      const timeMaxHoldSec =
+        (m && m.time && Number(m.time.maxHoldSec)) ||
+        Number(b.extras?.timeMaxHoldSec) ||
+        (Number(m.smartExitTimeMins) ? Math.floor(Number(m.smartExitTimeMins) * 60) : undefined) ||
+        (Number(b.smartExitTimeMins) ? Math.floor(Number(b.smartExitTimeMins) * 60) : undefined);
+
+      // coalesce, then parse "50" / "50%" → 50
+      const minGateRaw =
+        m?.time?.minPnLBeforeTimeExitPct ??
+        m?.minPnLBeforeTimeExitPct ??
+        b?.extras?.timeMinPnLBeforeTimeExitPct ??
+        b?.extras?.minPnLBeforeTimeExitPct ??
+        b?.minPnLBeforeTimeExitPct ??
+        m?.timeMinPnLBeforeTimeExitPct;
+
+      const toNumOrNull = (v) => {
+        if (v == null) return null;
+        let s = String(v).trim();
+        if (s.endsWith("%")) s = s.slice(0, -1).trim();
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      };
+      const minPnLBeforeTimeExitPct = toNumOrNull(minGateRaw);
+
+      const smartExit = {
+        mode: m.mode ?? m.smartExitMode ?? b.extras?.smartExitMode ?? b.smartExitMode ?? "none",
+        smartExitTimeMins: m.smartExitTimeMins ?? b.smartExitTimeMins,
+        smartVolLookbackSec: m.smartVolLookbackSec ?? b.smartVolLookbackSec,
+        smartVolThreshold: m.smartVolThreshold ?? b.smartVolThreshold,
+        smartLiqLookbackSec: m.smartLiqLookbackSec ?? b.smartLiqLookbackSec,
+        smartLiqDropPct: m.smartLiqDropPct ?? b.smartLiqDropPct,
+        timeMaxHoldSec: timeMaxHoldSec || undefined,
+        time:
+          (timeMaxHoldSec || minPnLBeforeTimeExitPct != null)
+            ? { maxHoldSec: timeMaxHoldSec, minPnLBeforeTimeExitPct }
+            : undefined,
+        minPnLBeforeTimeExitPct,
+      };
+
+      return {
+        // keep identity + extras
+        id: b.id,
+        walletLabel: b.walletLabel,
+        walletId: b.walletId,
+        extras: b.extras || {},
+
+        mint: b.mint,
+        name: b.name,
+        symbol: b.symbol,
+        url: b.url,
+        logo: b.logo,
+        strategy: b.strategy,
+        entryUSD,
+        priceUSD,
+        spentUSD: b.spentUSD === 0 ? 0 : b.spentUSD,
+        valueUSD,
+        pnlUSD,
+        pnlPct,
+        tokens: b.tokens,
+
+        // Timestamp for countdown correctness
+        timestamp: b.timestamp,
+        createdAt: b.createdAt,
+        smartExit,
+      };
+    });
+
+    setRows(built.filter(Boolean));
+    setSelected(new Set());
+  } catch (err) {
+    console.warn("⚠️ OpenTradesTab.load failed:", err?.message || String(err));
+  } finally {
+    setLoading(false);
+  }
+};
 
   useEffect(() => {
     load();

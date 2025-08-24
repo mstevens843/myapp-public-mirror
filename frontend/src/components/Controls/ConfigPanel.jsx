@@ -114,6 +114,9 @@ const STRAT_LABEL_MAP = {
   turboPaperTrader: "💨📝 Turbo Paper Trader",
 };
 
+
+
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 // Optional fields for visual treatment
 const OPTIONAL_FIELDS = new Set(["stopLoss", "takeProfit"]);
 

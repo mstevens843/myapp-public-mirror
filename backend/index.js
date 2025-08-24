@@ -297,6 +297,19 @@ if (modeFromCLI) {
     vinfo('broadcast result', { recipients: clients.size, delivered: sent });
   });
 
+ // FE events bus -> reuse same clients
+ const feEvents = require('./services/feEvents');
+ feEvents.register((payload) => {
+   // payload is already a JSON string from feEvents.emit
+   let sent = 0;
+   for (const client of clients) {
+     if (client.readyState === client.OPEN) {
+       try { client.send(payload); sent++; } catch {}
+     }
+   }
+   vinfo('feEvents delivered', { recipients: clients.size, delivered: sent });
+ });
+
   function meaningForCloseCode(code) {
     const map = {
       1000: 'normal',

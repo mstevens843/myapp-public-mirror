@@ -1,18 +1,19 @@
 require("dotenv").config({ path: require("path").resolve(__dirname, "../.env") });
 
 const prisma                  = require("../prisma/prisma");
-const axios                    = require("axios");
-const { prepareBuyLogFields }  = require("./utils/analytics/tradeFormatter");
-const { addOrUpdateOpenTrade } = require("./utils/analytics/openTrades");
-const { logTrade }             = require("./utils/analytics/logTrade");
-const { sendBotAlert }         = require("../telegram/botAlerts");
-const { sendAlert }            = require("../telegram/alerts");
+const axios                   = require("axios");
+const { prepareBuyLogFields } = require("./utils/analytics/tradeFormatter");
+const { addOrUpdateOpenTrade }= require("./utils/analytics/openTrades");
+const { logTrade }            = require("./utils/analytics/logTrade");
+const { sendBotAlert }        = require("../telegram/botAlerts");
+const { sendAlert }           = require("../telegram/alerts");
+const feEvents                = require("./feEvents");
 
 const API_BASE = process.env.API_BASE || "http://localhost:5001";
 
 /* ───────────────────────────────────────── helpers ───────────────────────── */
 function shortMint(m) { return `${m.slice(0, 4)}…${m.slice(-4)}`; }
-function tsUTC() { return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC"; }
+function tsUTC() { return new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC"; }
 function fmt(x, d = 4) { return (+x).toFixed(d).replace(/\.?0+$/, ""); }
 
 const STABLES = new Set([
@@ -70,6 +71,24 @@ async function performLimitBuy(order, authHeader = "") {
     data : { status: "executed", executedAt: new Date(), tx }
   });
 
+  // 🔔 FE toast event
+const payload = {
+  channel: "events",
+  type: "order_executed",
+  source: "limit",
+  side: "buy",
+  userId: order.userId,
+  walletLabel: walletLabel || "default",
+  mint: token,
+  txHash: tx,
+  strategy: "limit",
+  orderId: id,
+  ts: Date.now(),
+};
+
+feEvents.emit(payload);
+console.log("[FEVENT] " + JSON.stringify(payload));
+
   await handleBuySuccess({
     userId: order.userId, order, tx,
     usdValue, entryPrice, entryPriceUSD, inAmount, outAmount
@@ -110,6 +129,24 @@ async function performLimitSell(order, authHeader = "") {
     data : { status: "executed", executedAt: new Date(), tx }
   });
 
+  const payload = {
+    channel: "events",
+    type: "order_executed",
+    source: "limit",
+    side: "sell",
+    userId: order.userId,
+    walletLabel: walletLabel || "default",
+    mint: token,
+    txHash: tx,
+    strategy: "limit",
+    orderId: id,
+    ts: Date.now(),
+  };
+
+  feEvents.emit(payload);
+  console.log("[FEVENT] " + JSON.stringify(payload));
+
+
   /* ── alert in new unified style ───────────────── */
   const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
   const tokenUrl = `https://birdeye.so/token/${token}`;
@@ -149,7 +186,7 @@ async function handleBuySuccess({
 
 🧾 *Mint:* \`${short}\`
 🔗 [View Token on Birdeye](${tokenUrl})
-💸 *In:* ${fmt(order.amount, 2)} USDC
+💸 *In:* ${fmt(order.amount, 2)} USDC
 🎯 *Triggered At:* \`$${order.targetPrice?.toFixed(6) || "N/A"}\`
 📈 *Entry:* \`$${entryPriceUSD?.toFixed(6) || "N/A"}\`
 👤 *Wallet:* \`${order.walletLabel || "default"}\`
@@ -159,7 +196,7 @@ async function handleBuySuccess({
 
   await alertUser(userId, lines, "Limit");
 
-  /* log + open‑trades (skip for stables handled earlier) */
+  /* log + open-trades (skip for stables handled earlier) */
   const logPayload = await prepareBuyLogFields({
     strategy   : "limit",
     inputMint  : "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",

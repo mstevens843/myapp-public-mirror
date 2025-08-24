@@ -265,6 +265,17 @@ module.exports = async function sniperStrategy(botCfg = {}) {
 
         const overview = res.overview;
         log("info", "✅ Passed price/volume/mcap checks");
+        // ——— user-facing pass details:
+        const vol = Number(res?.vol ?? overview?.[`volume${botCfg.volumeWindow || "1h"}`] ?? NaN);
+        if (Number.isFinite(vol)) {
+          const ok = vol >= VOLUME_THRESHOLD;
+          log(ok ? "info" : "warn",
+              `[SAFETY] Volume (${botCfg.volumeWindow || "1h"}): $${vol.toFixed(0)} ${ok ? "≥" : "<"} $${VOLUME_THRESHOLD.toFixed(0)} ${ok ? "✅ PASS" : "❌ FAIL"}`);
+        }
+        const pct = Number((res?.pct ?? overview?.priceChange5m ?? 0) * 100);
+        const th  = Number(ENTRY_THRESHOLD * 100);
+        log(pct >= th ? "info" : "warn",
+            `[SAFETY] Pump (${botCfg.priceWindow || "5m"}): ${pct.toFixed(2)}% ${pct >= th ? "≥" : "<"} ${th.toFixed(2)}% ${pct >= th ? "✅ PASS" : "❌ FAIL"}`);
 
       /* Liquidity check (configurable) */
       try {
@@ -275,15 +286,10 @@ module.exports = async function sniperStrategy(botCfg = {}) {
 
         if (Number.isFinite(liqNum)) {
           if (liqNum >= minUsd) {
-            log(
-              "info",
-              `Liquidity check: $${liqNum.toFixed(0)} >= $${minUsd.toFixed(0)} ✅ PASS`
-            );
+            log("info", `[SAFETY] Liquidity: $${liqNum.toFixed(0)} ≥ $${minUsd.toFixed(0)} ✅ PASS`);
           } else {
-            log(
-              "warn",
-              `Liquidity check: $${liqNum.toFixed(0)} >= $${minUsd.toFixed(0)} ❌ FAIL — skip`
-            );
+            log("warn", `[SAFETY] Liquidity: $${liqNum.toFixed(0)} < $${minUsd.toFixed(0)} ❌ FAIL — skip`);
+
             summary.inc("liqSkipped");
             continue;
           }

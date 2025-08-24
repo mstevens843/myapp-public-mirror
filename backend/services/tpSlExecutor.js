@@ -9,6 +9,7 @@ const { sendAlert }          = require("../telegram/alerts");
 const { sendBotAlert }       = require("../telegram/botAlerts");
 const { getTokenBalanceRaw } = require("../utils/marketData");
 const { PublicKey }          = require("@solana/web3.js");
+const feEvents = require("./feEvents");
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 function shortMint(m) { return `${m.slice(0, 4)}…${m.slice(-4)}`; }
@@ -123,6 +124,27 @@ async function checkAndTriggerTpSl(rule) {
     // }
     await prisma.tpSlRule.deleteMany({ where: { id } });
 
+      // after you have walletRow earlier (you already query it for publicKey)
+      const walletLabel = (await prisma.wallet.findUnique({ where: { id: walletId }, select: { label: true } }))?.label || "default";
+
+      const payload = {
+        channel: "events",
+        type: "order_executed",
+        source: "tpsl",
+        side: "sell",
+        trigger: triggerType,
+        userId,
+        walletId,
+        walletLabel,            // ← fixed
+        mint,
+        txHash: tx,
+        strategy,
+        ruleId: id,
+        ts: Date.now(),
+      };
+      feEvents.emit(payload);
+      console.log("[FEVENT] " + JSON.stringify(payload)); 
+
     /* 5️⃣ Alert */
     const explorer = `https://explorer.solana.com/tx/${tx}?cluster=mainnet-beta`;
     const tokenUrl = `https://birdeye.so/token/${mint}`;
@@ -145,6 +167,7 @@ const lines = `
 // await alertUser(userId, lines, "TP/SL");
 await alertUser(userId, lines, triggerType.toUpperCase()); 
     return { triggered: true, type: triggerType, changePct: delta, txHash: tx };
+
 
   } catch (err) {
     console.error("performManualSell failed:", err.message);

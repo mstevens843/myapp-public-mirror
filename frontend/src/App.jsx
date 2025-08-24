@@ -9,6 +9,7 @@ import "./styles/dashboard.css";
 const LazyStrategyConsoleSheet = lazy(() => import("./components/Strategy_Configs/strategyConsoleSheet"));
 const LazyBotStatusModal       = lazy(() => import("./components/Controls/Modals/BotStatusModal"));
 import useSingleLogsSocket from "@/hooks/useSingleLogsSocket";
+import useOrderEventsSocket from "@/hooks/useOrderEventsSocket";
 import { getWalletNetworth, getUserProfile, getPrefs, fetchWalletBalances } from "./utils/api"
 import { openTradesCsv, getRecentTrades } from "./utils/trades_positions"
 import Cookies from "js-cookie";
@@ -568,6 +569,7 @@ const location = useLocation();
 const currentPath = location.pathname.split("/").pop(); // e.g., 'wallets'
 
   useSingleLogsSocket(); // initializes once on mount
+  useOrderEventsSocket();
   const [selectedModes, setSelectedModes] = useState(() => {
   try { const stored = localStorage.getItem("selectedModes");
     return stored ? JSON.parse(stored) : []; } catch {

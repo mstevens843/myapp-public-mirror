@@ -8,6 +8,7 @@ const { logTrade }             = require("./utils/analytics/logTrade");
 const { addOrUpdateOpenTrade } = require("./utils/analytics/openTrades");
 const { sendBotAlert }         = require("../telegram/botAlerts"); // kept for compatibility
 const { sendAlert }            = require("../telegram/alerts");
+const feEvents = require("./feEvents");
 
 const API_BASE = process.env.API_BASE || "http://localhost:5001";
 
@@ -142,6 +143,25 @@ async function performDcaBuy(userId, order, authHeader = "") {
       type         : "buy",
       unit,
     });
+
+
+// after successful DCA buy
+const payload = {
+  channel   : "events",
+  type      : "order_executed",
+  source    : "dca",
+  side      : "buy",
+  userId,
+  walletLabel: order.walletLabel || "default",
+  mint      : order.tokenMint,
+  txHash    : tx,
+  strategy  : "dca",
+  orderId   : order.id,
+  ts        : Date.now(),
+};
+
+feEvents.emit(payload);
+console.log("[FEVENT] " + JSON.stringify(payload));
 
     /* ── rich Telegram alert ─────────────────────── */
     const totalBuys = Number(pick(order?.numBuys, order?.totalBuys)) || 0;

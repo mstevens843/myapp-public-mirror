@@ -658,10 +658,20 @@ function toPlain(v) {
   return v;
 }
 
+// ───────────────────────────── 5. OPEN TRADES (single source of truth) ─────────────────────────────
 router.get("/open", async (req, res) => {
   try {
     const userId = req.user?.id;
     console.log(`➡️ API HIT: GET /trades/open for user ${userId}`);
+
+    // 0) Make sure DB has any on-chain tokens not yet in trades (imported/untracked)
+    //    (same behavior Positions had)
+    let didInject = false;
+    try {
+      didInject = await injectUntracked(userId);
+    } catch (e) {
+      console.warn("injectUntracked() failed (continuing):", e?.message || e);
+    }
 
     const { take, skip } = __getPage(req, { take: 100, cap: 500 });
 
@@ -677,29 +687,38 @@ router.get("/open", async (req, res) => {
       }
     }
 
-    // Only true open BUY positions; ignore imports/unknown noise
+    // By default, INCLUDE imported/unknown so that injected positions appear in UI.
+    // You can opt-out with ?includeImports=0
+    const includeImports = String(req.query.includeImports ?? "1") !== "0";
+
+    // Build Prisma where clause
     const where = {
       userId,
       exitedAt: null,
-      type: "buy",
-      strategy: { notIn: ["import", "unknown"] },
       ...(walletId ? { walletId } : {}),
       ...(walletLabel ? { walletLabel } : {}),
     };
 
+    // Preserve old behavior *optionally*: when includeImports=0, narrow to true buy rows and drop unknown/import
+    if (!includeImports) {
+      where.type = "buy";
+      where.strategy = { notIn: ["unknown", "import"] };
+    }
+
+    // 1) Grab open rows (newest first)
     const rows = await prisma.trade.findMany({
       where,
-      orderBy: { createdAt: "desc" }, // newest first
+      orderBy: { createdAt: "desc" },
       take,
       skip,
     });
 
-    // keep rows with remaining amount
+    // 2) keep rows with remaining amount
     const openTrades = rows.filter(
       (t) => BigInt(t.outAmount ?? 0n) > BigInt(t.closedOutAmount ?? 0n)
     );
 
-    // ── 1) Collect mints + remaining amounts (UI units) ────────────────────────
+    // 3) Collect mints + remaining amounts (UI units)
     const mintsAll = [];
     const remainingUiByMint = new Map(); // mint -> total UI remaining
     for (const t of openTrades) {
@@ -708,61 +727,64 @@ router.get("/open", async (req, res) => {
       mintsAll.push(mint);
 
       const decimals = Number(t.decimals || 0);
-      const outRaw = BigInt(t.outAmount ?? 0n);
-      const closedRaw = BigInt(t.closedOutAmount ?? 0n);
-      const remRaw = outRaw - closedRaw;
-      const remUi = Number(remRaw) / Math.pow(10, decimals);
-      remainingUiByMint.set(mint, (remainingUiByMint.get(mint) || 0) + (Number.isFinite(remUi) ? remUi : 0));
+      const outRaw   = BigInt(t.outAmount ?? 0n);
+      const closedRaw= BigInt(t.closedOutAmount ?? 0n);
+      const remRaw   = outRaw - closedRaw;
+      const remUi    = Number(remRaw) / Math.pow(10, decimals);
+      if (Number.isFinite(remUi)) {
+        remainingUiByMint.set(mint, (remainingUiByMint.get(mint) || 0) + remUi);
+      }
     }
     const uniqMints = [...new Set(mintsAll.filter(Boolean))];
 
-    // ── 2) One batched price+liq request (no price cache here) ─────────────────
-    const quotes = await getTokenPrice.getPricesWithLiquidityBatch_TRADES(userId, uniqMints);
+    // 4) One batched price+liquidity request (same helper Positions uses)
+    const quotes = await getPricesWithLiquidityBatch_TRADES(userId, uniqMints); // { mint: {price,liquidity,updateUnixTime} }
 
-    // ── 3) Apply Net Worth–style gates to decide "survivors" for metadata fetch
-    const nowSec = Math.floor(Date.now() / 1000);
-    const priceByMint = {};
-    const survivors = [];
-    for (const mint of uniqMints) {
+    // thresholds consistent with Positions/net worth
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const allowPrice = (mint) => {
       const q = quotes[mint] || {};
-      const price = Number(q.price || 0);
-      const liq   = Number(q.liquidity || 0);
-      const upd   = Number(q.updateUnixTime || 0);
-      const fresh = upd > 0 ? (nowSec - upd) <= MAX_PRICE_STALENESS_SEC : false;
+      const fresh = q.updateUnixTime && nowSec - Number(q.updateUnixTime) <= MAX_PRICE_STALENESS_SEC;
+      const okLiq = Number(q.liquidity || 0) >= LIQ_FLOOR_USD;
+      return fresh && okLiq ? Number(q.price || 0) : 0;
+    };
 
-      const remUi = remainingUiByMint.get(mint) || 0;
-      const value = price * remUi;
+    // 5) One metadata batch (cached); no per-mint fallbacks on hot path
+    const meta = await fetchMetaForMints(userId, uniqMints); // cached + wallet token_list scan
 
-      const illiquidSoft = liq > 0 && liq < LIQ_FLOOR_USD;
-      const belowDust    = value < DUST_USD;
-
-      const allow = !(belowDust || illiquidSoft || !fresh);
-      priceByMint[mint] = allow ? price : 0;
-      if (allow) survivors.push(mint);
-    }
-
-    // ── 4) Fetch metadata once (metadata only cached) ─────────────────────────
-    const metaMap = await fetchMetaForMints(userId, survivors);
-
-    // ── 5) Merge back into rows and return BigInt/Date-safe objects ───────────
+    // 6) Build enriched rows
     const enriched = openTrades.map((t) => {
-      const meta = metaMap[t.mint] || _metaCache.get(t.mint) || {};
-      return toPlain({
-        ...t,
-        name     : meta.name   || t.tokenName || "Unknown",
-        symbol   : meta.symbol || "",
-        logo     : meta.logo   || "",
-        priceUSD : Number(priceByMint[t.mint] || 0),
-      });
+      const mint    = t.mint;
+      const price   = allowPrice(mint); // 0 if fails liquidity/staleness guard
+      const remain  = remainingUiByMint.get(mint) || 0;
+      const entry   = Number(t.entryPriceUSD ?? t.entryPrice ?? 0);
+      const spent   = (Number(t.inAmount ?? 0) / Math.pow(10, Number(t.decimals || 0))) * entry;
+
+      const mm = meta[mint] || {};
+      return {
+        ...toPlain(t), // keep dates usable in UI
+        priceUSD  : price,
+        remainUi  : remain,
+        valueUSD  : remain * price,
+        entryPriceUSD: entry,
+        spentUSD  : spent,
+        name      : mm.name   || t.name   || "",
+        symbol    : mm.symbol || t.symbol || "",
+        logo      : mm.logo   || t.logo   || "",
+      };
     });
 
-    console.log(`🎯 Found ${openTrades.length} open (enriched) for user ${userId}`);
+    // (Optional) sort by value desc then createdAt desc — same UX as before
+    enriched.sort((a, b) => (b.valueUSD - a.valueUSD) || (new Date(b.createdAt) - new Date(a.createdAt)));
+
+    // Return plain array (frontend accepts array or {trades:[]})
     return res.json(enriched);
   } catch (err) {
-    console.error("🚨 GET /open error:", err);
-    return res.status(500).json({ error: "Failed to fetch open trades." });
+    console.error("GET /trades/open failed:", err);
+    return res.status(500).json({ error: "Failed to load open trades." });
   }
 });
+
 
 /* ───────────────────────────── 6. LOG NEW OPEN TRADE (IDEMPOTENT) ──────────────── */
 router.post("/open", async (req, res) => {
@@ -1250,8 +1272,7 @@ router.post("/:id/smart-exit/cancel", requireAuth, async (req, res) => {
 
 
 
-// Fallback single-mint meta for last-resort misses (uses your existing helper)
-const getTokenMetadata = require("./services/strategies/paid_api/getTokenMetadata");
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-memory metadata cache (mint → { data:{name,symbol,logoURI,decimals}, until, pinnedUntil })

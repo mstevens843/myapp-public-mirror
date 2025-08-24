@@ -345,7 +345,7 @@ export async function cancelSmartExit(tradeId) {
 
 
 // Batch token meta (name/symbol/logo) for a list of mints
-export async function fetchTokenMeta(mints = [], { walletId, pin = true } = {}) {
+export async function fetchTokenMetaBatch(mints = [], { walletId, pin = true } = {}) {
   const unique = [...new Set(mints.filter(Boolean))];
   if (!unique.length) return {};
   try {

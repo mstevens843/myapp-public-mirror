@@ -19,6 +19,7 @@ const API_BASE = process.env.API_BASE;
 
 // 🔁 Unified resolver for protected/unprotected wallets
 const { getKeypairForTrade } = require("../armEncryption/resolveKeypair");
+const feEvents = require("./feEvents");
 
 // ------------------------------------------------------------------
 // restore missing log-file constant (dashboard still reads this file)
@@ -437,6 +438,31 @@ console.log("⚙️ Applied user prefs for manual sell:", {
 `.trim();
   await alertUser(userId, alertMsg, "Buy");
 
+  try {
+  const event = {
+    channel: "events",
+    type: "order_executed",
+    source: (typeof triggerType === "string" && triggerType.startsWith("smart_"))
+      ? "smart_exit"
+      : "manual",
+    side: "buy",
+    trigger: triggerType || "manual",
+    userId,
+    walletId: dbWallet?.id || walletId,
+    walletLabel,
+    mint,
+    txHash: tx,
+    strategy,
+    ts: Date.now(),
+  };
+  feEvents.emit(event);
+  console.log("[FEVENT] " + JSON.stringify(event));
+
+} catch (e) {
+  console.warn("feEvents.emit (real sell) failed:", e.message);
+}
+
+
   /* ✅ return full payload (and cache by clientOrderId) ---------------------- */
   const summary = {
     tx,
@@ -538,6 +564,29 @@ async function performManualSell(opts) {
       slippageBps   : 0,
       decimals
     });
+
+    try {
+      const payload = {
+        channel: "events",
+        type: "order_executed",
+        source: "smart_exit",
+        side: "sell",
+        trigger: triggerType,                // "smart_time" | "smart_liquidity" | etc.
+        userId,
+        walletId,
+        walletLabel,
+        mint,
+        strategy: rows[0]?.strategy ?? "Paper Trader",
+        ts: Date.now(),
+        // NOTE: omit txHash for paper so the toast won't show a broken "View Tx" link
+      };
+      console.log("📣 [feEvents] emitting (paper sell):", payload);
+      feEvents.emit(payload);
+      console.log("[FEVENT] " + JSON.stringify(payload));
+
+    } catch (e) {
+      console.warn("feEvents.emit failed (paper sell):", e);
+    }
 
     return { message:`Closed ${(percent*100).toFixed(0)}% paper position` };
   }
@@ -722,6 +771,33 @@ console.log("⚙️ Applied user prefs for manual sell:", {
   if (!skipAlert) {
     await alertUser(userId, alertMsg, "Sell");
   }
+
+    // Broadcast to UI only for Smart-Exit triggers (avoid double toasts for TP/SL)
+try {
+  const isSmartExit = typeof triggerType === "string" && triggerType.startsWith("smart_");
+  if (isSmartExit) {
+    const payload = {
+      channel   : "events",
+      type      : "order_executed",
+      source    : "smart_exit",
+      side      : "sell",
+      trigger   : triggerType,           // "smart_time", "smart_liquidity", etc
+      userId,
+      walletId  : dbWallet?.id || walletId,
+      walletLabel,
+      mint,
+      txHash    : tx,
+      strategy,
+      ts        : Date.now(),
+    };
+    console.log("🛰️ [feEvents] emit", payload);   // <= ADDED
+    feEvents.emit(payload);
+    console.log("[FEVENT] " + JSON.stringify(payload));
+
+  }
+} catch (e) {
+  console.warn("feEvents emit failed:", e);
+}
   // ✅ Ensure API returns a proper object with tx for the client
   return { tx, message: "Sell complete" };
 }
@@ -908,6 +984,26 @@ async function performManualSellByAmount(opts) {
   if (!skipAlert) {
     await alertUser(userId, alertMsg,  "Sell");
   }
+  // Broadcast to UI only for Smart-Exit triggers (avoid double toasts for TP/SL)
+try {
+  const isSmartExit = typeof triggerType === "string" && triggerType.startsWith("smart_");
+  if (isSmartExit) {
+    feEvents.emit({
+      channel   : "events",
+      type      : "order_executed",
+      source    : "smart_exit",
+      side      : "sell",
+      trigger   : triggerType,   // "smart_time" | "smart_liquidity" | etc.
+      userId,
+      walletId  : dbWallet?.id || walletId,
+      walletLabel,
+      mint,
+      txHash    : tx,
+      strategy,
+      ts        : Date.now(),
+    });
+  }
+} catch {}
 }
 
 

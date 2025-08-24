@@ -30,13 +30,14 @@ module.exports = async function getTopHolderStats(
       };
     }
 
-    const sum = (slice) => holders.slice(0, slice).reduce((a, h) => a + h.uiAmount, 0);
-    const pctOf = (value) => +((value / total) * 100).toFixed(2);
+    const sum   = (n) => holders.slice(0, n).reduce((a, h) => a + (Number(h.uiAmount) || 0), 0);
+    const pctOf = (value) => +((value / (total || 1)) * 100).toFixed(2);
 
-    const top1Pct  = pctOf(holders[0]?.uiAmount ?? 0);
-    const top5Pct  = pctOf(sum(5));
-    const top10Pct = pctOf(sum(10));
-    const top20Pct = pctOf(sum(20));
+    const top1Pct   = pctOf(holders[0]?.uiAmount ?? 0);
+    const top5Pct   = pctOf(sum(5));
+    const top10Pct  = pctOf(sum(10));
+    const top20Pct  = pctOf(sum(20));
+    const top50Pct  = pctOf(sum(50)); // 🔎 purely additive for richer UI/analytics
 
     let tier;
     if (top1Pct > 50)      tier = "Dominant (>50%)";
@@ -52,9 +53,11 @@ module.exports = async function getTopHolderStats(
       top5Pct,
       top10Pct,
       top20Pct,
+      top50Pct,
+      thresholds: { top1: 50, top5: 75, top10: 75 }
     };
 
-    // Failure logic
+    // Failure logic (unchanged)
     if (top1Pct > 50) {
       return {
         key: KEY,
@@ -100,7 +103,7 @@ module.exports = async function getTopHolderStats(
       key: KEY,
       label: LABEL,
       label : "Top-Holder Contract (unknown)",
-      passed: "unknown",   
+      passed: "unknown",
       reason: "No top holder data found",
       detail: err.message,
       data: null,
