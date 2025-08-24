@@ -117,7 +117,6 @@ export async function getOpenTrades({ take = 100, skip = 0, walletId, walletLabe
   return Array.isArray(data) ? data : (data.trades ?? []);
 }
 
-
 /** POST /api/trades/open — Log a new open trade */
 export async function addOpenTrade(trade, { idempotencyKey } = {}) {
   const headers = { "Content-Type": "application/json" };
@@ -239,7 +238,7 @@ export async function deleteOpenTrades(mints = [], forceDelete = false, walletId
   const res = await authFetch("/api/trades/open", {
     method: "DELETE",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mints, walletId, forceDelete })
+    body: JSON.stringify({ mints, walletId: walletId != null ? Number(walletId) : walletId, forceDelete })
   });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
@@ -262,32 +261,48 @@ export const savePrefs = (chatId, obj) =>
 export async function fetchTokenMeta(mints = []) {
   const unique = [...new Set(mints.filter(Boolean))];
   if (!unique.length) return {};
-  const res = await authFetch("/api/wallets/token-meta", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mints: unique }),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(text || "Failed to fetch token metadata");
-  const arr = JSON.parse(text);
-  // Normalize → { [mint]: { name, symbol, logo } }
-  const map = {};
-  for (const t of arr || []) {
-    map[t.mint] = {
-      name: t.name || "",
-      symbol: t.symbol || "",
-      logo: t.logoURI || t.logo || "",
-    };
+  try {
+    const res = await authFetch("/api/wallets/token-meta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mints: unique }),
+    });
+    if (!res || !res.ok) {
+      const text = res ? await res.text() : "no response";
+      console.warn("⚠️ token-meta failed:", text.slice(0, 200));
+      return {}; // ← swallow; don’t throw (avoid refresh loop errors)
+    }
+    const arr = await res.json();
+    const map = {};
+    for (const t of arr || []) {
+      map[t.mint] = {
+        name: t.name || "",
+        symbol: t.symbol || "",
+        logo: t.logoURI || t.logo || "",
+      };
+    }
+    return map;
+  } catch (err) {
+    console.warn("⚠️ token-meta err:", err?.message || String(err));
+    return {};
   }
-  return map;
 }
 
 
 
 // utils/trades_positions.js
+const _batchCache = new Map(); // key -> { at, data }
+const _BATCH_TTL_MS = 1000;
+
 export async function fetchPricesBatch(mints = []) {
   const unique = [...new Set(mints.filter(Boolean))];
   if (!unique.length) return {};
+
+  const key = unique.slice().sort().join(",");
+  const now = Date.now();
+  const cached = _batchCache.get(key);
+  if (cached && now - cached.at < _BATCH_TTL_MS) return cached.data;
+
   const res  = await authFetch("/api/trades/prices/batch", {
     method : "POST",
     headers: { "Content-Type": "application/json" },
@@ -295,5 +310,70 @@ export async function fetchPricesBatch(mints = []) {
   });
   const text = await res.text();
   if (!res.ok) throw new Error(text || "Failed to fetch batch prices");
-  return JSON.parse(text); // { [mint]: number }
+  const data = JSON.parse(text);
+  _batchCache.set(key, { at: now, data });
+  return data;
+}
+
+
+
+
+// PATCH /api/trades/:id/smart-exit
+export async function updateSmartExit(tradeId, updates) {
+  const res = await authFetch(`/api/trades/${tradeId}/smart-exit`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates || {}),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to update Smart Exit");
+  return JSON.parse(text);
+}
+
+// POST /api/trades/:id/smart-exit/cancel
+export async function cancelSmartExit(tradeId) {
+  const res = await authFetch(`/api/trades/${tradeId}/smart-exit/cancel`, {
+    method: "POST",
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || "Failed to cancel Smart Exit");
+  return JSON.parse(text);
+}
+
+
+
+
+
+// Batch token meta (name/symbol/logo) for a list of mints
+export async function fetchTokenMeta(mints = [], { walletId, pin = true } = {}) {
+  const unique = [...new Set(mints.filter(Boolean))];
+  if (!unique.length) return {};
+  try {
+    const body = { mints: unique, pin: !!pin };
+    if (walletId != null) body.walletId = Number(walletId);
+
+    const res = await authFetch("/api/trades/token-meta", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res || !res.ok) {
+      const text = res ? await res.text() : "no response";
+      console.warn("⚠️ token-meta failed:", text.slice(0, 200));
+      return {}; // swallow; avoid UI loops
+    }
+    const arr = await res.json();
+    const map = {};
+    for (const t of arr || []) {
+      map[t.mint] = {
+        name  : t.name   || "",
+        symbol: t.symbol || "",
+        logo  : t.logoURI || t.logo || "",
+      };
+    }
+    return map;
+  } catch (err) {
+    console.warn("⚠️ token-meta err:", err?.message || String(err));
+    return {};
+  }
 }

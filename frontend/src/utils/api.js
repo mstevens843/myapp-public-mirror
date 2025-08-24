@@ -169,6 +169,28 @@ export async function getWalletNetworth() {
   return await res.json();
 }
 
+
+// utils/api.js (add)
+let _nfInFlight = null;
+let _nfCache = null;
+let _nfUntil = 0;
+
+export async function getWalletSnapshotShared() {
+  const now = Date.now();
+  if (_nfCache && now < _nfUntil) return _nfCache;
+  if (_nfInFlight) return _nfInFlight;
+
+  _nfInFlight = getWalletNetworth()
+    .then((d) => {
+      _nfCache = d;
+      _nfUntil = Date.now() + 1000; // small client micro-TTL
+      return d;
+    })
+    .finally(() => { _nfInFlight = null; });
+
+  return _nfInFlight;
+}
+
 export async function getTokenMarketStats(mint) {
   try {
     const res = await authFetch(`/api/safety/${mint}`);

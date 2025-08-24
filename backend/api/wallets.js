@@ -48,6 +48,34 @@ async function getSolPriceSafe(userId) {
   }
 }
 
+// ─── constants (no env bloat) ────────────────────────────────────────────────
+const SOL_MINT  = "So11111111111111111111111111111111111111112";
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+// Same quality gates as net worth (tune here if you want)
+const DUST_USD                 = 0.05;
+const LIQ_FLOOR_USD            = 1000;
+const MAX_PRICE_STALENESS_SEC  = 6 * 3600;
+
+// Micro caches to crush bursts (no new deps)
+const inflightTokens = new Map();    // key -> Promise
+const microCacheTokens = new Map();  // key -> { data, until }
+const TOKENS_TTL_MS = 1000;          // reuse for 1s
+const META_TTL_MS   = 10 * 60 * 1000;// cache Birdeye wallet meta for 10m
+const metaCacheByWallet = new Map(); // walletPubkey -> { at, map }
+
+// helper: fast timeout axios GET
+async function axiosGetWithTimeout(url, opts = {}, ms = 1200) {
+  const source = new AbortController();
+  const t = setTimeout(() => source.abort(), ms);
+  try {
+    const res = await axios.get(url, { signal: source.signal, ...opts });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // ── Pagination helper (idempotent) ───────────────────────────────────────────
 function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
   const cap = Number(defaults.cap || 500);
@@ -70,7 +98,6 @@ const EXCLUDE_MINTS = new Set([
 
 const MIN_IMPORT_USD = 0.25;
 const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 1000);
-const MAX_PRICE_STALENESS_SEC = Number(process.env.MAX_PRICE_STALENESS_SEC || 6*3600);
 
 // Import the enhanced price helper (compatible with old default export)
 const priceMod_WALLETS = require("../services/strategies/paid_api/getTokenPrice");
@@ -264,7 +291,10 @@ router.get("/balance", validate({ query: balanceQuerySchema }), async (req, res)
   }
 });
 
-
+// 🧊 In-flight coalescing + tiny micro-cache for /wallets/networth
+const inflightNetworth = new Map(); // key -> Promise
+const microCacheNetworth = new Map(); // key -> { data, until }
+const MICRO_TTL_MS = 750; // reuse result for quick double-fires (no envs)
 
 // GET  /api/wallets/networth   ← idempotent, no body required
 router.get("/networth", authenticate, async (req, res) => {
@@ -291,9 +321,38 @@ router.get("/networth", authenticate, async (req, res) => {
       return res.status(404).json({ error: "Active wallet not found." });
     }
 
-    /* 3️⃣ Compute & return net worth */
-    const result = await getFullNetWorthApp(publicKey, userId);
-    return res.json(result);
+    /* 🔑 Coalescing key: user + wallet */
+    const k = `${userId}:${publicKey}`;
+
+    /* ⚡ Tiny micro-cache (handles immediate repeats right after resolve) */
+    const cached = microCacheNetworth.get(k);
+    if (cached && Date.now() < cached.until) {
+      return res.json(cached.data);
+    }
+
+    /* 🧊 Reuse any in-flight computation for the same key */
+    if (inflightNetworth.has(k)) {
+      const result = await inflightNetworth.get(k);
+      return res.json(result);
+    }
+
+    /* 3️⃣ Compute net worth once, share result */
+    const p = (async () => {
+      const result = await getFullNetWorthApp(publicKey, userId);
+      // store brief micro-cache so quick back-to-back calls reuse the same body
+      microCacheNetworth.set(k, { data: result, until: Date.now() + MICRO_TTL_MS });
+      return result;
+    })();
+
+    inflightNetworth.set(k, p);
+
+    try {
+      const result = await p;
+      return res.json(result);
+    } finally {
+      // clear in-flight marker for this key
+      if (inflightNetworth.get(k) === p) inflightNetworth.delete(k);
+    }
   } catch (err) {
     console.error("❌ Net-worth error:", err);
     return res.status(500).json({ error: "Failed to fetch wallet net worth" });
@@ -369,26 +428,26 @@ router.get("/tokens/default", async (req, res) => {
         decimals : +i.tokenAmount.decimals,
       }));
 
-      /* ── inject native SOL balance ── */
-      const SOL_MINT = "So11111111111111111111111111111111111111112";
-      const solLamports = await conn.getBalance(owner);
-      if (solLamports > 0) {
-        tokens.push({
-          mint     : SOL_MINT,
-          amount   : solLamports / 1e9,
-          decimals : 9,
-        });
-      }
+    /* ── inject native SOL balance ── */
+    const SOL_MINT = "So11111111111111111111111111111111111111112";
+    const solLamports = await conn.getBalance(owner);
+    if (solLamports > 0) {
+      tokens.push({
+        mint     : SOL_MINT,
+        amount   : solLamports / 1e9,
+        decimals : 9,
+      });
+    }
     
     // 🔥 Fetch names/symbols/logo/prices using Birdeye wallet portfolio endpoint
     let metaMap = {};
-          /* pre-seed meta so it always has a name/icon */
-      metaMap[SOL_MINT] = {
-        name   : "Solana",
-        symbol : "SOL",
-        logo   : "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
-        price  : 0,
-      };
+    /* pre-seed meta so it always has a name/icon */
+    metaMap[SOL_MINT] = {
+      name   : "Solana",
+      symbol : "SOL",
+      logo   : "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
+      price  : 0,
+    };
 
     try {
       const { data } = await axios.get("https://public-api.birdeye.so/v1/wallet/token_list", {
@@ -406,32 +465,41 @@ router.get("/tokens/default", async (req, res) => {
           name: item.name,
           symbol: item.symbol,
           logo: item.logoURI,
-          price: item.priceUsd,
+          price: item.priceUsd, // may be missing/0 → we’ll fill via batch below
         };
       }
     } catch (err) {
       console.warn("❌ Birdeye wallet portfolio fetch failed:", err.response?.status || err.message);
     }
-    /* ❸ Same per-token fallback used above */
-    const unresolved = tokens.filter(t => !metaMap[t.mint]?.price).map(t => t.mint);
-    await Promise.all(unresolved.map(mint =>
-      limit(async () => {
-        try {
-          const { data } = await axios.get("https://public-api.birdeye.so/defi/price", {
-            params  : { address: mint, ui_amount_mode: "raw" },
-            headers : { "x-chain":"solana", "X-API-KEY": process.env.BIRDEYE_API_KEY },
-            timeout : 3000,
-          });
-          const p = data?.data?.value ?? 0;
-          if (p > 0) metaMap[mint] = { ...(metaMap[mint] || {}), price: p };
-        } catch {/* ignore */ }
-      })
-    ));
+
+    /* 🔁 Replace per-mint fallback with ONE batched call */
+    const unresolved = tokens
+      .filter(t => !(metaMap[t.mint] && Number(metaMap[t.mint].price) > 0))
+      .map(t => t.mint);
+
+    if (unresolved.length) {
+      const userId = req.user?.id || null;
+      const quotes = await getPricesWithLiquidityBatch_WALLETS(userId, unresolved);
+      const now    = Math.floor(Date.now() / 1e3);
+
+      for (const m of unresolved) {
+        const q     = quotes[m] || {};
+        const price = Number(q.price || 0);
+        const liq   = Number(q.liquidity || 0);
+        const ut    = Number(q.updateUnixTime || 0);
+        const fresh = ut > 0 && (now - ut) <= MAX_PRICE_STALENESS_SEC;
+
+        if (price > 0 && fresh && liq >= MIN_LIQUIDITY_USD) {
+          metaMap[m] = { ...(metaMap[m] || {}), price };
+        }
+      }
+    }
 
     // Attach name + symbol fallback
-   const enriched = tokens
+    const MIN_VALUE_USD = 0.50;
+    const enriched = tokens
       .map(t => {
-        const price = metaMap[t.mint]?.price || 0;
+        const price = Number(metaMap[t.mint]?.price || 0);
         return {
           ...t,
           name  : metaMap[t.mint]?.name   || `${t.mint.slice(0,4)}…${t.mint.slice(-4)}`,
@@ -443,7 +511,7 @@ router.get("/tokens/default", async (req, res) => {
       })
       .filter(t =>
         t.mint === SOL_MINT || (t.price > 0 && t.valueUsd >= MIN_VALUE_USD)
-     )
+      )
       .sort((a, b) => b.valueUsd - a.valueUsd);
 
     res.json(enriched);
@@ -475,27 +543,26 @@ router.get("/tokens/default-detailed", async (req, res) => {
         decimals : +i.tokenAmount.decimals,
       }));
 
-      /* ── inject native SOL balance ── */
-      const SOL_MINT = "So11111111111111111111111111111111111111112";
-      const solLamports = await conn.getBalance(owner);
-      if (solLamports > 0) {
-        tokens.push({
-          mint     : SOL_MINT,
-          amount   : solLamports / 1e9,
-          decimals : 9,
-        });
-      }
-      
+    /* ── inject native SOL balance ── */
+    const SOL_MINT = "So11111111111111111111111111111111111111112";
+    const solLamports = await conn.getBalance(owner);
+    if (solLamports > 0) {
+      tokens.push({
+        mint     : SOL_MINT,
+        amount   : solLamports / 1e9,
+        decimals : 9,
+      });
+    }
 
     // 🔥 Fetch names/symbols/logo/prices using Birdeye wallet portfolio endpoint
     let metaMap = {};
-          /* pre-seed meta so it always has a name/icon */
-      metaMap[SOL_MINT] = {
-        name   : "Solana",
-        symbol : "SOL",
-        logo   : "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
-        price  : 0,
-      };
+    /* pre-seed meta so it always has a name/icon */
+    metaMap[SOL_MINT] = {
+      name   : "Solana",
+      symbol : "SOL",
+      logo   : "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
+      price  : 0,
+    };
 
     try {
       const { data } = await axios.get("https://public-api.birdeye.so/v1/wallet/token_list", {
@@ -519,26 +586,35 @@ router.get("/tokens/default-detailed", async (req, res) => {
     } catch (err) {
       console.warn("❌ Birdeye wallet portfolio fetch failed:", err.response?.status || err.message);
     }
-    /* ❸ Same per-token fallback used above */
-    const unresolved = tokens.filter(t => !metaMap[t.mint]?.price).map(t => t.mint);
-    await Promise.all(unresolved.map(mint =>
-      limit(async () => {
-        try {
-          const { data } = await axios.get("https://public-api.birdeye.so/defi/price", {
-            params  : { address: mint, ui_amount_mode: "raw" },
-            headers : { "x-chain":"solana", "X-API-KEY": process.env.BIRDEYE_API_KEY },
-            timeout : 3000,
-          });
-          const p = data?.data?.value ?? 0;
-          if (p > 0) metaMap[mint] = { ...(metaMap[mint] || {}), price: p };
-        } catch {/* ignore */ }
-      })
-    ));
+
+    /* 🔁 Replace per-mint fallback with ONE batched call */
+    const unresolved = tokens
+      .filter(t => !(metaMap[t.mint] && Number(metaMap[t.mint].price) > 0))
+      .map(t => t.mint);
+
+    if (unresolved.length) {
+      const userId = req.user?.id || null;
+      const quotes = await getPricesWithLiquidityBatch_WALLETS(userId, unresolved);
+      const now    = Math.floor(Date.now() / 1e3);
+
+      for (const m of unresolved) {
+        const q     = quotes[m] || {};
+        const price = Number(q.price || 0);
+        const liq   = Number(q.liquidity || 0);
+        const ut    = Number(q.updateUnixTime || 0);
+        const fresh = ut > 0 && (now - ut) <= MAX_PRICE_STALENESS_SEC;
+
+        if (price > 0 && fresh && liq >= MIN_LIQUIDITY_USD) {
+          metaMap[m] = { ...(metaMap[m] || {}), price };
+        }
+      }
+    }
 
     // Attach name + symbol fallback
-   const enriched = tokens
+    const MIN_VALUE_USD = 0.50;
+    const enriched = tokens
       .map(t => {
-        const price = metaMap[t.mint]?.price || 0;
+        const price = Number(metaMap[t.mint]?.price || 0);
         return {
           ...t,
           name  : metaMap[t.mint]?.name   || `${t.mint.slice(0,4)}…${t.mint.slice(-4)}`,
@@ -550,7 +626,7 @@ router.get("/tokens/default-detailed", async (req, res) => {
       })
       .filter(t =>
         t.mint === SOL_MINT || (t.price > 0 && t.valueUsd >= MIN_VALUE_USD)
-     )
+      )
       .sort((a, b) => b.valueUsd - a.valueUsd);
 
     res.json(enriched);
@@ -563,20 +639,44 @@ router.get("/tokens/default-detailed", async (req, res) => {
 
 
 
+
 // get token name -> frontend
 router.post("/token-meta", async (req, res) => {
-  try {
-    const mints = req.body.mints;
-    if (!Array.isArray(mints) || mints.length === 0) {
-      return res.status(400).json({ error: "Must provide array of mints" });
+  const raw = req?.body?.mints;
+  const mints = Array.isArray(raw) ? [...new Set(raw.filter(Boolean))] : [];
+  if (mints.length === 0) return res.json([]);
+
+  const chunk = (arr, n = 100) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+    return out;
+  };
+
+  const normalize = (t = {}) => ({
+    mint: String(t.mint || ""),
+    name: String(t.name || ""),
+    symbol: String(t.symbol || ""),
+    logoURI: String(t.logoURI || t.logo || ""),
+  });
+
+  const results = [];
+  for (const batch of chunk(mints, 100)) {
+    let arr = null;
+    try {
+      // Your helper may throw if it sees account.data as ["…","base64"].
+      arr = await getWalletTokensWithMeta(batch);
+    } catch (err) {
+      // Don’t spam logs, don’t fail the request; just emit placeholders.
+      // (FE only uses this to enrich Unknown tokens anyway.)
+      // If you still want a breadcrumb, downgrade to debug:
+      // console.debug("token-meta batch fallback:", err?.message || err);
+      arr = batch.map((m) => ({ mint: m, name: "", symbol: "", logoURI: "" }));
     }
 
-    const result = await getWalletTokensWithMeta(mints);
-    res.json(result);
-  } catch (err) {
-    console.error("❌ token-meta route failed:", err.message);
-    res.status(500).json({ error: err.message || "Failed to fetch metadata" });
+    for (const t of Array.isArray(arr) ? arr : []) results.push(normalize(t));
   }
+
+  return res.json(results);
 });
 
 
@@ -634,14 +734,31 @@ router.get("/tokens/by-label", async (req, res) => {
     // Already enriched with name/symbol/logo
     const tokens = await getWalletTokensWithMeta(owner.toBase58());
 
-    // Attach price + valueUsd to each token
-    await Promise.all(
-      tokens.map(async (t) => {
-        const price = await getTokenPrice(req.user.id, t.mint);
-        t.price = price;
-        t.valueUsd = +(t.amount * price).toFixed(2);
-      })
-    );
+    // 🔁 Batch prices once (with liquidity + staleness gating)
+    const userId   = req.user?.id || null;
+    const now      = Math.floor(Date.now() / 1e3);
+    const basePass = new Set([
+      SOL_MINT_CONST,
+      "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+    ]);
+
+    const allMints = [...new Set(tokens.map(t => t.mint))];
+    const quotes   = allMints.length
+      ? await getPricesWithLiquidityBatch_WALLETS(userId, allMints)
+      : {};
+
+    for (const t of tokens) {
+      const q       = quotes[t.mint] || {};
+      const price   = Number(q.price || 0);
+      const liq     = Number(q.liquidity || 0);
+      const ut      = Number(q.updateUnixTime || 0);
+      const fresh   = ut > 0 && (now - ut) <= MAX_PRICE_STALENESS_SEC;
+      const allowed = basePass.has(t.mint) || (price > 0 && fresh && liq >= MIN_LIQUIDITY_USD);
+      const final   = allowed ? price : 0;
+
+      t.price    = final;
+      t.valueUsd = +(t.amount * final).toFixed(2);
+    }
 
     res.json(tokens);
   } catch (e) {
@@ -1017,125 +1134,188 @@ router.get("/portfolio", authenticate, async (req, res) => {
 
 router.get("/:id/tokens", authenticate, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId  = req.user.id;
     const walletId = Number.parseInt(req.params.id, 10);
+    if (isNaN(walletId)) return res.status(400).json({ error: "Invalid wallet ID" });
 
-    if (isNaN(walletId)) {
-      return res.status(400).json({ error: "Invalid wallet ID" });
-    }
+    // flags (default behavior = current behavior)
+    const includeMeta   = req.query.meta   !== "0";          // Birdeye wallet metadata
+    const includeQuotes = req.query.quotes !== "0";          // prices/liquidity
+    const minValueUsd   = Number.isFinite(+req.query.minUsd) ? +req.query.minUsd : 1;
+    const showAll       = req.query.all === "1";             // skip value filter if set
 
-    // 🔍 Confirm this wallet belongs to this user
-    const wallet = await prisma.wallet.findFirst({
-      where: {
-        id: walletId,
-        userId: userId
-      }
-    });
+    // Check ownership
+    const wallet = await prisma.wallet.findFirst({ where: { id: walletId, userId } });
+    if (!wallet) return res.status(404).json({ error: "Wallet not found for this user." });
 
-    if (!wallet) {
-      return res.status(404).json({ error: "Wallet not found for this user." });
-    }
-
-    const conn = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
     const owner = new PublicKey(wallet.publicKey);
+    const conn  = new Connection(process.env.SOLANA_RPC_URL, "confirmed");
 
-    // ✅ Ensure fallback constant exists
-    const MIN_VALUE_USD = 1;
+    // ── cache/coalesce key
+    const k = `${userId}:${walletId}:m${includeMeta?1:0}:q${includeQuotes?1:0}:u${minValueUsd}:a${showAll?1:0}`;
 
-    // Fetch tokens from wallet
-    const { value } = await conn.getParsedTokenAccountsByOwner(
-      owner,
-      { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") }
-    );
+    // micro-cache
+    const cached = microCacheTokens.get(k);
+    if (cached && Date.now() < cached.until) return res.json(cached.data);
 
-    const tokens = value
-      .map(a => a.account.data.parsed.info)
-      .filter(i => +i.tokenAmount.uiAmount > 0.1)
-      .map(i => ({
-        mint     : i.mint,
-        amount   : +i.tokenAmount.uiAmount,
-        decimals : +i.tokenAmount.decimals,
-      }));
+    // in-flight coalescing
+    if (inflightTokens.has(k)) {
+      const result = await inflightTokens.get(k);
+      return res.json(result);
+    }
 
-      /* ── inject native SOL balance ── */
-      const SOL_MINT = "So11111111111111111111111111111111111111112";
+    const p = (async () => {
+      // Fetch SPL token accounts
+      const { value } = await conn.getParsedTokenAccountsByOwner(
+        owner,
+        { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") }
+      );
+
+      let tokens = value
+        .map(a => a.account.data.parsed.info)
+        .map(i => ({
+          mint     : i.mint,
+          amount   : +i.tokenAmount.uiAmount,
+          decimals : +i.tokenAmount.decimals,
+        }))
+        // keep any positive balances; filtering-by-value happens later
+        .filter(t => Number.isFinite(t.amount) && t.amount > 0);
+
+      // Inject native SOL
       const solLamports = await conn.getBalance(owner);
       if (solLamports > 0) {
-        tokens.push({
-          mint     : SOL_MINT,
-          amount   : solLamports / 1e9,
-          decimals : 9,
-        });
+        tokens.push({ mint: SOL_MINT, amount: solLamports / 1e9, decimals: 9 });
       }
-      
 
-    // 🔥 Fetch names/symbols/logo/prices using Birdeye wallet portfolio endpoint
-    let metaMap = {};
-          /* pre-seed meta so it always has a name/icon */
+      // ── Optional: metadata (Birdeye wallet token_list) with soft cache & fast timeout
+      const metaMap = Object.create(null);
+      // pre-seed SOL
       metaMap[SOL_MINT] = {
         name   : "Solana",
         symbol : "SOL",
         logo   : "https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/info/logo.png",
-        price  : 0,
       };
 
-    try {
-      const { data } = await axios.get("https://public-api.birdeye.so/v1/wallet/token_list", {
-        params: { wallet: owner.toBase58() },
-        headers: {
-          "x-chain": "solana",
-          "X-API-KEY": process.env.BIRDEYE_API_KEY,
-        },
-        timeout: 5000,
-      });
-
-      const items = data?.data?.items || [];
-      for (const item of items) {
-        metaMap[item.address] = {
-          name: item.name,
-          symbol: item.symbol,
-          logo: item.logoURI,
-          price: item.priceUsd,
-        };
+      if (includeMeta) {
+        const mc = metaCacheByWallet.get(wallet.publicKey);
+        const fresh = mc && (Date.now() - mc.at < META_TTL_MS);
+        if (fresh) {
+          Object.assign(metaMap, mc.map);
+        } else {
+          try {
+            const { data } = await axiosGetWithTimeout(
+              "https://public-api.birdeye.so/v1/wallet/token_list",
+              {
+                params: { wallet: owner.toBase58() },
+                headers: { "x-chain": "solana", "X-API-KEY": process.env.BIRDEYE_API_KEY }
+              },
+              1200 // fast timeout to avoid UI stall
+            );
+            const items = data?.data?.items || [];
+            for (const item of items) {
+              metaMap[item.address] = {
+                name: item.name,
+                symbol: item.symbol,
+                logo: item.logoURI,
+              };
+            }
+            metaCacheByWallet.set(wallet.publicKey, { at: Date.now(), map: { ...metaMap } });
+          } catch (err) {
+            console.warn("🟡 Birdeye meta skipped:", err?.message || err?.code || err);
+          }
+        }
       }
-    } catch (err) {
-      console.warn("❌ Birdeye wallet portfolio fetch failed:", err.response?.status || err.message);
-    }
-    /* ❸ Same per-token fallback used above */
-    const unresolved = tokens.filter(t => !metaMap[t.mint]?.price).map(t => t.mint);
-    await Promise.all(unresolved.map(mint =>
-      limit(async () => {
+
+      // ── Optional: batched quotes (same helper as net worth)
+      let priceMap = Object.create(null);
+      let liqMap   = Object.create(null);
+      let updatedMap = Object.create(null);
+
+      if (includeQuotes) {
+        // dedupe and skip SOL/USDC special cases
+        const mints = [...new Set(tokens.map(t => t.mint))]
+          .filter(m => m && m !== USDC_MINT && m !== SOL_MINT);
+
+        // small instrumentation
+        console.log(`📦 [tokens] Price batch: querying ${mints.length} mint(s)`);
+
+        const quotes = await getPricesWithLiquidityBatch(userId, mints);
+
+        for (const m of mints) {
+          const q = quotes[m] || {};
+          priceMap[m]   = Number(q.price || 0);
+          liqMap[m]     = Number(q.liquidity || 0);
+          updatedMap[m] = Number(q.updateUnixTime || 0);
+        }
+
+        // fill SOL + USDC
+        priceMap[USDC_MINT] = 1;
         try {
-          const { data } = await axios.get("https://public-api.birdeye.so/defi/price", {
-            params  : { address: mint, ui_amount_mode: "raw" },
-            headers : { "x-chain":"solana", "X-API-KEY": process.env.BIRDEYE_API_KEY },
-            timeout : 3000,
-          });
-          const p = data?.data?.value ?? 0;
-          if (p > 0) metaMap[mint] = { ...(metaMap[mint] || {}), price: p };
-        } catch {/* ignore */ }
-      })
-    ));
+          const solPrice = await getSolPrice(userId);
+          priceMap[SOL_MINT] = Number(solPrice || 0);
+        } catch { priceMap[SOL_MINT] = 0; }
+      }
 
-    // Attach name + symbol fallback
-   const enriched = tokens
-      .map(t => {
-        const price = metaMap[t.mint]?.price || 0;
-        return {
-          ...t,
-          name  : metaMap[t.mint]?.name   || `${t.mint.slice(0,4)}…${t.mint.slice(-4)}`,
-          symbol: metaMap[t.mint]?.symbol || "",
-          logo  : metaMap[t.mint]?.logo   || "",
+      // ── Build enriched rows with gating consistent with net-worth
+      const out = [];
+      const nowSec = Math.floor(Date.now()/1000);
+
+      for (const t of tokens) {
+        const meta = metaMap[t.mint] || {};
+        let price  = includeQuotes ? (priceMap[t.mint] || 0) : 0;
+        let liq    = includeQuotes ? (liqMap[t.mint]   || 0) : 0;
+        let upAt   = includeQuotes ? (updatedMap[t.mint]|| 0) : 0;
+
+        // Gate quotes for non-allowlisted mints
+        const isSol  = t.mint === SOL_MINT;
+        const isUsdc = t.mint === USDC_MINT;
+
+        const isFresh = upAt > 0 ? (nowSec - upAt) <= MAX_PRICE_STALENESS_SEC : false;
+        const valueUsd = (price || 0) * t.amount;
+
+        const belowDust   = includeQuotes ? (valueUsd < DUST_USD) : false;
+        const illiquid    = includeQuotes ? (liq > 0 && liq < LIQ_FLOOR_USD) : false;
+        const stale       = includeQuotes ? (!isFresh) : false;
+
+        // If quotes are included and quality is poor, zero them unless SOL/USDC
+        if (includeQuotes && !isSol && !isUsdc && (belowDust || illiquid || stale)) {
+          // zero out to keep, but non-inflating
+          price = 0;
+        }
+
+        out.push({
+          mint: t.mint,
+          amount: t.amount,
+          decimals: t.decimals,
+          name  : meta.name   || `${t.mint.slice(0,4)}…${t.mint.slice(-4)}`,
+          symbol: meta.symbol || "",
+          logo  : meta.logo   || "",
           price,
-          valueUsd: t.amount * price,
-        };
-      })
-      .filter(t =>
-        t.mint === SOL_MINT || (t.price > 0 && t.valueUsd >= MIN_VALUE_USD)
-     )
-      .sort((a, b) => b.valueUsd - a.valueUsd);
+          liquidityUsd: includeQuotes ? liq   : undefined,
+          updatedAt   : includeQuotes ? upAt  : undefined,
+          valueUsd    : +(t.amount * (price || 0)).toFixed(6),
+        });
+      }
 
-    res.json(enriched);
+      // filter & sort
+      const filtered = showAll
+        ? out
+        : out.filter(r => r.mint === SOL_MINT || (r.price > 0 && r.valueUsd >= minValueUsd));
+
+      const enriched = filtered.sort((a, b) => (b.valueUsd || 0) - (a.valueUsd || 0));
+
+      // micro-cache for quick repeats
+      microCacheTokens.set(k, { data: enriched, until: Date.now() + TOKENS_TTL_MS });
+      return enriched;
+    })();
+
+    inflightTokens.set(k, p);
+    try {
+      const result = await p;
+      return res.json(result);
+    } finally {
+      if (inflightTokens.get(k) === p) inflightTokens.delete(k);
+    }
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message });

@@ -1,4 +1,3 @@
-
 /* core/tradeExecutorSniper.js
  * Sniper-only trade executor with Smart-Exit watcher (TIME / LIQUIDITY / AUTHORITY-FLIP).
  *
@@ -10,7 +9,7 @@
  *      • AUTH   — exit if freeze authority appears/changes (rug indicator)
  *
  * Notes:
- *  - The watcher runs only if meta.postBuyWatch is provided AND meta.strategy === "Sniper".
+ *  - The watcher runs only if meta.postBuyWatch is provided AND...meta.strategy === "Sniper" || meta.strategy === "Paper Trader").
  *  - Exit execution uses Jupiter v6 Quote API by default (node-fetch). You can replace
  *    `fetchSellQuoteJup` with your internal quote provider if desired.
  *  - This module does NOT touch other strategies. Import it ONLY from sniper.js.
@@ -29,6 +28,7 @@ const getSolPrice           = getTokenPriceModule.getSolPrice;
 const { sendAlert }         = require("../../../telegram/alerts");
 const { trackPendingTrade } = require("./txTracker");
 const { getKeypairForTrade }= require("../../../armEncryption/resolveKeypair");
+const { closePositionFIFO } = require("../../utils/analytics/fifoReducer");
 
 // Smart-exit helpers
 const QuoteWarmCache        = require("./quoteWarmCache");
@@ -87,6 +87,38 @@ async function getPriceCached(userId, mint) {
 }
 
 const toNum = (v) => (v === undefined || v === null ? null : Number(v));
+// ───────────────────────────────
+
+// Best-effort: log unhandled promise rejections so the process doesn't crash silently
+try {
+  if (typeof process !== "undefined" && !process.__SE_UNHANDLED_HOOK) {
+    process.__SE_UNHANDLED_HOOK = true;
+    process.on('unhandledRejection', (reason) => {
+      try {
+        console.error('[SE][unhandledRejection]', reason?.stack || reason?.message || reason);
+      } catch (_) {}
+    });
+  }
+} catch (_) {}
+
+// Smart-Exit diag helpers
+function __seSafe(value) {
+  try {
+    return JSON.stringify(value, (_, v) => (typeof v === "bigint" ? v.toString() : v));
+  } catch (e) {
+    return String(value);
+  }
+}
+function __seLog(tag, obj) {
+  try {
+    if (obj === undefined) { console.log(`[SE][${tag}]`); }
+    else { console.log(`[SE][${tag}]`, __seSafe(obj)); }
+  } catch (e) {
+    console.log(`[SE][${tag}] (stringify-error)`, e?.message || e);
+  }
+}
+// ───────────────────────────────
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Arm-aware wallet loader
@@ -138,9 +170,11 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   } = meta || {};
 
   if (!userId || !walletId) throw new Error("userId and walletId are required in meta");
-  if (String(strategy||"").toLowerCase() !== "sniper") {
-    // This executor is intended for Sniper only; refuse to run for other strategies.
-    throw new Error("tradeExecutorSniper is Sniper-only. Set meta.strategy='Sniper'.");
+  const __stratKey = String(strategy||"").toLowerCase();
+  const __isPaperStrat = (__stratKey === "paper trader") || (__stratKey === "paper_trader") || (__stratKey === "papertrader");
+  if (!(__stratKey === "sniper" || __isPaperStrat)) {
+    // Allow "Paper Trader" through to reuse Sniper executor in dry-run
+    throw new Error("tradeExecutorSniper allowed only for Sniper or Paper Trader strategies.");
   }
 
   // kill switch
@@ -217,7 +251,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         quote,
         wallet,
         shared,
-        priorityFee: priorityFeeLamports,
+        priorityFeeLamports: priorityFeeLamports,
         tipLamports: bribeLamports,
         privateRpcUrl: process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL,
         skipPreflight: true,
@@ -267,6 +301,43 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   }
   const walletLabel = walletRow.label;
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Canonical Smart-Exit persistence for FE countdown (surgical addition)
+  const pbw = meta.postBuyWatch || {};
+  const modePersist = String(meta.smartExitMode || pbw.smartExitMode || "off").toLowerCase();
+  let timeMaxHoldSecPersist = null;
+  let timeMinPnLPersist = null;
+  if (modePersist === "time") {
+    const timeCfg = (meta.smartExit && meta.smartExit.time) || {};
+    if (timeCfg.maxHoldSec != null) {
+      timeMaxHoldSecPersist = Number(timeCfg.maxHoldSec);
+    } else if (pbw.maxHoldSec != null) {
+      timeMaxHoldSecPersist = Number(pbw.maxHoldSec);
+    } else if (meta.smartExitTimeMins != null) {
+      timeMaxHoldSecPersist = Number(meta.smartExitTimeMins) * 60;
+    }
+  // NEW: persist min-PnL gate so UI can show "(≥ +X% PnL)"
+  if (timeCfg.minPnLBeforeTimeExitPct != null) {
+    const n = Number(timeCfg.minPnLBeforeTimeExitPct);
+    if (Number.isFinite(n)) timeMinPnLPersist = n;
+  } else if (pbw.minPnLBeforeTimeExitPct != null) {
+    const n = Number(pbw.minPnLBeforeTimeExitPct);
+    if (Number.isFinite(n)) timeMinPnLPersist = n;
+  }
+}
+  const __isPaper = simulated || (meta?.dryRun) || String((meta?.category||"")).toLowerCase()==="papertrader" || (meta?.openTradeExtras && meta.openTradeExtras.isPaper === true);
+  const extras = {
+    ...(meta.openTradeExtras || {}),
+    ...(__isPaper ? { isPaper: true, simulated: true } : {}),
+    smartExitMode: modePersist,
+    timeMaxHoldSec:
+    Number.isFinite(timeMaxHoldSecPersist) && timeMaxHoldSecPersist > 0
+      ? Math.floor(timeMaxHoldSecPersist)
+      : null,
+  timeMinPnLBeforeTimeExitPct:
+    Number.isFinite(timeMinPnLPersist) ? timeMinPnLPersist : undefined,
+};
+
   const safeJson = (data) => JSON.stringify(data, (_, v) => (typeof v === "bigint" ? v.toString() : v), 2);
   console.log("🧩 TRADE.create payload:");
   console.log(
@@ -292,11 +363,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
       type: "buy",
       side: "buy",
       mevMode,
-      priorityFee: priorityFeeLamports,
+      priorityFeeLamports: priorityFeeLamports,
       briberyAmount: bribeLamports,
       mevShared: shared,
       inputMint: quote.inputMint,
       outputMint: quote.outputMint,
+      extras,
     })
   );
 
@@ -325,11 +397,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         side: "buy",
         slippage,
         mevMode,
-        priorityFee: priorityFeeLamports,
+        priorityFeeLamports: priorityFeeLamports,
         briberyAmount: bribeLamports,
         mevShared: shared,
         inputMint: quote.inputMint,
         outputMint: quote.outputMint,
+        extras,
       },
     });
   } catch (err) {
@@ -372,8 +445,8 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
   // ──────────────────────────────────────────────────────────────────────────
   // 🔍 Start post-buy watcher (non-blocking) if requested
 
-  if (meta && meta.postBuyWatch && String(strategy).toLowerCase() === "sniper") {
-    try {
+    // 🔍 Start post-buy watcher whenever smart-exit is enabled (modePersist !== "off")
+     if (modePersist !== "off" && (String(strategy).toLowerCase() === "sniper" || String(strategy).toLowerCase().includes("paper"))) {    try {
       startSmartExitWatcher({
         buy: { mint, quote, entryPriceUSD, entryPrice, decimals },
         meta,
@@ -409,22 +482,31 @@ const simulateBuy = (o) => execTrade({ ...o, simulated: true  });
 function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
   const { mint, quote, entryPriceUSD, entryPrice, decimals } = buy || {};
   const pbw = meta.postBuyWatch || {};
-  const mode = String(meta.smartExitMode || pbw.smartExitMode || "off").toLowerCase();
+  let mode = String(meta.smartExitMode || pbw.smartExitMode || "off").toLowerCase();
 
   if (mode === "off") return;
 
   const intervalSec = Number(pbw.intervalSec || 5);
   const rugDelayBlocks = Number(pbw.rugDelayBlocks || 0);
-  const lpDropExitPct = Number(pbw.lpOutflowExitPct || pbw.lpDropExitPct || 50); // default 50%
+  let lpDropExitPct = Number(pbw.lpOutflowExitPct || pbw.lpDropExitPct || 50); // default 50%
   const enableAuthorityFlip = Boolean(pbw.authorityFlipExit);
 
   const timeCfg = (meta.smartExit && meta.smartExit.time) || {};
-  const maxHoldSec = Number(timeCfg.maxHoldSec || pbw.maxHoldSec || 0);
-  const minPnLPct  = Number(timeCfg.minPnLBeforeTimeExitPct || 0);
+  let maxHoldSec = Number(timeCfg.maxHoldSec || pbw.maxHoldSec || 0);
+  let minPnLPct  = Number(timeCfg.minPnLBeforeTimeExitPct || 0);
 
   const buyTs = Date.now();
   const entryOutLamports = BigInt(quote.outAmount);
   const warm = new QuoteWarmCache({ ttlMs: 800, maxEntries: 64 });
+  __seLog("boot", {
+    mint, strategy: meta?.strategy,
+    mode, intervalSec, rugDelayBlocks, lpDropExitPct, enableAuthorityFlip,
+    time: { maxHoldSec, minPnLPct },
+    buyTs, entryOutLamports: entryOutLamports.toString(),
+    mints: { in: quote.inputMint, out: quote.outputMint },
+    walletId, userId
+  });
+
 
   let frozenAuthorityStart = null;
   let exitTriggered = false;
@@ -447,11 +529,21 @@ function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
     if (enableAuthorityFlip) {
       try {
         const auth = await checkFreezeAuthority(global.__SOL_CONN__ || null, quote.outputMint);
-        if (frozenAuthorityStart === null) frozenAuthorityStart = auth || null;
-        if ((auth && !frozenAuthorityStart) || (auth && frozenAuthorityStart && auth !== frozenAuthorityStart)) {
+
+        if (frozenAuthorityStart === null) {
+          frozenAuthorityStart = auth || null;
+        }
+
+        if ((auth && !frozenAuthorityStart) ||
+            (auth && frozenAuthorityStart && auth !== frozenAuthorityStart)) {
+          console.log(
+            `🚨 Authority flip detected on ${mint}! Old: ${frozenAuthorityStart || "none"}, New: ${auth}`
+          );
           return { reason: "authority-flip" };
         }
-      } catch (_) {}
+      } catch (err) {
+        console.warn("Authority check failed:", err.message);
+      }
     }
 
     // LIQUIDITY / LP DROP via sell-quote shrinkage
@@ -469,24 +561,43 @@ function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
           const initialOutBase = BigInt(quote.inAmount); // base token spent at entry
           const nowOutBase     = BigInt(q.outAmount);
           const dropPct = 100 - (Number(nowOutBase * 100n / initialOutBase));
+          __seLog("lp-check", {
+            initialOutBase: initialOutBase.toString(),
+            nowOutBase: nowOutBase.toString(),
+            dropPct
+          });
+
           if (dropPct >= lpDropExitPct) {
+            console.log(
+              `💧 LP outflow detected for ${mint}: drop ${dropPct.toFixed?.(2) ?? dropPct}% >= threshold ${lpDropExitPct}%`
+            );
             return { reason: "lp-pull", details: { dropPct } };
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        console.warn("LP check failed:", e.message);
+      }
     }
 
     // TIME mode
     if (mode === "time" && maxHoldSec > 0) {
       const elapsedSec = Math.floor((Date.now() - buyTs) / 1000);
-      if (elapsedSec >= maxHoldSec) {
+      
+        __seLog("time-check", { elapsedSec, maxHoldSec, minPnLPct });
+if (elapsedSec >= maxHoldSec) {
         if (minPnLPct && Number.isFinite(minPnLPct)) {
           const pnl = await computePnLPct();
           if (pnl !== null && pnl < minPnLPct) {
-            // require min PnL not met → keep holding
+            console.log(
+              `⏸️ Time exit gated by minPnL for ${mint}: pnl ${pnl.toFixed?.(2) ?? pnl}% < floor ${minPnLPct}% (holding)`
+            );
             return null;
           }
         }
+        console.log(
+          `⏰ Time exit reached for ${mint}: elapsed ${elapsedSec}s >= max ${maxHoldSec}s` +
+          (minPnLPct ? ` (minPnL floor ${minPnLPct}% ok)` : "")
+        );
         return { reason: "smart-time" };
       }
     }
@@ -497,11 +608,126 @@ function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
   async function performExit(reasonTag, extra = {}) {
     if (exitTriggered) return;
     exitTriggered = true;
+    __seLog("perform-exit-begin", { mint, reasonTag, paper: (meta?.dryRun === true) || String((meta?.category||"")).toLowerCase()==="papertrader" });
+
+
+    console.log(`[SmartExit] Firing exit for ${mint} — reason=${reasonTag} (paper=${String((meta?.dryRun === true) || String((meta?.category||"")).toLowerCase()==="papertrader")})`);
 
     try {
+      const __paperExit = (meta?.dryRun === true) || String((meta?.category||"")).toLowerCase()==="papertrader";
+      if (__paperExit) {
+        const fakeTx = `paper-exit:${uuid()}`;
+        try {
+          await prisma.trade.create({
+            data: {
+              userId, walletId,
+              mint,
+              type: "sell",
+              side: "sell",
+              strategy: String(meta?.strategy||"Paper Trader"),
+              txHash: fakeTx,
+              inputMint : quote.outputMint,
+              outputMint: quote.inputMint,
+              decimals  : decimals ?? null,
+              extras: { ...(meta?.openTradeExtras||{}), isPaper: true, paperExit: true, smartExitReason: reasonTag||"paper-exit" },
+            }
+          });
+        } catch (e) { console.warn("paper-exit persist failed:", e.message); }
+
+        // ⬇️ Persist ClosedTrade for paper exits with real exit prices
+        try {
+          const sellQ = await getWarmSellQuote({
+            inputMint: quote.outputMint,
+            outputMint: quote.inputMint,
+            amount: entryOutLamports,
+            warm,
+          });
+
+        // inside performExit(), paper branch, after we fetch `sellQ`…
+        const baseDec   = await getDecimalsCached(quote.inputMint);
+        const tokenDec  = await getDecimalsCached(quote.outputMint);
+
+        let exitPrice = null, exitPriceUSD = null;
+
+        if (sellQ && sellQ.outAmount && sellQ.inAmount) {
+          const baseOutUi = Number(sellQ.outAmount) / 10 ** baseDec;
+          const qtyTokens = Number(entryOutLamports) / 10 ** tokenDec;
+          exitPrice = qtyTokens > 0 ? (baseOutUi / qtyTokens) : null;
+
+          const baseUsd   = await getPriceCached(userId, quote.inputMint);
+          exitPriceUSD = (exitPrice != null && baseUsd) ? exitPrice * baseUsd : null;
+        } else {
+          console.warn("paper-exit: quote missing, persisting closedTrade without exitPrice");
+        }
+
+
+          const openRow = await prisma.trade.findFirst({
+            where: {
+              userId, walletId, mint,
+              strategy: { equals: String(meta?.strategy||"Paper Trader") },
+              type: "buy",
+              exitedAt: null,
+            },
+            orderBy: { createdAt: "desc" },
+          });
+
+          if (openRow) {
+            const closedData = {
+              id: uuid(),
+              userId,
+              walletId,
+              mint,
+              strategy: String(meta?.strategy||"Paper Trader"),
+              tokenName: openRow.tokenName || null,
+              walletLabel: openRow.walletLabel || null,
+              unit: openRow.unit || (quote.inputMint === SOL_MINT ? "sol" : (quote.inputMint === USDC_MINT ? "usdc" : "spl")),
+              decimals: openRow.decimals ?? tokenDec ?? null,
+              inAmount: openRow.inAmount,
+              outAmount: openRow.outAmount,
+              closedOutAmount: openRow.outAmount,
+              entryPrice: openRow.entryPrice,
+              entryPriceUSD: openRow.entryPriceUSD,
+              exitPrice,
+              exitPriceUSD,
+              exitedAt: new Date(),
+              createdAt: openRow.createdAt,
+              extras: { ...(openRow.extras || {}), isPaper: true, paperExit: true, smartExitReason: reasonTag||"paper-exit" },
+            };
+            try {
+              await prisma.closedTrade.create({ data: closedData });
+            } catch (e) {
+              console.warn("paper-exit closedTrade.create failed:", e.message);
+            }
+
+            try {
+              await prisma.trade.update({
+                where: { id: openRow.id },
+                data: {
+                  exitedAt: new Date(),
+                  closedOutAmount: openRow.outAmount,
+                }
+              });
+            } catch (e) {
+              console.warn("paper-exit trade.update failed:", e.message);
+            }
+          }
+        } catch (e) {
+          console.warn("paper-exit post-processing failed:", e.message);
+        }
+
+        try { recordExitReason(reasonTag || "paper"); recordTradeClosed(); } catch(_){}
+        console.log(`[SmartExit] Paper exit complete for ${mint} — reason=${reasonTag}, tx=${fakeTx}`);
+        await sendAlert("ui", `🧪 Paper Smart Exit (${reasonTag}) for ${mint}\n• Tx: ${fakeTx}`, "Sniper");
+        return fakeTx;
+      }
+
       // Optional rug delay (blocks) → approximate with ms (400ms per block default)
       if (rugDelayBlocks > 0) {
+        console.log(
+          `⏳ Rug-delay enabled: waiting ${rugDelayBlocks} blocks (~${rugDelayBlocks * 400}ms) before exit...`
+        );
         await new Promise(r => setTimeout(r, rugDelayBlocks * 400));
+        console.log(`▶️ Rug-delay over, proceeding with exit.`);
       }
 
       // Build a fresh sell quote
@@ -511,6 +737,12 @@ function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
         amount: entryOutLamports,
         warm,
       });
+      __seLog("sell-quote", {
+        inAmount: sellQ?.inAmount, outAmount: sellQ?.outAmount,
+        inputMint: sellQ?.inputMint, outputMint: sellQ?.outputMint,
+        priceImpactPct: sellQ?.priceImpactPct, svcLatencyMs: sellQ?._svcLatencyMs
+      });
+
 
       // Execute SELL
       const walletReload = wallet; // reuse
@@ -523,10 +755,61 @@ function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
         privateRpcUrl: process.env.PRIVATE_SOLANA_RPC_URL || process.env.SOLANA_RPC_URL,
         skipPreflight: true,
       });
+      __seLog("sell-tx-sent", { tx, mint, reasonTag });
 
-      // Metrics + alert
-      try { recordExitReason(reasonTag || "other"); recordTradeClosed(); } catch(_){}
+
+      try {
+        // token decimals (use the token mint — sellQ.inputMint)
+        const tokenDecimals = await getDecimalsCached(sellQ.inputMint);
+
+        // exit price in SOL per token
+        // amounts here are atomic: outAmount = SOL lamports, inAmount = token units
+        const exitPriceSOL =
+          (Number(sellQ.outAmount) * 10 ** tokenDecimals) /
+          (Number(sellQ.inAmount) * 1e9);
+
+        // best-effort USD (falls back to null if price source down)
+        let exitPriceUSD = null;
+        try {
+          const solUSD = await getPriceCached(userId, SOL_MINT);
+          exitPriceUSD = solUSD ? +(exitPriceSOL * solUSD).toFixed(6) : null;
+        } catch (_) {
+          // non-fatal: just keep USD as null
+        }
+
+        const triggerMap = {
+          "smart-time": "time",
+          "lp-pull": "liquidity",
+          "authority-flip": "authority",
+        };
+
+        const normalizedTrigger = triggerMap[reasonTag] || reasonTag;
+
+        // close FIFO (full size)
+        await closePositionFIFO({
+          userId,
+          walletId,
+          walletLabel: meta.walletLabel || "default",
+          mint,                                 // token mint
+          strategy: meta.strategy,              // "Sniper" or "Paper Trader"
+          triggerType: normalizedTrigger,    // "time" | "liquidity" | "authority-flip" etc
+          amountSold   : Number(sellQ.inAmount),// raw token units sold
+          removedAmount: Number(sellQ.inAmount),
+          exitPrice    : exitPriceSOL,
+          exitPriceUSD,
+          txHash       : tx,
+          slippage     : meta.slippage ?? 0.5,
+          slippageBps  : Math.round((meta.slippage ?? 0.5) * 100),
+          decimals     : tokenDecimals,
+        });
+      } catch (persistErr) {
+        // Don't fail the whole smart-exit if persistence hiccups
+        console.error("❌ Failed to persist sell via FIFO:", persistErr);
+      }
+
+      try { recordExitReason(reasonTag || "other"); recordTradeClosed(); } catch(_) {}
       const msg = `🚪 Smart Exit (${reasonTag}) executed for ${mint}\n• Tx: https://solscan.io/tx/${tx}`;
+      console.log(`[SmartExit] Live exit complete for ${mint} — reason=${reasonTag}, tx=${tx}`);
       await sendAlert("ui", msg, "Sniper");
       return tx;
     } catch (err) {
@@ -545,10 +828,45 @@ function startSmartExitWatcher({ buy, meta, wallet, userId, walletId }) {
   }
 
   const timer = setInterval(async () => {
+    const nowTs = Date.now();
+    const elapsedSec = Math.floor((nowTs - buyTs) / 1000);
+    const remainingSec = maxHoldSec > 0 ? Math.max(0, maxHoldSec - elapsedSec) : null;
+    __seLog("tick", { tickCount: tickCount+1, mode, elapsedSec, remainingSec, lpDropExitPct, minPnLPct });
+
+    // 🔄 Reload latest extras each loop so FE edits/cancels apply
+    try {
+      const fresh = await prisma.trade.findFirst({
+        where: { userId, walletId, mint, exitedAt: null },
+        select: { extras: true },
+      });
+      if (fresh?.extras) {
+        const ex = fresh.extras;
+        if (ex.smartExitMode !== undefined) {
+          mode = String(ex.smartExitMode || "off").toLowerCase();
+        }
+        if (ex.timeMaxHoldSec !== undefined && ex.timeMaxHoldSec !== null) {
+          const n = Number(ex.timeMaxHoldSec);
+          if (Number.isFinite(n) && n >= 0) maxHoldSec = Math.floor(n);
+        }
+        if (ex.timeMinPnLBeforeTimeExitPct !== undefined && ex.timeMinPnLBeforeTimeExitPct !== null) {
+          const n = Number(ex.timeMinPnLBeforeTimeExitPct);
+          if (Number.isFinite(n)) minPnLPct = n;
+        }
+        if (ex.smartLiqDropPct !== undefined && ex.smartLiqDropPct !== null) {
+          const n = Number(ex.smartLiqDropPct);
+          if (Number.isFinite(n)) lpDropExitPct = n;
+        }
+      }
+    __seLog("extras-reload", { mode, maxHoldSec, minPnLPct, lpDropExitPct });
+    } catch (e) {
+      console.warn("extras reload failed:", e.message);
+    }
+
     tickCount++;
     try {
       const decision = await shouldExitNow();
       if (decision) {
+        console.log(`[SmartExit] Trigger detected for ${mint} — reason=${decision.reason}${decision.details?.dropPct !== undefined ? ` (drop=${decision.details.dropPct}%)` : ""}`);
         clearInterval(timer);
         await performExit(decision.reason, decision.details || {});
       }

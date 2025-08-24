@@ -16,6 +16,7 @@ import StealthBotConfig from "./StealthBotConfig";
 import TurboSniperConfig from "./TurboSniperConfig";
 import LimitEntryBlock  from "./LimitEntryBlock";
 import AdvancedSection  from "../ui/AdvancedSection";
+import PaperTurboTraderConfig from "./PaperTurboTraderConfig";
 import AdvancedFields from "../ui/AdvancedFields";
 /* ------------------------------------------------------------------ */
 /* Helper → when should we expose the Entry-Conditions block?         */
@@ -212,6 +213,28 @@ case "rotationBot":
         </TurboSniperConfig>
       );
     }
+
+
+    /* ───────────────────── turboPaperTrader (Paper Turbo Sniper) ─ */
+    case "turboPaperTrader": {
+      const defaultTurboCfg = {
+        entryThreshold : 3,
+        volumeThreshold: 50_000,
+        priceWindow    : "1h",
+        volumeWindow   : "24h",
+        ...config,
+      };
+      return (
+        <PaperTurboTraderConfig
+          config={defaultTurboCfg}
+          setConfig={setConfig}
+          disabled={disabled}
+        >
+          {entryBlock /* always true for Turbo PaperTrader */}
+        </PaperTurboTraderConfig>
+      );
+    }
+
 
       case "stealthBot":
   return (

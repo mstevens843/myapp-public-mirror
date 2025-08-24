@@ -419,6 +419,14 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     quoteLatencyThresholdMs,
   } = meta;
 
+  // --- Paper mode detection ---
+  const __strat   = String((meta && meta.strategy) || "").trim().toLowerCase();
+  const __cat     = String((meta && meta.category) || "").trim().toLowerCase();
+  const __isPaper = (__strat === "paper trader" || __cat === "papertrader" ||
+                     (meta && meta.openTradeExtras && meta.openTradeExtras.isPaper === true) ||
+                     (meta && meta.dryRun === true));
+  const _strategyForRecord = __isPaper ? 'Paper Trader' : strategy;
+
    let _lastFee = { priority: undefined, tip: undefined };
 
   if (autoPriorityFee && cuPriceMicroLamportsMax && cuPriceMicroLamportsMin &&
@@ -648,7 +656,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
   // --- Dry-run short-circuit (no network) ---
   const isDryRun = simulated || Boolean(dryRun);
-  if (isDryRun) {
+  if (isDryRun && !__isPaper) {
     const expectedSlipPct =
       ((sizedQuote?.priceImpactPct ?? quote?.priceImpactPct ?? 0) * 100);
 
@@ -737,6 +745,21 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
     // Pre-send blockhash prewarm for first attempt
     await _preSendRefresh();
 
+    // Paper mode: return a deterministic fake hash, do not send on-chain
+    if (__isPaper) {
+      const fakeTx = `paper:${stableIdKey || 'sim'}:${Date.now()}`;
+      try {
+        const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
+        trackPendingTrade?.(fakeTx, mint, _strategyForRecord, {
+          slot: null, route: 'paper',
+          cuUsed: null, cuPrice: null, tip: null,
+          slippage: Number(localQuote?.slippage ?? effSlippage) || null,
+          fillPct: null, leadTime_ms: leadTime,
+        });
+      } catch (_) {}
+      return fakeTx;
+    }
+
     // Split-first: direct AMM for a percentage, remainder via router
     const firstPct = Number(directAmmFirstPct);
     if (Number.isFinite(firstPct) && firstPct > 0 && firstPct < 100) {
@@ -768,7 +791,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             usedDirect = true;
             metricsLogger.recordInclusion?.(endSlot - startSlot);
             try {
-              trackPendingTrade(directTx, mint, strategy, {
+              trackPendingTrade(directTx, mint, _strategyForRecord, {
                 slot: endSlot, route: 'direct',
                 cuUsed: null, cuPrice: undefined,
                 tip: undefined, slippage: effSlippage, fillPct: firstPct,
@@ -856,15 +879,15 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
 
             if (txHash) {
             // record the fees that actually got used
-            _lastFee.priority = fees.computeUnitPriceMicroLamports;
-            _lastFee.tip      = fees.tipLamports;
+            _lastFee.priority = pf.computeUnitPriceMicroLamports;
+            _lastFee.tip      = pf.tipLamports;
               inc('direct_fallback_ok_total', 1);
               metricsLogger.recordInclusion?.(endSlot - startSlot);
               metricsLogger.recordSuccess?.();
               usedDirect = true;
               const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
               try {
-                trackPendingTrade(txHash, mint, strategy, {
+                trackPendingTrade(txHash, mint, _strategyForRecord, {
                   slot: endSlot,
                   cuUsed: null,
                   cuPrice: pf.computeUnitPriceMicroLamports,
@@ -918,7 +941,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             metricsLogger.recordSuccess?.();
             const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
             try {
-              trackPendingTrade(txHash, mint, strategy, {
+              trackPendingTrade(txHash, mint, _strategyForRecord, {
                 slot: endSlot,
                 cuUsed: null,
                 cuPrice: fees.computeUnitPriceMicroLamports,
@@ -950,7 +973,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             metricsLogger.recordSuccess?.();
             const leadTime = meta && meta.detectedAt ? (Date.now() - meta.detectedAt) : null;
             try {
-              trackPendingTrade(txHash, mint, strategy, {
+              trackPendingTrade(txHash, mint, _strategyForRecord, {
                 slot: endSlot,
                 cuUsed: null,
                 cuPrice: pf.computeUnitPriceMicroLamports,
@@ -1176,7 +1199,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         inAmount: BigInt(sizedQuote.inAmount),
         outAmount: BigInt(sizedQuote.outAmount),
         closedOutAmount: BigInt(0),
-        strategy,
+        strategy: _strategyForRecord,
         txHash,
         userId,
         walletId,
@@ -1223,7 +1246,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           mint,
           walletId,
           userId,
-          strategy,
+          strategy: _strategyForRecord,
           tp,
           sl,
           tpPercent,
@@ -1329,7 +1352,7 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
           userId,
           walletId,
           meta: {
-            strategy,
+            strategy: _strategyForRecord,
             category,
             tpLadder: meta.tpLadder,
             tpPercent,
@@ -1406,6 +1429,31 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
         } catch { /* ignore */ }
       }
 
+      async function __persistPaperExit(reasonTag, sq) {
+        try {
+          const fakeTx = `paper-exit:${stableIdKey || 'sim'}:${Date.now()}`;
+          await prisma.trade.create({
+            data: {
+              userId, walletId,
+              mint,
+              type: "sell",
+              side: "sell",
+              strategy: "Paper Trader",
+              txHash: fakeTx,
+              inputMint: sellInputMint,
+              outputMint: sellOutputMint,
+              decimals: decimals ?? null,
+            },
+          });
+          try { recordExitReason?.(reasonTag || "paper"); recordTradeClosed?.(); } catch(_){}
+          await sendAlert?.("ui", `🧪 Paper Smart Exit (${reasonTag}) for ${mint}\n• Tx: ${fakeTx}`, "TurboSniper");
+          return fakeTx;
+        } catch (e) {
+          console.warn("paper-exit persist failed:", e.message);
+          return null;
+        }
+      }
+
       const intervalId = setInterval(async () => {
         const now = Date.now();
         // Bail out if watcher is no longer active or the global duration
@@ -1441,6 +1489,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             if (!sq || currentOut === null || currentOut < (initialOutAmount / 2n)) {
               // 🔹 metrics from simplified executor
               try { recordExitReason('lp-pull'); recordTradeClosed(); } catch (_) {}
+              if (__isPaper) {
+              await __persistPaperExit('lp-pull', sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1459,6 +1513,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
                 amount: String(sellAmount),
                 slippage: 5.0,
               });
+              if (__isPaper) {
+              await __persistPaperExit('authority-flip', sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
               await executeDelayedExit(exitQuote);
               active = false;
               clearInterval(intervalId);
@@ -1484,6 +1544,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             if (shouldExit) {
               // 🔹 metrics from simplified executor
               try { recordExitReason('smart-time'); recordTradeClosed(); } catch (_) {}
+              if (__isPaper) {
+              await __persistPaperExit('smart-time', sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1511,6 +1577,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             if (drop >= volDropPct) {
               // 🔹 metrics from simplified executor
               try { recordExitReason('smart-volume'); recordTradeClosed(); } catch (_) {}
+              if (__isPaper) {
+              await __persistPaperExit('smart-volume', sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1523,6 +1595,12 @@ async function execTrade({ quote, mint, meta, simulated = false }) {
             if (drop >= lpOutflowExitPct) {
               // 🔹 metrics from simplified executor
               try { recordExitReason('smart-liquidity'); recordTradeClosed(); } catch (_) {}
+              if (__isPaper) {
+              await __persistPaperExit('smart-liquidity', sq);
+              active = false;
+              clearInterval(intervalId);
+              return;
+            }
               await executeDelayedExit(sq);
               active = false;
               clearInterval(intervalId);
@@ -1690,9 +1768,8 @@ class TradeExecutorTurbo {
           smartExit: {
             time: { maxHoldSec: hasTime ? Number(smartExitTimeMins) * 60 : undefined },
             volume: {
-              volWindowSec: hasVol ? Number(smartVolLookbackSec) : undefined,
+              volWindowSec: hasVol ? Number(smartVolLookbackSec) : undefined },
               volDropPct  : hasVol ? Number(smartVolThreshold)   : undefined,
-            },
             liquidity: { lpOutflowExitPct: hasLiq ? Number(smartLiqDropPct) : undefined },
           },
         };

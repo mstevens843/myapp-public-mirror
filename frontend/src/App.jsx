@@ -326,33 +326,61 @@ rotationBot: (cfg, selectedWallets, _target, resolvedWallets, activeWallet) => {
    };
 },
 
-  paperTrader: (cfg, wallets, target, resolved, activeWallet) => {
-    const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
-    // Build the core config identical to Sniper but force dryRun
-    const core = {
-      ...base,
-      dryRun: true,
-      outputMint: cfg.outputMint,
-      maxSpendPerToken: safeNum(cfg.maxSpendPerToken ?? cfg.positionSize),
-      entryThreshold: safeNum(cfg.entryThreshold, 3),
-      volumeThreshold: safeNum(cfg.volumeThreshold, 50000),
-      priceWindow: cfg.priceWindow,
-      volumeWindow: cfg.volumeWindow,
-      tokenFeed: cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
-      minTokenAgeMinutes: cfg.minTokenAgeMinutes,
-      maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
-    };
-    return {
-      ...core,
-      ...(cfg.execModel ? { execModel: cfg.execModel } : {}),
-      ...(cfg.seed ? { seed: cfg.seed } : {}),
-      ...(cfg.slippageBpsCap != null && cfg.slippageBpsCap !== "" ? { slippageBpsCap: cfg.slippageBpsCap } : {}),
-      ...(cfg.latency && Object.keys(cfg.latency).length ? { latency: cfg.latency } : {}),
-      ...(cfg.failureRates && Object.keys(cfg.failureRates).length ? { failureRates: cfg.failureRates } : {}),
-      ...(cfg.partials && Object.keys(cfg.partials).length ? { partials: cfg.partials } : {}),
-      ...(cfg.enableShadowMode != null ? { enableShadowMode: cfg.enableShadowMode } : {}),
-    };
-  },
+paperTrader: (cfg, wallets, target, resolved, activeWallet) => {
+  const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
+  // Build core config identical to Sniper but force dryRun
+  const core = {
+    ...base,
+    dryRun: true,
+    outputMint: cfg.outputMint,
+    maxSpendPerToken: safeNum(cfg.maxSpendPerToken ?? cfg.positionSize),
+    entryThreshold: safeNum(cfg.entryThreshold, 3),
+    volumeThreshold: safeNum(cfg.volumeThreshold, 50000),
+    priceWindow: cfg.priceWindow,
+    volumeWindow: cfg.volumeWindow,
+    tokenFeed: cfg.tokenFeed || (cfg.monitoredTokens?.length ? undefined : "new"),
+    minTokenAgeMinutes: cfg.minTokenAgeMinutes,
+    maxTokenAgeMinutes: cfg.maxTokenAgeMinutes,
+  };
+
+  // ✨ mirror Sniper’s smart-exit wiring
+  const smartExitMode =
+    typeof cfg.smartExitMode === "string" ? cfg.smartExitMode : "off";
+
+  const smartExit =
+    cfg.timeMaxHoldSec || cfg.timeMinPnLBeforeTimeExitPct
+      ? {
+          time: {
+            maxHoldSec: Number(cfg.timeMaxHoldSec || 0),
+            minPnLBeforeTimeExitPct: Number(cfg.timeMinPnLBeforeTimeExitPct || 0),
+          },
+        }
+      : undefined;
+
+  const postBuyWatch =
+    cfg.intervalSec || cfg.authorityFlipExit || cfg.lpOutflowExitPct || cfg.rugDelayBlocks
+      ? {
+          intervalSec: Number(cfg.intervalSec ?? 5),
+          authorityFlipExit: !!cfg.authorityFlipExit,
+          lpOutflowExitPct: Number(cfg.lpOutflowExitPct ?? 50),
+          rugDelayBlocks: Number(cfg.rugDelayBlocks ?? 0),
+        }
+      : undefined;
+
+  return {
+    ...core,
+    ...(smartExitMode && smartExitMode !== "off" ? { smartExitMode } : {}),
+    ...(smartExit ? { smartExit } : {}),
+    ...(postBuyWatch ? { postBuyWatch } : {}),
+    ...(cfg.execModel ? { execModel: cfg.execModel } : {}),
+    ...(cfg.seed ? { seed: cfg.seed } : {}),
+    ...(cfg.slippageBpsCap != null && cfg.slippageBpsCap !== "" ? { slippageBpsCap: cfg.slippageBpsCap } : {}),
+    ...(cfg.latency && Object.keys(cfg.latency).length ? { latency: cfg.latency } : {}),
+    ...(cfg.failureRates && Object.keys(cfg.failureRates).length ? { failureRates: cfg.failureRates } : {}),
+    ...(cfg.partials && Object.keys(cfg.partials).length ? { partials: cfg.partials } : {}),
+    ...(cfg.enableShadowMode != null ? { enableShadowMode: cfg.enableShadowMode } : {}),
+  };
+},
 stealthBot: (cfg, selectedWallets, activeWallet)  => {
   const p = cfg._prefs || {};
   // Prefer the wallets chosen **inside** the Stealth-Bot modal.
@@ -478,7 +506,27 @@ scheduleLauncher: (cfg, wallets, target, resolved, activeWallet) => {
       }),
     };
   },
+    turboPaperTrader: (cfg, wallets, target, resolved, activeWallet) => {
+    const base = buildBaseConfig(cfg, wallets, target, resolved, activeWallet);
+    const turbo = CONFIG_BUILDERS.turboSniper(cfg, wallets, target, resolved, activeWallet);
+    // Merge but force dryRun and tag UI
+    return {
+      ...turbo,
+      ...base,            // keep base coherence
+      dryRun: true,
+      ui: Object.assign({}, (turbo.ui || {}), { label: "Turbo PaperTrader" }),
+      // Include optional simulation controls like PaperTrader
+      ...(cfg.execModel ? { execModel: cfg.execModel } : {}),
+      ...(cfg.seed ? { seed: cfg.seed } : {}),
+      ...(cfg.slippageBpsCap != null && cfg.slippageBpsCap !== "" ? { slippageBpsCap: cfg.slippageBpsCap } : {}),
+      ...(cfg.latency && Object.keys(cfg.latency).length ? { latency: cfg.latency } : {}),
+      ...(cfg.failureRates && Object.keys(cfg.failureRates).length ? { failureRates: cfg.failureRates } : {}),
+      ...(cfg.partials && Object.keys(cfg.partials).length ? { partials: cfg.partials } : {}),
+      ...(cfg.enableShadowMode != null ? { enableShadowMode: cfg.enableShadowMode } : {}),
+    };
+  },
 };
+
 
 
   export const getChatIdFromCookie = () => {

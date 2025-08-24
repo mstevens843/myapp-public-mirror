@@ -17,6 +17,7 @@ import {
   manualSell,
   updateTpSl,
   fetchWalletTokens,
+  getWalletSnapshotShared,
 } from "@/utils/api";
 import StrategyConfigLoader from "@/components/Strategy_Configs/StrategyConfigLoader";
 import {
@@ -93,14 +94,7 @@ const formatMinutes = (mins = 0) => {
 
 // fields that support a target token toggle
 const TARGETTABLE = [
-  "sniper",
-  "delayedSniper",
-  "breakout",
-  "dipBuyer",
-  "trendFollower",
-  "chadMode",
-  "turboSniper",
-];
+  "sniper", "delayedSniper", "breakout", "dipBuyer", "trendFollower", "chadMode", "turboSniper", "paperTrader", "turboPaperTrader", ];
 
 // map of strategy labels (ensure turbo + paperTrader present)
 const STRAT_LABEL_MAP = {
@@ -117,6 +111,7 @@ const STRAT_LABEL_MAP = {
   scheduleLauncher: "🕒 Schedule",
   turboSniper: "💨 Turbo Sniper",
   paperTrader: "📝 Paper Trader",
+  turboPaperTrader: "💨📝 Turbo Paper Trader",
 };
 
 // Optional fields for visual treatment
@@ -176,7 +171,7 @@ const ConfigPanel = ({
   fetchWalletBalance,
   selectedMode,
   setSelectedMode,
-  selectedWallets = [], // 🔧 fix invalid default in original
+  selectedWallets = [], 
   selectedModes,
   setSelectedModes,
   autoRestart,
@@ -312,6 +307,7 @@ const ConfigPanel = ({
     rotationBot: [...ROTATION_FIELDS, "slippage"],
     stealthBot: [...STEALTH_FIELDS, "slippage"],
     paperTrader: [...BASE_FIELDS, "entryThreshold", "volumeThreshold"],
+    turboPaperTrader: [...BASE_FIELDS, ...TURBO_SNIPER_FIELDS],
   };
 
   /* ───── helper: list whatever is still blank ───── */
@@ -342,6 +338,7 @@ const ConfigPanel = ({
     { value: "delayedSniper", label: "⏱️ Delayed Sniper" },
     { value: "trendFollower", label: "📈 Trend Follower" },
     { value: "paperTrader", label: "📝 Paper Trader" },
+    { value: "turboPaperTrader", label: "💨📝 Turbo Paper Trader" },
     { value: "rebalancer", label: "⚖️ Rebalancer" },
     { value: "rotationBot", label: "🔁 Rotation Bot" },
     { value: "stealthBot", label: "🥷 Stealth Bot" },
@@ -601,14 +598,31 @@ const ConfigPanel = ({
       return;
     }
 
-    console.log("📡 Fetching wallet tokens for:", activeWalletId);
-    const fetch = async () => {
-      const tokens = await fetchWalletTokens(activeWalletId);
-      console.log("✅ Tokens fetched:", tokens);
-      setWalletTokens(tokens);
-    };
-    fetch();
-  }, [activeWalletId]);
+let alive = true;
+  (async () => {
+    try {
+      const snap = await getWalletSnapshotShared();
+      const list = (snap?.tokenValues || [])
+        // keep SOL even if small; keep anything >= $1
+        .filter(t => t?.mint && (t.mint === SOL_MINT || (t.valueUSD ?? 0) >= 1))
+        .map(t => ({
+          mint: t.mint,
+          amount: Number(t.amount ?? 0),
+          price: Number(t.price ?? 0),
+          valueUsd: Number(t.valueUSD ?? 0),
+          name: t.name || `${t.mint.slice(0,4)}…${t.mint.slice(-4)}`,
+          symbol: t.symbol || "",
+          logo: t.logo || "",
+        }));
+      if (alive) setWalletTokens(list);
+    } catch (err) {
+      console.warn("ConfigPanel snapshot read failed:", err);
+      if (alive) setWalletTokens([]);
+    }
+  })();
+
+  return () => { alive = false; };
+}, [activeWalletId]);
 
   /* ── fixed presets for the interval dropdown ── */
   const INTERVAL_PRESETS = [

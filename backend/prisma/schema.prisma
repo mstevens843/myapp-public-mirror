@@ -185,7 +185,7 @@ model Trade {
   updatedAt       DateTime  @updatedAt @default(now())
   inputMint       String?  
   outputMint      String?
-
+   extras        Json?
   // ADD ↓↓↓
   userId          String
   createdAt       DateTime  @default(now())
@@ -214,6 +214,7 @@ model Trade {
   simFillPrice          Decimal?
   slippageBps           Int?
   reasonCode            String?
+  
 }
 
 model ClosedTrade {

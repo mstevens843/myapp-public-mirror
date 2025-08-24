@@ -477,53 +477,220 @@ function validateScalper(cfg = {}) {
 }
 
 /* ───── Paper Trader ────────────────────────────────────────────────── */
+/* ───── Paper Trader ────────────────────────────────────────────────── */
 function validatePaperTrader(cfg = {}) {
   const errors = validateSharedConfig(cfg);
   validateTokenFeed(cfg, "PaperTrader", errors);
   requireTokenFeed(cfg, "PaperTrader", errors);
 
+  // Core filters parity
   if (!isUnset(cfg.entryThreshold)) {
-    if (
-      !isNumeric(cfg.entryThreshold) ||
-      toNum(cfg.entryThreshold) < 0 ||
-      toNum(cfg.entryThreshold) > 100
-    )
+    if (!isNumeric(cfg.entryThreshold) || toNum(cfg.entryThreshold) < 0 || toNum(cfg.entryThreshold) > 100) {
       errors.push("PaperTrader: entryThreshold must be between 0 and 100 %");
+    }
   }
-
   if (!isUnset(cfg.volumeThreshold)) {
-    if (!isNumeric(cfg.volumeThreshold) || toNum(cfg.volumeThreshold) < 0)
+    if (!isNumeric(cfg.volumeThreshold) || toNum(cfg.volumeThreshold) < 0) {
       errors.push("PaperTrader: volumeThreshold (USD) must be ≥ 0");
+    }
   }
 
+  // Optional caps (match Sniper)
+  ["minMarketCap", "maxMarketCap"].forEach((k) => {
+    if (!isUnset(cfg[k]) && (!isNumeric(cfg[k]) || toNum(cfg[k]) < 0)) {
+      errors.push(`PaperTrader: ${k} must be ≥ 0 USD`);
+    }
+  });
+
+  // Token-age windows (same rules)
+  ["minTokenAgeMinutes", "maxTokenAgeMinutes"].forEach((k) => {
+    if (!isUnset(cfg[k])) {
+      try {
+        parseMinutes(cfg[k], { floor: 1, ceil: 1440 });
+      } catch (e) {
+        errors.push(`${k} ${e.message}`);
+      }
+    }
+  });
+
+  // Execution & limits
   if (!isUnset(cfg.maxDailyTrades)) {
-    if (!Number.isInteger(toNum(cfg.maxDailyTrades)) || toNum(cfg.maxDailyTrades) < 1)
+    if (!Number.isInteger(toNum(cfg.maxDailyTrades)) || toNum(cfg.maxDailyTrades) < 1) {
       errors.push("PaperTrader: maxDailyTrades must be an integer ≥ 1");
+    }
   }
-
+  if (!isUnset(cfg.haltOnFailures)) {
+    if (!Number.isInteger(toNum(cfg.haltOnFailures)) || toNum(cfg.haltOnFailures) < 1) {
+      errors.push("PaperTrader: haltOnFailures must be an integer ≥ 1");
+    }
+  }
   if (!isUnset(cfg.cooldown)) {
-    if (!isNumeric(cfg.cooldown) || toNum(cfg.cooldown) < 0)
-      errors.push("PaperTrader: cooldown must be ≥ 0 ms");
+    if (!isNumeric(cfg.cooldown) || toNum(cfg.cooldown) < 0) {
+      errors.push("PaperTrader: cooldown must be ≥ 0 seconds");
+    }
+  }
+  if (!isUnset(cfg.delayBeforeBuyMs)) {
+    if (!isNumeric(cfg.delayBeforeBuyMs) || toNum(cfg.delayBeforeBuyMs) < 0) {
+      errors.push("PaperTrader: delayBeforeBuyMs must be ≥ 0 ms");
+    }
+  }
+  if (!isUnset(cfg.priorityFeeLamports)) {
+    if (!Number.isInteger(toNum(cfg.priorityFeeLamports)) || toNum(cfg.priorityFeeLamports) < 0) {
+      errors.push("PaperTrader: priorityFeeLamports must be an integer ≥ 0");
+    }
+  }
+  if (!isUnset(cfg.maxSlippage)) {
+    if (!isNumeric(cfg.maxSlippage) || toNum(cfg.maxSlippage) < 0 || toNum(cfg.maxSlippage) > 10) {
+      errors.push("PaperTrader: maxSlippage must be between 0 % and 10 %");
+    }
+  }
+  if (!isUnset(cfg.minPoolUsd)) {
+    if (!isNumeric(cfg.minPoolUsd) || toNum(cfg.minPoolUsd) < 0) {
+      errors.push("PaperTrader: minPoolUsd must be ≥ 0 USD");
+    }
   }
 
-  // ✨ Added in paper-sim-upgrade
-  // Simulation specific validations.  These options are entirely
-  // optional and default values are supplied by the backend.  When
-  // present we enforce basic sanity checks to prevent invalid
-  // configurations from reaching the simulator.
+  // Exit Strategy parity (smartExitMode / smartExit / postBuyWatch)
+  if (!isUnset(cfg.smartExitMode)) {
+    const mode = String(cfg.smartExitMode).toLowerCase();
+    const allowed = ["off", "time", "liquidity"];
+    if (!allowed.includes(mode)) {
+      errors.push('PaperTrader: smartExitMode must be one of "off"|"time"|"liquidity"');
+    }
+  }
+
+  // smartExit (nested) — time branch
+  if (!isUnset(cfg.smartExit)) {
+    if (typeof cfg.smartExit !== "object" || Array.isArray(cfg.smartExit)) {
+      errors.push("PaperTrader: smartExit must be an object");
+    } else if (!isUnset(cfg.smartExit.time)) {
+      const t = cfg.smartExit.time;
+      if (typeof t !== "object" || Array.isArray(t)) {
+        errors.push("PaperTrader: smartExit.time must be an object");
+      } else {
+        if (!isUnset(t.maxHoldSec)) {
+          if (!Number.isInteger(toNum(t.maxHoldSec)) || toNum(t.maxHoldSec) < 1) {
+            errors.push("PaperTrader: smartExit.time.maxHoldSec must be an integer ≥ 1");
+          }
+        }
+        if (!isUnset(t.minPnLBeforeTimeExitPct)) {
+          const v = toNum(t.minPnLBeforeTimeExitPct);
+          if (!isNumeric(v) || v < -100 || v > 100) {
+            errors.push("PaperTrader: smartExit.time.minPnLBeforeTimeExitPct must be between -100 and 100");
+          }
+        }
+      }
+    }
+  }
+
+  // If mode is "time", require maxHoldSec (nested or flat)
+  if (String(cfg.smartExitMode || "").toLowerCase() === "time") {
+    const t = cfg.smartExit && cfg.smartExit.time;
+    const have = t && isNumeric(t.maxHoldSec) && toNum(t.maxHoldSec) >= 1;
+    const haveFlat = isNumeric(cfg.timeMaxHoldSec) && toNum(cfg.timeMaxHoldSec) >= 1;
+    if (!have && !haveFlat) {
+      errors.push("PaperTrader: smartExitMode=time requires smartExit.time.maxHoldSec ≥ 1 (or timeMaxHoldSec)");
+    }
+  }
+
+  // postBuyWatch (nested)
+  if (!isUnset(cfg.postBuyWatch)) {
+    if (typeof cfg.postBuyWatch !== "object" || Array.isArray(cfg.postBuyWatch)) {
+      errors.push("PaperTrader: postBuyWatch must be an object");
+    } else {
+      const w = cfg.postBuyWatch;
+      if (!isUnset(w.intervalSec)) {
+        if (!Number.isInteger(toNum(w.intervalSec)) || toNum(w.intervalSec) < 1) {
+          errors.push("PaperTrader: postBuyWatch.intervalSec must be an integer ≥ 1");
+        }
+      }
+      if (!isUnset(w.authorityFlipExit) && typeof w.authorityFlipExit !== "boolean") {
+        errors.push("PaperTrader: postBuyWatch.authorityFlipExit must be boolean");
+      }
+      if (!isUnset(w.lpOutflowExitPct)) {
+        const v = toNum(w.lpOutflowExitPct);
+        if (!isNumeric(v) || v < 0 || v > 100) {
+          errors.push("PaperTrader: postBuyWatch.lpOutflowExitPct must be between 0 and 100");
+        }
+      }
+      if (!isUnset(w.rugDelayBlocks)) {
+        if (!Number.isInteger(toNum(w.rugDelayBlocks)) || toNum(w.rugDelayBlocks) < 0) {
+          errors.push("PaperTrader: postBuyWatch.rugDelayBlocks must be an integer ≥ 0");
+        }
+      }
+    }
+  }
+
+  // If mode is liquidity, require LP-outflow threshold (nested or flat, > 0)
+  if (String(cfg.smartExitMode || "").toLowerCase() === "liquidity") {
+    const w = cfg.postBuyWatch;
+    const haveNested =
+      w && !isUnset(w.lpOutflowExitPct) && isNumeric(w.lpOutflowExitPct) &&
+      toNum(w.lpOutflowExitPct) > 0 && toNum(w.lpOutflowExitPct) <= 100;
+    const haveFlat =
+      !isUnset(cfg.lpOutflowExitPct) && isNumeric(cfg.lpOutflowExitPct) &&
+      toNum(cfg.lpOutflowExitPct) > 0 && toNum(cfg.lpOutflowExitPct) <= 100;
+    if (!haveNested && !haveFlat) {
+      errors.push("PaperTrader: smartExitMode=liquidity requires lpOutflowExitPct (1–100)");
+    }
+  }
+
+  // Flat fallbacks (back-compat), validate if provided
+  if (isNumeric(cfg.timeMaxHoldSec) && toNum(cfg.timeMaxHoldSec) < 1) {
+    errors.push("PaperTrader: timeMaxHoldSec must be ≥ 1 when provided");
+  }
+  if (!isUnset(cfg.timeMinPnLBeforeTimeExitPct)) {
+    const v = toNum(cfg.timeMinPnLBeforeTimeExitPct);
+    if (!isNumeric(v) || v < -100 || v > 100) {
+      errors.push("PaperTrader: timeMinPnLBeforeTimeExitPct must be between -100 and 100");
+    }
+  }
+  if (!isUnset(cfg.intervalSec)) {
+    if (!Number.isInteger(toNum(cfg.intervalSec)) || toNum(cfg.intervalSec) < 1) {
+      errors.push("PaperTrader: intervalSec must be an integer ≥ 1");
+    }
+  }
+  if (!isUnset(cfg.lpOutflowExitPct)) {
+    const v = toNum(cfg.lpOutflowExitPct);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("PaperTrader: lpOutflowExitPct must be between 0 and 100");
+    }
+  }
+  if (!isUnset(cfg.rugDelayBlocks)) {
+    if (!Number.isInteger(toNum(cfg.rugDelayBlocks)) || toNum(cfg.rugDelayBlocks) < 0) {
+      errors.push("PaperTrader: rugDelayBlocks must be an integer ≥ 0");
+    }
+  }
+  if (!isUnset(cfg.authorityFlipExit) && typeof cfg.authorityFlipExit !== "boolean") {
+    errors.push("PaperTrader: authorityFlipExit must be boolean");
+  }
+
+  // TP/SL sell amounts (optional)
+  if (!isUnset(cfg.tpPercent)) {
+    const v = toNum(cfg.tpPercent);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("PaperTrader: tpPercent must be between 0 and 100");
+    }
+  }
+  if (!isUnset(cfg.slPercent)) {
+    const v = toNum(cfg.slPercent);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("PaperTrader: slPercent must be between 0 and 100");
+    }
+  }
+
+  // Simulation (unchanged)
   if (!isUnset(cfg.execModel)) {
     const allowed = ["ideal", "amm_depth", "jito_fallback"];
     if (!allowed.includes(cfg.execModel)) {
       errors.push("PaperTrader: execModel must be 'ideal', 'amm_depth' or 'jito_fallback'");
     }
   }
-
   if (!isUnset(cfg.slippageBpsCap)) {
     if (!isNumeric(cfg.slippageBpsCap) || toNum(cfg.slippageBpsCap) < 0) {
       errors.push("PaperTrader: slippageBpsCap must be a number ≥ 0");
     }
   }
-
   if (cfg.latency !== undefined) {
     if (typeof cfg.latency !== "object") {
       errors.push("PaperTrader: latency must be an object with quoteMs, buildMs, sendMs and landMs");
@@ -536,7 +703,6 @@ function validatePaperTrader(cfg = {}) {
       });
     }
   }
-
   if (cfg.failureRates !== undefined) {
     if (typeof cfg.failureRates !== "object") {
       errors.push("PaperTrader: failureRates must be an object");
@@ -548,7 +714,6 @@ function validatePaperTrader(cfg = {}) {
       });
     }
   }
-
   if (cfg.partials !== undefined) {
     if (typeof cfg.partials !== "object") {
       errors.push("PaperTrader: partials must be an object");
@@ -570,27 +735,21 @@ function validatePaperTrader(cfg = {}) {
       }
     }
   }
-
   if (!isUnset(cfg.enableShadowMode)) {
     if (typeof cfg.enableShadowMode !== "boolean") {
       errors.push("PaperTrader: enableShadowMode must be a boolean");
     }
   }
-
-  if (!isUnset(cfg.seed)) {
-    if (typeof cfg.seed !== "string") {
-      errors.push("PaperTrader: seed must be a string");
-    }
+  if (!isUnset(cfg.seed) && typeof cfg.seed !== "string") {
+    errors.push("PaperTrader: seed must be a string");
   }
-
-  if (!isUnset(cfg.paperRunId)) {
-    if (typeof cfg.paperRunId !== "string") {
-      errors.push("PaperTrader: paperRunId must be a string");
-    }
+  if (!isUnset(cfg.paperRunId) && typeof cfg.paperRunId !== "string") {
+    errors.push("PaperTrader: paperRunId must be a string");
   }
 
   return errors;
 }
+
 
 /* ───── Breakout ─────────────────────────────────────────────────────── */
 function validateBreakout(cfg = {}) {
@@ -1814,6 +1973,139 @@ function validateTurboSniper(cfg = {}) {
   return errors;
 }
 
+
+
+/* ───── Turbo PaperTrader ─────────────────────────────────────────────── */
+/**
+ * Validate Turbo PaperTrader configs.
+ * Builds on validatePaperTrader and adds the "turbo" fields and semantics
+ * (smartExitMode including "volume", flat smart-exit aliases, LP gate,
+ * and extra toggles used by turbo strategies).
+ * Returns an array of human-readable error strings.
+ */
+function validateTurboPaperTrader(cfg = {}) {
+  const base = typeof validatePaperTrader === "function" ? validatePaperTrader(cfg) : [];
+  const errors = Array.isArray(base) ? base.slice() : [];
+
+  // Normalize SmartExit mode (allow "off" to behave like "none")
+  const raw = cfg.smartExitMode ?? "";
+  const norm = String(raw).toLowerCase();
+  const mode = (norm === "off" || norm === "") ? "none" : norm;
+
+  const allowedModes = ["none", "time", "volume", "liquidity"];
+  if (cfg.smartExitMode !== undefined && !allowedModes.includes(mode)) {
+    errors.push('TurboPaperTrader: smartExitMode must be one of "none"|"time"|"volume"|"liquidity" (or "off")');
+  }
+
+  /* LP gate (PaperTrader already checks minPoolUsd; add maxPriceImpactPct) */
+  if (!isUnset(cfg.minPoolUsd)) {
+    const v = toNum(cfg.minPoolUsd);
+    if (!isNumeric(v) || v < 0) errors.push("TurboPaperTrader: minPoolUsd must be ≥ 0 USD");
+  }
+  if (!isUnset(cfg.maxPriceImpactPct)) {
+    const v = toNum(cfg.maxPriceImpactPct);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("TurboPaperTrader: maxPriceImpactPct must be between 0 and 100");
+    }
+  }
+
+  /* TIME mode: accept nested (smartExit.time.maxHoldSec), legacy timeMaxHoldSec, or turbo flat smartExitTimeMins */
+  if (mode === "time") {
+    const nested = cfg.smartExit && cfg.smartExit.time;
+    const haveNested = nested && isNumeric(nested.maxHoldSec) && toNum(nested.maxHoldSec) >= 1;
+    const haveFlatLegacy = isNumeric(cfg.timeMaxHoldSec) && toNum(cfg.timeMaxHoldSec) >= 1;
+    const haveFlatTurbo = isNumeric(cfg.smartExitTimeMins) && toNum(cfg.smartExitTimeMins) >= 1 && toNum(cfg.smartExitTimeMins) <= 1440;
+    if (!haveNested && !haveFlatLegacy && !haveFlatTurbo) {
+      errors.push("TurboPaperTrader: smartExitMode=time requires smartExit.time.maxHoldSec ≥ 1, or timeMaxHoldSec, or smartExitTimeMins (1–1440).");
+    }
+    if (haveFlatTurbo) {
+      const v = toNum(cfg.smartExitTimeMins);
+      if (v < 1 || v > 1440) errors.push("TurboPaperTrader: smartExitTimeMins must be 1–1440 minutes");
+    }
+    if (!isUnset(cfg.timeMinPnLBeforeTimeExitPct)) {
+      const v = toNum(cfg.timeMinPnLBeforeTimeExitPct);
+      if (!isNumeric(v) || v < -100 || v > 100) {
+        errors.push("TurboPaperTrader: timeMinPnLBeforeTimeExitPct must be between -100 and 100");
+      }
+    }
+  }
+
+  /* VOLUME mode: turbo-only fields */
+  if (mode === "volume") {
+    const lb = toNum(cfg.smartVolLookbackSec);
+    const th = toNum(cfg.smartVolThreshold);
+    if (!isNumeric(lb) || lb < 5 || lb > 600) {
+      errors.push("TurboPaperTrader: smartVolLookbackSec must be 5–600 seconds");
+    }
+    if (!isNumeric(th) || th < 0) {
+      errors.push("TurboPaperTrader: smartVolThreshold must be ≥ 0 (quote units)");
+    }
+  }
+
+  /* LIQUIDITY mode: prefer turbo fields; allow legacy lpOutflowExitPct fallback */
+  if (mode === "liquidity") {
+    const lb = toNum(cfg.smartLiqLookbackSec);
+    const dp = toNum(cfg.smartLiqDropPct);
+    const liqOk = isNumeric(lb) && lb >= 5 && lb <= 600 && isNumeric(dp) && dp >= 0 && dp <= 100;
+    const w = cfg.postBuyWatch;
+    const lpNested =
+      w && !isUnset(w.lpOutflowExitPct) && isNumeric(w.lpOutflowExitPct) &&
+      toNum(w.lpOutflowExitPct) > 0 && toNum(w.lpOutflowExitPct) <= 100;
+    const lpFlat =
+      !isUnset(cfg.lpOutflowExitPct) && isNumeric(cfg.lpOutflowExitPct) &&
+      toNum(cfg.lpOutflowExitPct) > 0 && toNum(cfg.lpOutflowExitPct) <= 100;
+    if (!liqOk && !lpNested && !lpFlat) {
+      errors.push("TurboPaperTrader: smartExitMode=liquidity requires smartLiqLookbackSec (5–600) and smartLiqDropPct (0–100), or an lpOutflowExitPct (1–100).");
+    }
+  }
+
+  /* Additional turbo toggles (optional) */
+  [
+    "ghostMode",
+    "multiBuy",
+    "prewarmAccounts",
+    "multiRoute",
+    "autoRug",
+    "useJitoBundle",
+    "autoPriorityFee",
+    "killSwitch",
+    "poolDetection",
+    "splitTrade",
+    "turboMode",
+    "autoRiskManage",
+    "cuAdapt",
+    "skipPreflight",
+    "directAmmFallback",
+  ].forEach((k) => {
+    if (cfg[k] !== undefined && typeof cfg[k] !== "boolean") {
+      errors.push(`TurboPaperTrader: ${k} must be boolean`);
+    }
+  });
+
+  if (!isUnset(cfg.multiBuyCount)) {
+    if (!Number.isInteger(toNum(cfg.multiBuyCount)) || toNum(cfg.multiBuyCount) < 1 || toNum(cfg.multiBuyCount) > 3) {
+      errors.push("TurboPaperTrader: multiBuyCount must be an integer between 1 and 3");
+    }
+  }
+
+  if (!isUnset(cfg.jitoTipLamports)) {
+    if (!Number.isInteger(toNum(cfg.jitoTipLamports)) || toNum(cfg.jitoTipLamports) < 0) {
+      errors.push("TurboPaperTrader: jitoTipLamports must be an integer ≥ 0");
+    }
+  }
+
+  if (!isUnset(cfg.trailingStopPct)) {
+    const v = toNum(cfg.trailingStopPct);
+    if (!isNumeric(v) || v < 0 || v > 100) {
+      errors.push("TurboPaperTrader: trailingStopPct must be between 0 and 100");
+    }
+  }
+
+  return errors;
+}
+
+
+
 /* ---------- map of strategy → validator (guarded) -------------------- */
 const VALIDATORS = {
   sniper: (typeof validateSniper !== "undefined" ? validateSniper : undefined),
@@ -1830,6 +2122,7 @@ const VALIDATORS = {
   stealthbot: (typeof validateStealthBot !== "undefined" ? validateStealthBot : undefined),
   schedulelauncher: (typeof validateScheduleLauncher !== "undefined" ? validateScheduleLauncher : undefined),
   turboSniper: (typeof validateTurboSniper !== "undefined" ? validateTurboSniper : undefined),
+  turbopapertrader: (typeof validateTurboPaperTrader !== "undefined" ? validateTurboPaperTrader : undefined),
 };
 
 /* ---------- main entry point ----------------------------------------- */

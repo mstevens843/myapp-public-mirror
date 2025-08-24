@@ -40,7 +40,9 @@ export default function StrategyTooltip({ name, text }) {
     briberyAmount:
       "Validator tip (lamports) used by some routers to improve inclusion during congestion.",
     mevMode:
-      "Execution preference: 'fast' prioritizes throughput; 'secure' emphasizes front‑run resistance.",
+      "Execution preference: 'fast' prioritizes throughput; 'secure' emphasizes front-run resistance.",
+    delayBeforeBuyMs:
+      "Delay (milliseconds) before sending the buy after conditions are met. Useful to avoid chasing the first spike.",
 
     /* ───────────────────── Safety Checks (generic) ───────────────────── */
     safetyChecks:
@@ -61,8 +63,6 @@ export default function StrategyTooltip({ name, text }) {
       "Minimum recent trading volume (SOL or USD) required to qualify. Filters out illiquid tokens.",
     interval:
       "Scan interval in seconds. Lower = more frequent scans (and higher resource usage).",
-    maxTrades:
-      "Maximum number of trades allowed per day.",
     priceWindow:
       "Short look-back window (minutes) for micro-moves. Typical: 1–5 minutes.",
     pumpWindow:
@@ -90,7 +90,7 @@ export default function StrategyTooltip({ name, text }) {
     outputMint:
       "Mint address of the token to buy (destination token).",
     targetTokens:
-      "Enable multi‑sniping. Paste one mint per line. The bot will scan multiple targets.",
+      "Enable multi-sniping. Paste one mint per line. The bot will scan multiple targets.",
     minVolumeRequired:
       "Minimum liquidity (USD) required. Helps avoid low-liquidity rugs.",
     skipSafetyChecks:
@@ -166,9 +166,9 @@ export default function StrategyTooltip({ name, text }) {
     cuAdapt:
       "If ON, adjust compute-unit price between attempts when the chain is busy.",
     cuPriceMicroLamportsMin:
-      "Minimum compute-unit price (in micro‑lamports) to start with.",
+      "Minimum compute-unit price (in micro-lamports) to start with.",
     cuPriceMicroLamportsMax:
-      "Maximum compute-unit price (in micro‑lamports) the bot is allowed to reach.",
+      "Maximum compute-unit price (in micro-lamports) the bot is allowed to reach.",
     tipCurve:
       "Tip escalation strategy across retries. Example: 'linear' or 'exp'.",
 
@@ -208,7 +208,7 @@ export default function StrategyTooltip({ name, text }) {
     rpcMaxErrors:
       "Max consecutive RPC errors before removing an endpoint from rotation temporarily.",
     allowedDexes:
-      "Comma-separated DEX names to include when routing trades (e.g., Raydium,Orca,Meteora).",
+      "Comma-separated DEX names to include when routing (e.g., Raydium,Orca,Meteora).",
     excludedDexes:
       "Comma-separated DEX names to exclude from routing (e.g., Step,Crema).",
     splitTrade:
@@ -252,7 +252,7 @@ export default function StrategyTooltip({ name, text }) {
     "postBuyWatch.authorityFlipExit":
       "If ON, exit when token authority flips (owner changes). Often a rug signal.",
     "postBuyWatch.rugDelayBlocks":
-      "Blocks to wait before exiting after a rug/suspicious LP pull. Allows a brief confirmation window.",
+      "Blocks to wait before exiting after a rug/suspicious LP pull. 1 block about .4 sec. Allows a brief confirmation window.",
 
     /* ─────────────── Take-Profit & Trail ─────────────── */
     tpLadder:
@@ -270,7 +270,7 @@ export default function StrategyTooltip({ name, text }) {
 
     /* ─────────────── Smart Exit (alpha) ─────────────── */
     smartExitMode:
-      "Exit logic type: time-based, volume-based, or liquidity-based. Chooses which signals drive the exit.",
+      "Exit logic type: time-based or liquidity-based. Chooses which signals drive the exit.",
     smartExitTimeMins:
       "Number of minutes to hold before exiting when using a time-based smart exit.",
     smartVolLookbackSec:
@@ -282,47 +282,19 @@ export default function StrategyTooltip({ name, text }) {
     smartLiqDropPct:
       "Percent liquidity drop that triggers a smart-exit sell.",
 
-    /* ─────────────── Retry / Failover ─────────────── */
-    retryPolicy:
-      "How the bot retries failed transactions (max attempts, how to bump fees, when to switch routes/RPCs).",
-    "retryPolicy.max":
-      "Maximum number of retry attempts before giving up.",
-    "retryPolicy.bumpCuStep":
-      "Increase in compute-unit price per retry attempt.",
-    "retryPolicy.bumpTipStep":
-      "Increase in validator tip per retry attempt.",
-    "retryPolicy.routeSwitch":
-      "If ON, allow switching to a different routing path on retries.",
-    "retryPolicy.rpcFailover":
-      "If ON, rotate to a different RPC endpoint when repeated failures occur.",
-
-    /* ─────────────── Misc advanced (optional surface) ─────────────── */
-    privateRelay:
-      "Use a private relay to submit transactions privately (avoid public mempool).",
-    idempotency:
-      "If ON, attach a unique idempotency key to avoid duplicate submissions.",
-    cuPriceCurve:
-      "Compute-unit price curve coefficients (advanced). Example: [5000, 1000] for base 5000 + 1000/attempt.",
-    tipCurveCoefficients:
-      "Tip curve coefficients controlling per-attempt validator tips (advanced).",
-    riskLevels:
-      "Map heuristic outcomes to actions (e.g., reduce size, abort, warn). Advanced users only.",
+    /* ✅ Added for SniperConfig fields */
+    intervalSec:
+      "How often Smart Exit checks conditions (seconds). Lower = faster reaction; slightly higher resource usage.",
+    lpOutflowExitPct:
+      "Safety net against liquidity rugs. If the simulated sell-back value falls below this % of your entry value, the bot exits immediately to salvage funds.",
+    authorityFlipExit:
+      "Exit if the token’s mint/freeze authority flips (owner/authority change) after your buy — a common rug signal.",
+    timeMaxHoldSec:
+      "Maximum time to hold the position (seconds) when Smart Exit mode is 'time'. Exit once this limit is reached.",
+    timeMinPnLBeforeTimeExitPct:
+      "Optional PnL floor for time-based exit. Example: 5 means only exit after you’re at least +5% up.",
     rugDelayBlocks:
-      "Blocks to wait before exiting after a suspected rug. See also postBuyWatch.rugDelayBlocks.",
-    multiWallet:
-      "Number of funded wallets to rotate when sniping (one fill attempt per wallet).",
-
-    /* Optional integrations / sources (if surfaced) */
-    feeds:
-      "List of external feeds to consult (advanced).",
-    slippageAuto:
-      "Automatically compute slippage from recent volatility (advanced).",
-    postTx:
-      "Post-transaction actions such as confirmations or cleanups (advanced).",
-    pumpfun:
-      "Include Pump.fun sources/heuristics when enabled (advanced).",
-    airdrops:
-      "Track or filter airdrop-related tokens when enabled (advanced).",
+      "Blocks to wait before exiting after a suspected rug. Use 0 to exit immediately on signal.",
   };
 
   const content = text || lookup[name] || "Tooltip coming soon.";

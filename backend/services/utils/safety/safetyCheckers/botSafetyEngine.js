@@ -30,19 +30,19 @@ async function runBotSafetyChecks(mint, filters = {}) {
 
   results.simulation = want.simulation
     ? await simulateAndCheckSwap(mint)
-    : { key: "simulation", label: "Honeypot / Illiquidity", passed: true, reason: "Skipped", detail: null };
+ : { key: "simulation", label: "Honeypot / Illiquidity", passed: true, reason: "Skipped", skipped: true, detail: null };
 
   results.liquidity = want.liquidity
     ? await checkBirdeyeLiquidity(mint)
-    : { key: "liquidity", label: "Liquidity", passed: true, reason: "Skipped", detail: null };
+ : { key: "liquidity", label: "Liquidity", passed: true, reason: "Skipped", skipped: true, detail: null };
 
   results.authority = want.authority
     ? await checkMintAuthoritiesHybrid(mint)
-    : { key: "authority", label: "Mint / Freeze Authority", passed: true, reason: "Skipped", detail: null };
+ : { key: "authority", label: "Mint / Freeze Authority", passed: true, reason: "Skipped", skipped: true, detail: null };
 
   results.topHolders = want.topHolders
     ? await getTopHolderStats(mint)
-    : { key: "topHolders", label: "Whale Concentration", passed: true, reason: "Skipped", detail: null };
+ : { key: "topHolders", label: "Whale Concentration", passed: true, reason: "Skipped", skipped: true, detail: null };
 
   return { passed: Object.values(results).every(r => r.passed), ...results };
 }

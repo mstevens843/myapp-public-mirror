@@ -429,56 +429,7 @@ const ExitStrategyTab = React.memo(function ExitStrategyTab({
 }) {
   return (
     <Section>
-            {/* TP/SL Sell Amounts */}
-      <Card title="TP / SL Sell Amounts">
-        {requiredOnly ? (
-          <RequiredOnlyPlaceholder />
-        ) : (
-          <div className="grid gap-4">
-            {/* TP Sell Amount (%) */}
-            <div className="space-y-1">
-              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                <span>TP Sell Amount (%)</span>
-                <StrategyTooltip name="tpPercent" />
-              </div>
-              <div className={FIELD_WRAP}>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  name="tpPercent"
-                  value={view.tpPercent ?? ""}
-                  onChange={handleChange}
-                  onBlur={handleBlur("tpPercent")}
-                  disabled={disabled}
-                  placeholder="e.g. 100"
-                  className={INP}
-                />
-              </div>
-            </div>
 
-            {/* SL Sell Amount (%) */}
-            <div className="space-y-1">
-              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
-                <span>SL Sell Amount (%)</span>
-                <StrategyTooltip name="slPercent" />
-              </div>
-              <div className={FIELD_WRAP}>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  name="slPercent"
-                  value={view.slPercent ?? ""}
-                  onChange={handleChange}
-                  onBlur={handleBlur("slPercent")}
-                  disabled={disabled}
-                  placeholder="e.g. 100"
-                  className={INP}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-      </Card>
       <Card title="Smart Exit">
         {requiredOnly ? (
           <RequiredOnlyPlaceholder />
@@ -629,6 +580,57 @@ const ExitStrategyTab = React.memo(function ExitStrategyTab({
                   onBlur={handleBlur("timeMinPnLBeforeTimeExitPct")}
                   disabled={disabled}
                   placeholder="e.g. 0"
+                  className={INP}
+                />
+              </div>
+            </div>
+          </div>
+        )}
+      </Card>
+
+                  {/* TP/SL Sell Amounts */}
+      <Card title="TP / SL Sell Amounts">
+        {requiredOnly ? (
+          <RequiredOnlyPlaceholder />
+        ) : (
+          <div className="grid gap-4">
+            {/* TP Sell Amount (%) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>TP Sell Amount (%)</span>
+                <StrategyTooltip name="tpPercent" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="tpPercent"
+                  value={view.tpPercent ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("tpPercent")}
+                  disabled={disabled}
+                  placeholder="e.g. 100"
+                  className={INP}
+                />
+              </div>
+            </div>
+
+            {/* SL Sell Amount (%) */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-1 text-sm font-medium text-zinc-300">
+                <span>SL Sell Amount (%)</span>
+                <StrategyTooltip name="slPercent" />
+              </div>
+              <div className={FIELD_WRAP}>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="slPercent"
+                  value={view.slPercent ?? ""}
+                  onChange={handleChange}
+                  onBlur={handleBlur("slPercent")}
+                  disabled={disabled}
+                  placeholder="e.g. 100"
                   className={INP}
                 />
               </div>

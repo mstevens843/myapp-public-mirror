@@ -20,7 +20,7 @@ import {
 
 import { manualBuy } from "../../utils/api";
 import { getOpenTrades, fetchPricesBatch } from "../../utils/trades_positions";
-import { getWalletNetworth } from "../../utils/api";
+import { getWalletNetworth, getWalletSnapshotShared } from "../../utils/api";
 
 // Wallet APIs
 import {
@@ -69,45 +69,67 @@ export default function WalletBalancePanel({ onWalletSwitched }) {
   }, []);
 
   /* ---------------- Balances / open trades ---------------- */
-  const fetchNetAndOpen = async () => {
-    setLoading(true);
-    try {
-      const [netRes, openRes] = await Promise.allSettled([
-        getWalletNetworth(), // server may include extra spl/dust; we'll compute display sum ourselves
-        getOpenTrades({ take: 100, skip: 0, walletId: activeWalletId }),
-      ]);
+// WalletBalancePanel.jsx — optimized fetchNetAndOpen
+const fetchNetAndOpen = async () => {
+  setLoading(true);
+  try {
+ const [netRes, openRes] = await Promise.allSettled([
+   getWalletSnapshotShared(),
+      getOpenTrades({ take: 100, skip: 0, walletId: activeWalletId }),
+    ]);
 
-      if (netRes.status === "fulfilled") {
-        setNet(netRes.value);
-      } else {
-        console.error("❌ networth fetch failed:", netRes.reason);
-        toast.error("Could not refresh net worth.");
-      }
-
-      if (openRes.status === "fulfilled") {
-        const scoped = (openRes.value || []).filter(t => t.walletId === activeWalletId);
-        const trades = scoped.filter((t) => !STABLE_MINTS.has(t.mint));
-
-        const mints = [...new Set(trades.map(t => t.mint))];
-        let priceMap = {};
-        try { priceMap = await fetchPricesBatch(mints); } catch (_) {}
-
-        let totalUSD = 0;
-        for (const t of trades) {
-          const usd = (typeof t.usdValue === "number")
-            ? t.usdValue
-            : (Number(priceMap[t.mint] || 0) * Number(t.outAmount ?? 0)) / 10 ** (t.decimals ?? 9);
-          totalUSD += usd;
-        }
-        setOpen({ count: trades.length, value: +totalUSD.toFixed(2) });
-      } else {
-        console.warn("⚠️ open trades fetch failed:", openRes.reason);
-        setOpen({ count: 0, value: 0 });
-      }
-    } finally {
-      setLoading(false);
+    // 1) Net worth + build price map from it
+    let priceFromNet = {};
+    if (netRes.status === "fulfilled") {
+      setNet(netRes.value);
+      priceFromNet = Object.fromEntries(
+        (netRes.value?.tokenValues || [])
+          .filter(t => t?.mint)
+          .map(t => [t.mint, Number(t.price || 0)])
+      );
+      priceFromNet[SOL_MINT]  = Number(
+        (netRes.value?.tokenValues || []).find(t => t.mint === SOL_MINT)?.price || 0
+      );
+      priceFromNet[USDC_MINT] = 1;
+    } else {
+      console.error("❌ networth fetch failed:", netRes.reason);
+      toast.error("Could not refresh net worth.");
     }
-  };
+
+    // 2) Open trades
+    if (openRes.status === "fulfilled") {
+      const scoped = (openRes.value || []).filter(t => t.walletId === activeWalletId);
+      const trades = scoped.filter(t => !STABLE_MINTS.has(t.mint));          // :contentReference[oaicite:7]{index=7}
+
+      // Only fetch for mints we don't already know from networth
+      const missing = [...new Set(trades.map(t => t.mint))]
+        .filter(m => !(m in priceFromNet) || !Number.isFinite(priceFromNet[m]) || priceFromNet[m] <= 0);
+
+      let priceMap = { ...priceFromNet };
+      if (missing.length) {
+        try {
+          const fetched = await fetchPricesBatch(missing);                    // :contentReference[oaicite:8]{index=8}
+          priceMap = { ...priceMap, ...fetched };
+        } catch {}
+      }
+
+      let totalUSD = 0;
+      for (const t of trades) {
+        const usd = (typeof t.usdValue === "number")
+          ? t.usdValue
+          : (Number(priceMap[t.mint] || 0) * Number(t.outAmount ?? 0)) / 10 ** (t.decimals ?? 9); // :contentReference[oaicite:9]{index=9}
+        totalUSD += usd;
+      }
+      setOpen({ count: trades.length, value: +totalUSD.toFixed(2) });
+    } else {
+      console.warn("⚠️ open trades fetch failed:", openRes.reason);
+      setOpen({ count: 0, value: 0 });
+    }
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   useEffect(() => {
     if (activeWalletId != null) fetchNetAndOpen();

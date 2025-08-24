@@ -26,8 +26,8 @@ const StrategyRail = ({
     { value: "breakout", label: "🚀 Breakout" },
     { value: "dipBuyer", label: "💧 Dip Buyer" },
     { value: "chadMode", label: "🔥 Chad" },
-    { value: "delayedSniper", label: "⏱️ Delayed" },
-    { value: "trendFollower", label: "📈 Trend" },
+    // { value: "delayedSniper", label: "⏱️ Delayed" },
+    // { value: "trendFollower", label: "📈 Trend" },
   ];
 
   // Turbo section (single strategy)
@@ -42,6 +42,10 @@ const StrategyRail = ({
     { value: "schedule", label: "🕒 Schedule" },
   ];
 
+    const PAPER_OPTIONS = [
+    { value: "paperTrader", label: "📝 Paper Trader" },
+    { value: "turboPaperTrader", label: "💨📝 Turbo Paper Trader" },
+  ];
   const isActive = (value) =>
     multiModeEnabled ? enabledStrategies.includes(value) : railSelection === value;
 
@@ -140,6 +144,7 @@ const handleClick = (opt) => {
       <Group title="Utility" options={UTILITY_OPTIONS} isUtility />
       {/* New Turbo section */}
       <Group title="Turbo" options={TURBO_OPTIONS} />
+      <Group title="Paper" options={PAPER_OPTIONS} />
     </div>
   );
 };

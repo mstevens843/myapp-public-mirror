@@ -1,107 +1,68 @@
 /* backend/services/strategies/paperTrader.js
    ───────────────────────────────────────────
-   Permanent dry‑run clone of Sniper
+   Paper Trader — Sniper-parity, permanent dry-run
 
-   • Runs *identical* filters, safety checks, quotes & logs
-   • Forces dryRun → simulateBuy()
-   • Trades logged like real ones (strategy:"Paper Trader")
-   • Sell = open‑trades ➜ closed‑trades (handled elsewhere)
+   • Runs identical filters, safety checks, quotes & logs as Sniper
+   • Forces dryRun → simulateBuy() from tradeExecutorSniper
+   • Trades logged like real ones with strategy:"Paper Trader"
+   • Smart-Exit watcher is booted and performs simulated SELLs only
 */
+
+"use strict";
 
 const fs            = require("fs");
 const pLimit        = require("p-limit");
 const { v4: uuid }  = require("uuid");
 const prisma        = require("../../prisma/prisma");
 
-/* ── paid‑API helpers ─────────────────────────────── */
+/* paid API helpers */
 const getTokenShortTermChange = require("./paid_api/getTokenShortTermChanges");
 const getTokenCreationTime    = require("./paid_api/getTokenCreationTime");
 const resolveTokenFeed        = require("./paid_api/tokenFeedResolver");
+const { getPriceAndLiquidity }= require("./paid_api/getTokenPrice");
 
-/* ── safety + logging ─────────────────────────────── */
-const { isSafeToBuyDetailed }          = require("../utils/safety/safetyCheckers/botIsSafeToBuy");
-const { logSafetyResults }             = require("./logging/logSafetyResults");
-const { strategyLog }                  = require("./logging/strategyLogger");
-const { lastTickTimestamps, runningProcesses }
-      = require("../utils/strategy_utils/activeStrategyTracker");
+/* safety + logging */
+const { isSafeToBuyDetailed }  = require("../utils/safety/safetyCheckers/botIsSafeToBuy");
+const { logSafetyResults }     = require("./logging/logSafetyResults");
+const { strategyLog }          = require("./logging/strategyLogger");
+const { lastTickTimestamps, runningProcesses } =
+  require("../utils/strategy_utils/activeStrategyTracker");
 
-/* ── core helpers ─────────────────────────────────── */
-const wm              = require("./core/walletManager");
-const guards          = require("./core/tradeGuards");
-const createCooldown  = require("./core/cooldown");
-const { getSafeQuote }  = require("./core/quoteHelper");
-const { simulateBuy }   = require("./core/tradeExecutor");   // 💯 always simulate
-// ✨ Added in paper-sim-upgrade
-// We introduce a paper execution adapter that can perform more realistic
-// simulations including slippage, latency and partial fills.  The adapter
-// is only used when execModel !== "ideal" (default) so that existing
-// behavior remains unchanged.  See core/paperExecutionAdapter.js for
-// implementation details.
-const { executePaperTrade } = require("./core/paperTrader/paperExecutionAdapter");
-const { passes, explainFilterFail }  = require("./core/passes");
+/* core helpers (mirror Sniper) */
+const wm                       = require("./core/walletManager");
+const guards                   = require("./core/tradeGuards");
+const createCooldown           = require("./core/cooldown");
+const { getSafeQuote }         = require("./core/quoteHelper");
+const { passes, explainFilterFail } = require("./core/passes");
 const { createSummary, tradeExecuted } = require("./core/alerts");
-const runLoop          = require("./core/loopDriver");
-const { initTxWatcher }= require("./core/txTracker");
+const runLoop                  = require("./core/loopDriver");
+const { initTxWatcher }        = require("./core/txTracker");
 
-/* ── misc ─────────────────────────────────────────── */
+/* execution:
+ * - use Sniper's executor so FE/DB/watchers behave identically
+ * - OPTIONAL paper execution adapter to pre-simulate fills/slippage/etc.
+ */
+const { simulateBuy: simulateBuySniper } = require("./core/tradeExecutorSniper");
+const { executePaperTrade }              = require("./core/paperTrader/paperExecutionAdapter");
+
+/* misc */
 const { getWalletBalance, isAboveMinBalance } = require("../utils");
 
-/* ── constants ────────────────────────────────────── */
+/* constants */
 const SOL_MINT  = "So11111111111111111111111111111111111111112";
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 module.exports = async function paperTrader(cfg = {}) {
   console.log("🚀 paperTrader loaded", cfg);
 
-  /* ── logger / rate‑limit helpers ────────────────── */
   const limitBirdeye = pLimit(2);
-  const botId  = cfg.botId || "paperTrader";
-  const log    = strategyLog("paperTrader", botId, cfg);
+  const botId = cfg.botId || "paperTrader";
+  const log   = strategyLog("paperTrader", botId, cfg);
 
-  /* ── force permanent dry‑run ────────────────────── */
-  cfg.dryRun = true;
+  /* ── permanent dry-run ───────────────────────────── */
+  cfg.dryRun = true; // critical: informs executor & watcher
 
-  // ✨ Added in paper-sim-upgrade
-  // Determine whether to use the new paper execution adapter.  The
-  // `execModel` config option controls the simulation style.  When
-  // absent or set to "ideal" we fall back to the existing simulateBuy
-  // implementation to preserve legacy behaviour.  Otherwise we
-  // construct a wrapper around the adapter that accepts the quote,
-  // mint and meta values and forwards simulation parameters.
-  const execModel = cfg.execModel || "ideal";
-  const paperParams = {
-    execModel,
-    seed: cfg.seed || null,
-    latency: cfg.latency || null,
-    slippageBpsCap: cfg.slippageBpsCap || cfg.slippageBps || null,
-    failureRates: cfg.failureRates || null,
-    partials: cfg.partials || null,
-    priorityFeeLamports: cfg.priorityFeeLamports || null,
-    enableShadowMode: cfg.enableShadowMode || false,
-  };
-
-  let execBuy;
-  if (execModel && execModel !== "ideal") {
-    execBuy = async ({ quote, mint, meta }) => {
-      // Generate a deterministic paper run identifier for each run
-      const runId = cfg.paperRunId || uuid();
-      const result = await executePaperTrade({ quote, mint, meta, config: paperParams });
-      // Attach the run id to the result for downstream consumers
-      result.paperRunId = runId;
-      // Log the simulation result for debugging.  In a future
-      // enhancement this data could be persisted to the DB.
-      console.log("[paperExecutionAdapter]", JSON.stringify(result));
-      // Mimic the behaviour of simulateBuy() by returning a
-      // synthetic txHash.  Downstream code uses the return value as
-      // the txHash.  We prefix with "paper:" so any viewers can
-      // distinguish it from a real hash.
-      return `paper:${runId}`;
-    };
-  } else {
-    execBuy = simulateBuy;           // never liveBuy()
-  }
-
-  /* ── config mirroring Sniper ────────────────────── */
+  /* ── config parity with Sniper ───────────────────── */
   const BASE_MINT        = cfg.buyWithUSDC ? USDC_MINT : (cfg.inputMint || SOL_MINT);
   const LIMIT_USD        = +cfg.targetPriceUSD || null;
   const SNIPE_LAMPORTS   = (+cfg.snipeAmount || +cfg.amountToSpend || 0) *
@@ -119,37 +80,63 @@ module.exports = async function paperTrader(cfg = {}) {
   const MAX_OPEN_TRADES  = +cfg.maxOpenTrades   || 9999;
   const MAX_TRADES       = +cfg.maxTrades       || 9999;
   const HALT_ON_FAILS    = +cfg.haltOnFailures  || 3;
+  const DELAY_MS         = +cfg.delayBeforeBuyMs || 0;
+  const PRIORITY_FEE     = +cfg.priorityFeeLamports || 0;
+  const MIN_POOL_USD     = cfg.minPoolUsd != null ? +cfg.minPoolUsd : 50_000;
 
-  /* token‑age / mcap gates */
-  const MIN_TOKEN_AGE_MIN = cfg.minTokenAgeMinutes != null ? +cfg.minTokenAgeMinutes : null;
-  const MAX_TOKEN_AGE_MIN = cfg.maxTokenAgeMinutes != null ? +cfg.maxTokenAgeMinutes : null;
-  const MIN_MARKET_CAP    = cfg.minMarketCap != null ? +cfg.minMarketCap : null;
-  const MAX_MARKET_CAP    = cfg.maxMarketCap != null ? +cfg.maxMarketCap : null;
+  /* safety toggle (parity with Sniper) */
+  const SAFETY_DISABLED =
+    cfg.safetyEnabled === false ||
+    cfg.disableSafety  === true  ||
+    (cfg.safetyChecks &&
+     Object.keys(cfg.safetyChecks).length > 0 &&
+     Object.values(cfg.safetyChecks).every(v => v === false));
 
-  /* UX niceties */
-  const COOLDOWN_MS  = cfg.cooldown != null ? +cfg.cooldown * 1000 : 60_000;
-  const DELAY_MS     = +cfg.delayBeforeBuyMs      || 0;
-  const PRIORITY_FEE = +cfg.priorityFeeLamports   || 0;
+  /* exec model (optional simulation enhancer before DB persist) */
+  const execModel = cfg.execModel || "ideal";
+  const paperParams = {
+    execModel,
+    seed: cfg.seed || null,
+    latency: cfg.latency || null,
+    slippageBpsCap: cfg.slippageBpsCap || cfg.slippageBps || null,
+    failureRates: cfg.failureRates || null,
+    partials: cfg.partials || null,
+    priorityFeeLamports: cfg.priorityFeeLamports || null,
+    enableShadowMode: cfg.enableShadowMode || false,
+  };
 
-  /* safety toggle */
-const SAFETY_DISABLED =
-  botCfg.safetyEnabled === false ||    // NEW explicit master toggle
-  botCfg.disableSafety === true ||     // legacy support
-  (botCfg.safetyChecks &&
-   Object.keys(botCfg.safetyChecks).length > 0 &&
-   Object.values(botCfg.safetyChecks).every(v => v === false));
+  let execBuy;
+  if (execModel && execModel !== "ideal") {
+    // Pre-simulate fills/slippage/latency; then persist via Sniper's simulateBuy
+    execBuy = async ({ quote, mint, meta }) => {
+      const runId = cfg.paperRunId || uuid();
+      const sim = await executePaperTrade({ quote, mint, meta, config: paperParams });
+      const adjusted = { ...quote };
+      if (sim && Array.isArray(sim.fills) && sim.fills.length > 0) {
+        const avgSlipPct = (Number(sim.slippage_bps || 0) / 10_000);
+        adjusted.outAmount = String(Math.floor(Number(quote.outAmount) / (1 + avgSlipPct)));
+        adjusted._paperLatencyMs = sim.latency_ms;
+        adjusted._paperModel = String(paperParams.execModel || "ideal");
+      }
+      const tx = await simulateBuySniper({ quote: adjusted, mint, meta });
+      console.log("[paperExecutionAdapter->Sniper.simulateBuy] tx:", tx);
+      return `paper:${runId}`;
+    };
+  } else {
+    // “ideal” model = straight Sniper simulateBuy (DB+watcher parity)
+    execBuy = simulateBuySniper;
+  }
 
-  /* ── runtime state ───────────────────────────────── */
-  const cd         = createCooldown(COOLDOWN_MS);
-  const summary    = createSummary("Paper Sniper", log, cfg.userId);
+  /* runtime */
+  const cd         = createCooldown(cfg.cooldown != null ? +cfg.cooldown * 1000 : 60_000);
+  const summary    = createSummary("Paper Trader", log, cfg.userId);
   const snipedMint = new Set();
   let   todaySol   = 0;
   let   trades     = 0;
   let   fails      = 0;
 
-  initTxWatcher("PaperTrader");          // purely for parity (no live txs)
+  initTxWatcher("PaperTrader"); // parity; no live tx expected
 
-  /* ── TICK LOOP ───────────────────────────────────── */
   async function tick() {
     if (trades >= MAX_TRADES) return;
 
@@ -158,8 +145,8 @@ const SAFETY_DISABLED =
 
     log("loop", `\n PaperTrader Tick @ ${new Date().toLocaleTimeString()}`);
     lastTickTimestamps[botId] = Date.now();
-    log("info", `[CONFIG] DELAY_MS:${DELAY_MS}  PRIORITY_FEE:${PRIORITY_FEE}  MAX_SLIPPAGE:${MAX_SLIPPAGE}`);
-    log("info", `[CONFIG] pumpWin:${pumpWin}  volWin:${volWin}`);
+    log("info", `[CONFIG] DELAY_MS:${DELAY_MS} PRIORITY_FEE:${PRIORITY_FEE} MAX_SLIPPAGE:${MAX_SLIPPAGE}`);
+    log("info", `[CONFIG] pumpWin:${pumpWin} volWin:${volWin}`);
 
     if (fails >= HALT_ON_FAILS) {
       log("error", "🛑 halted (too many errors)");
@@ -173,47 +160,54 @@ const SAFETY_DISABLED =
       guards.assertTradeCap(trades, MAX_TRADES);
       guards.assertOpenTradeCap("paperTrader", botId, MAX_OPEN_TRADES);
 
+      // (optional) minimal balance check parity — not strictly needed for dry-run,
+      // but harmless and keeps logs aligned with Sniper
+      try { await wm.initWalletFromDb(cfg.userId, cfg.walletId); } catch {}
+      if (!(await wm.ensureMinBalance(0.01, getWalletBalance, isAboveMinBalance))) {
+        log("warn", "Balance below min (soft check) – continuing (paper)");
+      }
+
       /* fetch token list */
       const targets = await resolveTokenFeed("paperTrader", cfg);
-      log("info", `Scanning ${targets.length} tokens…`);
       summary.inc("scanned", targets.length);
+      log("info", `Scanning ${targets.length} tokens…`);
 
       for (const mint of targets) {
         if (trades >= MAX_TRADES) {
-          log("info", "🎯 Trade cap reached – sniper shutting down");
-          log("summary", "✅ Sniper completed (max-trades reached)");
-          await summary.printAndAlert("Sniper");
+          log("info", "🎯 Trade cap reached – paperTrader shutting down");
+          log("summary", "✅ PaperTrader completed (max-trades reached)");
+          await summary.printAndAlert("PaperTrader");
           if (runningProcesses[botId]) runningProcesses[botId].finished = true;
           clearInterval(loopHandle);
           process.exit(0);
         }
 
-        /* cooldown gate */
-        const cooldownMs = cd.hit(mint);
-        if (cooldownMs > 0) continue;
+        /* cooldown */
+        if (cd.hit(mint) > 0) continue;
 
-        /* token‑age gates */
-        if (MIN_TOKEN_AGE_MIN || MAX_TOKEN_AGE_MIN) {
-          const cData  = await getTokenCreationTime(null, mint);
-          const ageMin = cData?.blockUnixTime
-            ? Math.floor((Date.now()/1e3 - cData.blockUnixTime) / 60)
+        /* token-age limits (min/max) */
+        const minAge = cfg.minTokenAgeMinutes != null ? +cfg.minTokenAgeMinutes : null;
+        const maxAge = cfg.maxTokenAgeMinutes != null ? +cfg.maxTokenAgeMinutes : null;
+        if (minAge != null || maxAge != null) {
+          const createdAtUnix = await getTokenCreationTime(mint, cfg.userId);
+          const ageMin = createdAtUnix
+            ? Math.floor((Date.now()/1e3 - createdAtUnix) / 60)
             : null;
-
-          if (MIN_TOKEN_AGE_MIN != null && ageMin < MIN_TOKEN_AGE_MIN) {
+          if (minAge != null && ageMin != null && ageMin < minAge) {
             summary.inc("ageSkipped");
             log("warn", `Age ${ageMin}m < min — skip`);
             continue;
           }
-          if (MAX_TOKEN_AGE_MIN != null && ageMin > MAX_TOKEN_AGE_MIN) {
+          if (maxAge != null && ageMin != null && ageMin > maxAge) {
             summary.inc("ageSkipped");
             log("warn", `Age ${ageMin}m > max — skip`);
             continue;
           }
         }
 
-        /* —— price / volume filter —— */
+        /* price/volume/mcap filters */
         log("info", `Token detected: ${mint}`);
-        log("info",   "Fetching price change + volume…");
+        log("info", "Fetching price change + volume…");
 
         let res;
         try {
@@ -224,8 +218,8 @@ const SAFETY_DISABLED =
               pumpWindow         : pumpWin,
               volumeWindow       : volWin,
               limitUsd           : LIMIT_USD,
-              minMarketCap       : MIN_MARKET_CAP,
-              maxMarketCap       : MAX_MARKET_CAP,
+              minMarketCap       : cfg.minMarketCap != null ? +cfg.minMarketCap : null,
+              maxMarketCap       : cfg.maxMarketCap != null ? +cfg.maxMarketCap : null,
               dipThreshold       : null,
               volumeSpikeMult    : null,
               fetchOverview      : (m) =>
@@ -253,8 +247,8 @@ const SAFETY_DISABLED =
               volTh       : VOLUME_THRESHOLD,
               volWin,
               limitUsd    : LIMIT_USD,
-              minMarketCap    : MIN_MARKET_CAP,
-              maxMarketCap    : MAX_MARKET_CAP,
+              minMarketCap: cfg.minMarketCap != null ? +cfg.minMarketCap : null,
+              maxMarketCap: cfg.maxMarketCap != null ? +cfg.maxMarketCap : null,
               dipThreshold: null,
               recoveryWindow: pumpWin,
               volumeSpikeMult: null
@@ -266,10 +260,34 @@ const SAFETY_DISABLED =
 
         const overview = res.overview;
         log("info", "✅ Passed price/volume/mcap checks");
+
+        /* liquidity check (parity with Sniper) */
+        try {
+          const { liquidity = 0 } = await getPriceAndLiquidity(cfg.userId, mint);
+          const liqNum = Number(liquidity);
+          if (Number.isFinite(liqNum)) {
+            if (liqNum >= MIN_POOL_USD) {
+              log("info", `Liquidity: $${liqNum.toFixed(0)} >= $${MIN_POOL_USD.toFixed(0)} ✅ PASS`);
+            } else {
+              log("warn", `Liquidity: $${liqNum.toFixed(0)} < $${MIN_POOL_USD.toFixed(0)} ❌ FAIL — skip`);
+              summary.inc("liqSkipped");
+              continue;
+            }
+          } else {
+            log("warn", "⚠️ Liquidity non-finite — skip");
+            summary.inc("liqCheckFail");
+            continue;
+          }
+        } catch (e) {
+          log("warn", `⚠️ Liquidity check failed (${e.message}) — skip`);
+          summary.inc("liqCheckFail");
+          continue;
+        }
+
         log("info", `[🎯 TARGET FOUND] ${mint}`);
         summary.inc("filters");
 
-        /* —— safety checks —— */
+        /* safety checks (if enabled) */
         if (!SAFETY_DISABLED) {
           const safeRes = await isSafeToBuyDetailed(mint, cfg.safetyChecks || {});
           if (logSafetyResults(mint, safeRes, log, "paperTrader")) {
@@ -277,15 +295,18 @@ const SAFETY_DISABLED =
             continue;
           }
           summary.inc("safety");
-        } else {log("info", "⚠️ Safety checks DISABLED – proceeding un‑vetted");}
+        } else {
+          log("info", "⚠️ Safety checks DISABLED – proceeding un-vetted (paper)");
+        }
 
-        /* daily cap */
+        /* daily SOL cap (by config) */
         guards.assertDailyLimit(SNIPE_LAMPORTS / 1e9, todaySol, MAX_DAILY_SOL);
 
-        /* —— quote —— */
+        /* quote */
         log("info", "Getting swap quote…");
         let quote;
-        try {log("info",
+        try {
+          log("info",
             `🔍 getSafeQuote — in:${BASE_MINT}, out:${mint}, amt:${SNIPE_LAMPORTS}, slip:${SLIPPAGE}, impact max:${MAX_SLIPPAGE}`
           );
           const resQ = await getSafeQuote({
@@ -320,95 +341,101 @@ const SAFETY_DISABLED =
           `tpPercent=${cfg.tpPercent ?? "null"}, slPercent=${cfg.slPercent ?? "null"}`
         );
 
-        /* —— meta build & buy attempt —— */
+        /* meta (IMPORTANT: keep strategy label = "Paper Trader") */
         const meta = {
-          strategy   : "Paper Trader",
-          walletId   : cfg.walletId,
-          userId     : cfg.userId,
-          slippage   : SLIPPAGE,
-          category   : "PaperTrader",
-          tpPercent  : cfg.tpPercent ?? TAKE_PROFIT,
-          slPercent  : cfg.slPercent ?? STOP_LOSS,
+          strategy        : "Paper Trader",      // ← stays "Paper Trader"
+          category        : "PaperTrader",
+          walletId        : cfg.walletId,
+          userId          : cfg.userId,
+          slippage        : SLIPPAGE,
+          tpPercent       : cfg.tpPercent ?? TAKE_PROFIT,
+          slPercent       : cfg.slPercent ?? STOP_LOSS,
+          dryRun          : true,                // ← informs executor + watcher
+          // so charts can exclude paper rows; also helps UI filters
+          openTradeExtras : { strategy: "paperTrader", isPaper: true, simulated: true },
+          // smart-exit parity
+          ...(cfg.smartExitMode ? { smartExitMode: String(cfg.smartExitMode).toLowerCase() } : {}),
+          ...(cfg.smartExit     ? { smartExit: cfg.smartExit } : {}),
+          ...(cfg.postBuyWatch  ? { postBuyWatch: cfg.postBuyWatch } : {}),
+          // optional idempotency knobs pass-through (if you use them)
+          ...(cfg.idempotencyKey   ? { idempotencyKey: cfg.idempotencyKey } : {}),
+          ...(cfg.idempotencyTtlMs ? { idempotencyTtlMs: cfg.idempotencyTtlMs } : {}),
+          // rpc pool (optional; executor understands these)
+          ...(cfg.rpcEndpoints ? { rpcEndpoints: cfg.rpcEndpoints } : {}),
+          ...(cfg.rpcQuorum    ? { rpcQuorum: cfg.rpcQuorum } : {}),
+          ...(cfg.rpcMaxFanout ? { rpcMaxFanout: cfg.rpcMaxFanout } : {}),
+          ...(cfg.rpcStaggerMs ? { rpcStaggerMs: cfg.rpcStaggerMs } : {}),
+          ...(cfg.rpcTimeoutMs ? { rpcTimeoutMs: cfg.rpcTimeoutMs } : {}),
         };
 
+        /* execute (dry-run) via Sniper executor */
         try {
           if (snipedMint.has(mint)) {
             log("warn", `⚠️ Already sniped ${mint} — skipping dup`);
             continue;
           }
           snipedMint.add(mint);
-         let txHash;
 
-                   // txHash = await execBuy({ quote, wallet, mint, meta });
-          txHash = await execBuy({ quote, mint, meta });
-          console.log("🎯 execBuy returned:", txHash);
+          const txHash = await execBuy({ quote, mint, meta });
+          console.log("🎯 execBuy (paper) returned:", txHash);
         } catch (err) {
           const errMsg = err?.message || JSON.stringify(err) || String(err);
-
-          // Log to structured logs
           log("error", "❌ execBuy failed:");
           log("error", errMsg);
-          log("error", `❌ execBuy failed: ${err.message}`);
           summary.inc("execBuyFail");
           continue;
         }
+
         log("info", `[🎆 SIMULATED BUY] ${mint}`);
 
-
         /* stats banner */
-        const volKey   = `volume${cfg.volumeWindow || "1h"}`;
-        const stats    =
+        const volKey = `volume${cfg.volumeWindow || "1h"}`;
+        log("info",
           `[STATS] price=${(overview?.price ?? 0).toFixed(6)}, ` +
           `mcap=${(overview?.[volKey] ?? 0).toFixed(0)}, ` +
-          `change5m=${((overview?.priceChange5m ?? 0) * 100).toFixed(2)}%`;
-        log("info", stats);
+          `change5m=${((overview?.priceChange5m ?? 0) * 100).toFixed(2)}%`
+        );
 
         /* bookkeeping */
         todaySol += SNIPE_LAMPORTS / 1e9;
         trades++;
         summary.inc("buys");
+
         if (trades >= MAX_TRADES) {
-          log("info", "🎯 Trade cap reached – sniper shutting down");
-          // ✅ print summary first
-          await summary.printAndAlert("Sniper");
-          // ✅ then mark completion after summary
-          log("summary", "✅ Sniper completed (max-trades reached)");
+          log("info", "🎯 Trade cap reached – paperTrader shutting down");
+          await summary.printAndAlert("PaperTrader");
+          log("summary", "✅ PaperTrader completed (max-trades reached)");
           if (runningProcesses[botId]) runningProcesses[botId].finished = true;
           clearInterval(loopHandle);
           process.exit(0);
         }
-        cd.hit(mint);
 
+        cd.hit(mint); // start cooldown
         if (trades >= MAX_TRADES) break;
       }
 
-      fails = 0;                      // reset error streak
+      fails = 0;
     } catch (err) {
-     /* otherwise count the failure and let the normal
-         HALT_ON_FAILS logic decide */
       fails++;
-          if (fails >= HALT_ON_FAILS) {
-          log("error", "🛑 Error limit hit — sniper shutting down");
-          await summary.printAndAlert("Sniper halted on errors");
-          if (runningProcesses[botId]) runningProcesses[botId].finished = true;
-          clearInterval(loopHandle);
-          return;                       // bail out cleanly
-        }
-          summary.inc("errors");
-          log("error", err?.message || String(err));
-            await tradeExecuted({
-              userId     : cfg.userId,
-              mint,
-              tx         : txHash,
-              wl         : cfg.walletLabel || "default",
-              category   : "PaperTrader",
-              simulated  : DRY_RUN,
-              amountFmt  : `${(SNIPE_LAMPORTS / 1e9).toFixed(3)} ${BASE_MINT === SOL_MINT ? "SOL" : "USDC"}`,
-              impactPct  : (quote?.priceImpactPct || 0) * 100,
-            });
-        }
+      if (fails >= HALT_ON_FAILS) {
+        log("error", "🛑 Error limit hit — paperTrader shutting down");
+        await summary.printAndAlert("PaperTrader halted on errors");
+        if (runningProcesses[botId]) runningProcesses[botId].finished = true;
+        clearInterval(loopHandle);
+        return;
+      }
+      summary.inc("errors");
+      log("error", err?.message || String(err));
+    }
 
-  } /* end tick */
+    if (trades >= MAX_TRADES) {
+      await summary.printAndAlert("PaperTrader");
+      log("summary", "✅ PaperTrader completed (max-trades reached)");
+      if (runningProcesses[botId]) runningProcesses[botId].finished = true;
+      clearInterval(loopHandle);
+      process.exit(0);
+    }
+  }
 
   /* banner */
   const feedName = cfg.overrideMonitored

@@ -2,6 +2,7 @@
 // July 2025 — glow pass (neutral pills removed) + Smart-Exit badges
 // Aug 2025 — BigInt-safe remaining calc + post-sell dust auto-sweep
 // Aug 22, 2025 — Merge “Exit Rule” + “TP/SL” into single “Exit Rules” column
+// Aug 24, 2025 — Use server-enriched /trades/open (1 batched price, 1 metadata), drop client enrichment
 
 import React, { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -10,13 +11,10 @@ import {
   getOpenTrades,
   clearDustTrades,
   deleteOpenTrades,
-  fetchTokenMeta,
-  fetchPricesBatch,
 } from "@/utils/trades_positions";
 import { manualSell, fetchTpSlSettings } from "@/utils/api";
 import ExitRuleCell from "./OpenTrades/ExitRuleCell";
 import PendingOrdersTab from "./OpenTrades/PendingOrdersTab";
-// import { formatLocalTimestamp } from "@/utils/timeFormatter"; // (unused)
 import { useUser } from "@/contexts/UserProvider";
 
 import {
@@ -97,41 +95,82 @@ export default function OpenTradesTab({ onRefresh }) {
   const [selected, setSelected] = useState(new Set());
   const [deleteMode, setDeleteMode] = useState(false);
 
-  /* ─── TP/SL loader ─── */
-  const loadTpSl = async () => {
-    const arr = await fetchTpSlSettings("web", "default");
-    setTpSlRules(arr);
-  };
-
   const [filter, setFilter] = useState("All");
   const [tab, setTab] = useState("positions"); // positions | pending
   const [customSell, setCustomSell] = useState({});
+
+  /* ─── TP/SL loader ─── */
+  const loadTpSl = async () => {
+    try {
+      const arr = await fetchTpSlSettings("web", "default");
+      setTpSlRules(Array.isArray(arr) ? arr : []);
+    } catch (e) {
+      console.warn("tp/sl settings load failed:", e?.message || e);
+    }
+  };
 
   /* ─── data loader ─── */
   const load = async () => {
     setLoading(true);
     try {
+      // 1) positions snapshot (for fallback price/meta)
       const posSnap = await getPositions();
       if (posSnap?.refetchOpenTrades) {
+        // slight debounce if backend says it's refreshing
         await new Promise((r) => setTimeout(r, 300));
       }
+      const posArr = Array.isArray(posSnap?.positions) ? posSnap.positions : [];
+
+      // quick lookups from snapshot
+      const snapPrice = {};
+      const snapMeta = {};
+      posArr.forEach((p) => {
+        if (!p?.mint) return;
+        snapPrice[p.mint] = Number(p.price ?? p.priceUSD ?? 0);
+        snapMeta[p.mint] = { name: p.name, symbol: p.symbol, logo: p.logo, url: p.url };
+      });
+
+      // 2) server-enriched open trades (already includes name/symbol/logo/priceUSD)
       const openTrades = await getOpenTrades();
 
-      const solUSD = posSnap?.sol?.price || 0;
-      const posArr = Array.isArray(posSnap?.positions) ? posSnap.positions : [];
-      const snapPrice = {};
-      posArr.forEach((p) => (snapPrice[p.mint] = p.price ?? 0));
+      // Build a price map seeded from snapshot, then prefer server priceUSD
+      const priceMap = { ...snapPrice };
+      for (const t of openTrades || []) {
+        if (!t?.mint) continue;
+        const p = Number(t.priceUSD);
+        if (Number.isFinite(p) && p > 0) priceMap[t.mint] = p;
+      }
 
+      // 3) Bucket by (mint, strategy, walletId)
       const buckets = {};
-      for (const t of openTrades) {
+      for (const t of openTrades || []) {
         if (!t?.mint || t.outAmount == null) continue;
         if (EXCLUDED_MINTS.has(t.mint)) continue;
 
         const key = `${t.mint}_${t.strategy || "manual"}`;
-        buckets[key] ??= { ...t, tokens: 0, spentUSD: 0 };
+        if (!buckets[key]) {
+          buckets[key] = {
+            id: t.id,
+            mint: t.mint,
+            strategy: t.strategy,
+            walletLabel: t.walletLabel,
+            walletId: t.walletId,
+            extras: t.extras || {},
+            decimals: t.decimals ?? 9,
+            createdAt: t.createdAt,
+            timestamp: t.timestamp || t.createdAt,
+            entryPriceUSD: Number(t.entryPriceUSD || 0),
+            // prefer server meta; fall back to snapshot meta
+            name: t.name || t.tokenName || snapMeta[t.mint]?.name || "Unknown",
+            symbol: t.symbol || snapMeta[t.mint]?.symbol || "",
+            logo: t.logo || snapMeta[t.mint]?.logo || "",
+            url: snapMeta[t.mint]?.url || "",
+            tokens: 0,
+            spentUSD: 0,
+          };
+        }
 
-        const dec = t.decimals ?? 9;
-
+        const dec = buckets[key].decimals;
         const out = toBigInt(t.outAmount);
         const closed = toBigInt(t.closedOutAmount || 0);
         const remainingRawBI = biMax0(out - closed);
@@ -141,59 +180,78 @@ export default function OpenTradesTab({ onRefresh }) {
         const remTokens = remainingRaw / 10 ** dec;
         buckets[key].tokens += remTokens;
 
+        // entry USD for this row: convert inAmount → USD (based on unit), then prorate by remaining fraction
+        const solUSD = Number(posSnap?.sol?.price || 0);
         const rowCostUSD =
           t.unit === "sol" ? (Number(t.inAmount) / 1e9) * solUSD : Number(t.inAmount) / 1e6;
-
         const remFrac = Number(out) > 0 ? remainingRaw / Number(out) : 0;
         buckets[key].spentUSD += rowCostUSD * remFrac;
       }
 
-      const bucketMints = [...new Set(Object.values(buckets).map((b) => b.mint))];
-      let priceMap = { ...snapPrice };
-      try {
-        const missing = bucketMints.filter((m) => priceMap[m] == null);
-        if (missing.length) {
-          const extra = await fetchPricesBatch(missing);
-          priceMap = { ...priceMap, ...extra };
-        }
-      } catch (_) {}
-
+      // 4) Build final rows (PnL/value math)
       const built = Object.values(buckets).map((b) => {
         if (b.tokens <= 0) return null;
-        const priceUSD = Number(priceMap[b.mint] ?? 0);
+        const priceUSD = Number(priceMap[b.mint] || 0);
         const valueUSD = +(b.tokens * priceUSD).toFixed(2);
         const pnlUSD = +(valueUSD - b.spentUSD).toFixed(2);
         const pnlPct = b.spentUSD ? (pnlUSD / b.spentUSD) * 100 : 0;
-        const posMatch = posArr.find((p) => p.mint === b.mint) || {};
         const entryUSD = b.spentUSD && b.tokens ? b.spentUSD / b.tokens : null;
 
-        // Normalize smart-exit metadata for the cell
-        const m = b.smartExit || {};
+        // Normalize smart-exit metadata for the cell (from extras or legacy fields)
+        const m = (b.extras || b.smartExit || {});
 
-        // Derive explicit hold seconds so ExitRuleCell can show a live countdown
+        // explicit seconds; else minutes → seconds
         const timeMaxHoldSec =
           (m && m.time && Number(m.time.maxHoldSec)) ||
-          Number(b.timeMaxHoldSec) ||
+          Number(b.extras?.timeMaxHoldSec) ||
           (Number(m.smartExitTimeMins) ? Math.floor(Number(m.smartExitTimeMins) * 60) : undefined) ||
           (Number(b.smartExitTimeMins) ? Math.floor(Number(b.smartExitTimeMins) * 60) : undefined);
 
+        // coalesce, then parse "50" / "50%" → 50
+        const minGateRaw =
+          m?.time?.minPnLBeforeTimeExitPct ??
+          m?.minPnLBeforeTimeExitPct ??
+          b?.extras?.timeMinPnLBeforeTimeExitPct ??
+          b?.extras?.minPnLBeforeTimeExitPct ??
+          b?.minPnLBeforeTimeExitPct ??
+          m?.timeMinPnLBeforeTimeExitPct;
+        const toNumOrNull = (v) => {
+          if (v == null) return null;
+          let s = String(v).trim();
+          if (s.endsWith("%")) s = s.slice(0, -1).trim();
+          const n = Number(s);
+          return Number.isFinite(n) ? n : null;
+        };
+        const minPnLBeforeTimeExitPct = toNumOrNull(minGateRaw);
+
         const smartExit = {
-          mode: m.mode ?? b.smartExitMode ?? m.smartExitMode ?? "none",
+          mode: m.mode ?? m.smartExitMode ?? b.extras?.smartExitMode ?? b.smartExitMode ?? "none",
           smartExitTimeMins: m.smartExitTimeMins ?? b.smartExitTimeMins,
           smartVolLookbackSec: m.smartVolLookbackSec ?? b.smartVolLookbackSec,
           smartVolThreshold: m.smartVolThreshold ?? b.smartVolThreshold,
           smartLiqLookbackSec: m.smartLiqLookbackSec ?? b.smartLiqLookbackSec,
           smartLiqDropPct: m.smartLiqDropPct ?? b.smartLiqDropPct,
           timeMaxHoldSec: timeMaxHoldSec || undefined,
+          time:
+            (timeMaxHoldSec || minPnLBeforeTimeExitPct != null)
+              ? { maxHoldSec: timeMaxHoldSec, minPnLBeforeTimeExitPct }
+              : undefined,
+          minPnLBeforeTimeExitPct,
         };
+
         return {
-          mint: b.mint,
-          name: posMatch.name || b.tokenName || "Unknown",
-          symbol: posMatch.symbol || "",
-          url: posMatch.url || "",
-          logo: posMatch.logo || "",
-          strategy: b.strategy,
+          // keep identity + extras
+          id: b.id,
+          walletLabel: b.walletLabel,
           walletId: b.walletId,
+          extras: b.extras || {},
+
+          mint: b.mint,
+          name: b.name,
+          symbol: b.symbol,
+          url: b.url,
+          logo: b.logo,
+          strategy: b.strategy,
           entryUSD,
           priceUSD,
           spentUSD: b.spentUSD === 0 ? 0 : b.spentUSD,
@@ -201,43 +259,22 @@ export default function OpenTradesTab({ onRefresh }) {
           pnlUSD,
           pnlPct,
           tokens: b.tokens,
+
+          // Timestamp for countdown correctness
           timestamp: b.timestamp,
+          createdAt: b.createdAt,
           smartExit,
         };
       });
 
-      // Enrich unknown token meta
-      try {
-        const unknownMints = [
-          ...new Set(
-            (built || [])
-              .filter((r) => r && (!r.name || r.name === "Unknown"))
-              .map((r) => r.mint)
-              .filter(Boolean)
-          ),
-        ];
-        if (unknownMints.length) {
-          const metaMap = await fetchTokenMeta(unknownMints);
-          for (let i = 0; i < built.length; i++) {
-            const r = built[i];
-            if (!r) continue;
-            const meta = metaMap[r.mint];
-            if (meta) {
-              built[i] = {
-                ...r,
-                name: r.name && r.name !== "Unknown" ? r.name : meta.name || r.name,
-                symbol: r.symbol || meta.symbol || "",
-                logo: r.logo || meta.logo || "",
-              };
-            }
-          }
-        }
-      } catch (e) {
-        console.warn("meta enrichment failed:", e?.message || e);
-      }
+      // No client metadata or price enrichment here:
+      // - prices come from server (priceUSD) with snapshot fallback already merged
+      // - metadata (name/symbol/logo) is provided by server and reused as-is
 
       setRows(built.filter(Boolean));
       setSelected(new Set());
+    } catch (err) {
+      console.warn("⚠️ OpenTradesTab.load failed:", err?.message || String(err));
     } finally {
       setLoading(false);
     }
@@ -362,7 +399,7 @@ export default function OpenTradesTab({ onRefresh }) {
                       return acc;
                     }, {});
                     for (const [wid, mints] of Object.entries(grouped)) {
-                      await deleteOpenTrades(mints, false, wid);
+                      await deleteOpenTrades(mints, false, Number(wid));
                     }
                     toast.success(`Deleted ${selected.size} row(s).`);
                     exitDeleteMode();
@@ -576,16 +613,18 @@ export default function OpenTradesTab({ onRefresh }) {
 
                       {/* Exit Rules (TP/SL + Smart Exit) */}
                       <td className="py-2 px-3 text-left">
-                          <ExitRuleCell
-                            mint={r.mint}
-                            strategy={r.strategy}
-                            walletId={r.walletId}
-                            walletLabel={r.walletLabel}
-                            rules={rulesForThisRow}
-                            smartExit={r.smartExit}
-                            entryTs={r.timestamp}
-                            onSaved={refresh}
-                          />
+                        <ExitRuleCell
+                          tradeId={r.id}
+                          walletId={r.walletId}
+                          walletLabel={r.walletLabel}
+                          mint={r.mint}
+                          strategy={r.strategy}
+                          rules={rulesForThisRow}
+                          smartExit={r.smartExit || r.extras || {}}
+                          // ✨ pass a reliable time anchor (works whether backend sends `timestamp` or `createdAt`)
+                          entryTs={r.timestamp || r.createdAt}
+                          onSaved={refresh}
+                        />
                       </td>
 
                       {/* sell */}
@@ -658,5 +697,13 @@ export default function OpenTradesTab({ onRefresh }) {
         </footer>
       )}
     </div>
+  );
+}
+
+function ChevronRight(props) {
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none">
+      <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" />
+    </svg>
   );
 }

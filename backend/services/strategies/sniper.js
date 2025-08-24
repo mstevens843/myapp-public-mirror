@@ -266,20 +266,37 @@ module.exports = async function sniperStrategy(botCfg = {}) {
         const overview = res.overview;
         log("info", "✅ Passed price/volume/mcap checks");
 
-        /* Liquidity check (configurable) */
-        try {
-          const { liquidity = 0, updateUnixTime = 0 } = await getPriceAndLiquidity(botCfg.userId, mint);
-          log("info", `Liquidity = $${Number(liquidity).toFixed(0)} (threshold $${Number(MIN_POOL_USD).toFixed(0)})`);
-          if (!(Number.isFinite(liquidity) && liquidity >= MIN_POOL_USD)) {
-            log("warn", `⛔ Insufficient pool liquidity ($${Number(liquidity).toFixed(0)} < $${Number(MIN_POOL_USD).toFixed(0)}) — skip`);
+      /* Liquidity check (configurable) */
+      try {
+        const { liquidity = 0, updateUnixTime = 0 } = await getPriceAndLiquidity(botCfg.userId, mint);
+
+        const liqNum = Number(liquidity);
+        const minUsd = Number(MIN_POOL_USD);
+
+        if (Number.isFinite(liqNum)) {
+          if (liqNum >= minUsd) {
+            log(
+              "info",
+              `Liquidity check: $${liqNum.toFixed(0)} >= $${minUsd.toFixed(0)} ✅ PASS`
+            );
+          } else {
+            log(
+              "warn",
+              `Liquidity check: $${liqNum.toFixed(0)} >= $${minUsd.toFixed(0)} ❌ FAIL — skip`
+            );
             summary.inc("liqSkipped");
             continue;
           }
-        } catch (e) {
-          log("warn", `⚠️ Liquidity check failed (${e.message}) — skip`);
+        } else {
+          log("warn", `⚠️ Liquidity check returned non-finite value — skip`);
           summary.inc("liqCheckFail");
           continue;
         }
+      } catch (e) {
+        log("warn", `⚠️ Liquidity check failed (${e.message}) — skip`);
+        summary.inc("liqCheckFail");
+        continue;
+      }
 
         log("info", `[🎯 TARGET FOUND] ${mint}`);
         summary.inc("filters");
@@ -287,6 +304,11 @@ module.exports = async function sniperStrategy(botCfg = {}) {
         /* safety checks */
         log("info", "[SAFETY] Running safety checks…");
         if (!SAFETY_DISABLED) {
+          const flags = botCfg.safetyChecks || {};
+          const pretty = Object.entries(flags)
+            .map(([k, v]) => `${k}:${v ? "ON" : "off"}`)
+            .join(", ");
+          log("info", `[SAFETY] Active checks → ${pretty || "none"}`);
           const safeRes = await isSafeToBuyDetailed(mint, botCfg.safetyChecks || {});
           if (logSafetyResults(mint, safeRes, log, "sniper")) {
             summary.inc("safetyFail");

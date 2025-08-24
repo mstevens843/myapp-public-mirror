@@ -34,6 +34,72 @@ function __getPage(req, defaults = { take: 100, skip: 0, cap: 500 }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+
+// ── Metadata cache (name/symbol/logo) ──────────────────────────────────────────
+const META_TTL_MS = 168 * 60 * 60 * 1000; // 24h; metadata only (prices NOT cached)
+const _metaCache = new Map(); // mint -> { ts, name, symbol, logo }
+
+// Thresholds aligned with getFullNetWorth.js (dust/liquidity/staleness)
+const DUST_USD = 0.05;               // same as Net Worth app mode
+const LIQ_FLOOR_USD = 1000;          // same as Net Worth guardrail
+const MAX_PRICE_STALENESS_SEC = 6 * 3600; // same as Net Worth guardrail
+
+function normalizeLogo(uri) {
+  if (!uri || typeof uri !== "string") return null;
+  try {
+    // fotofolio passthrough support
+    if (uri.includes("fotofolio") && uri.includes("url=")) {
+      const u = new URL(uri);
+      const real = u.searchParams.get("url");
+      if (real) return decodeURIComponent(real);
+    }
+    // ipfs://… → https://ipfs.io/ipfs/…
+    if (uri.startsWith("ipfs://")) return `https://ipfs.io/ipfs/${uri.slice(7)}`;
+    if (uri.includes("/ipfs/") && !uri.includes("ipfs.io/ipfs/")) {
+      const after = uri.split("/ipfs/")[1];
+      if (after) return `https://ipfs.io/ipfs/${after}`;
+    }
+    return uri;
+  } catch {
+    return uri;
+  }
+}
+
+async function fetchMetaForMints(userId, mints = []) {
+  const out = {};
+  const now = Date.now();
+  const need = [];
+
+  for (const mint of new Set(mints.filter(Boolean))) {
+    const hit = _metaCache.get(mint);
+    if (hit && now - hit.ts < META_TTL_MS) {
+      out[mint] = { name: hit.name, symbol: hit.symbol, logo: hit.logo };
+    } else {
+      need.push(mint);
+    }
+  }
+
+  // Fetch missing ones; NOTE: we do NOT cache prices here—metadata only.
+  for (const mint of need) {
+    try {
+      const meta = await getTokenMetadata(userId, mint).catch(() => null);
+      const rec = {
+        ts: now,
+        name: (meta?.name || "").replace(/[^\x20-\x7E]/g, "") || "Unknown",
+        symbol: meta?.symbol || "",
+        logo: normalizeLogo(meta?.logo_uri || meta?.logoURI || meta?.logo || ""),
+      };
+      _metaCache.set(mint, rec);
+      out[mint] = { name: rec.name, symbol: rec.symbol, logo: rec.logo };
+    } catch {
+      // Keep unknown; don't poison cache permanently.
+    }
+  }
+  return out;
+}
+
+
+
 // Stable-coin mints we ignore in positions
 const STABLES = new Set([
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
@@ -52,7 +118,7 @@ const EXCLUDE_MINTS = new Set([
 const PDT_ZONE = "America/Los_Angeles";
 const MIN_IMPORT_USD = 0.25;
 const MIN_LIQUIDITY_USD = Number(process.env.MIN_LIQUIDITY_USD || 1000);
-const MAX_PRICE_STALENESS_SEC = Number(process.env.MAX_PRICE_STALENESS_SEC || 6*3600)
+
 
 router.use(requireAuth);      // all routes below are now authenticated
 
@@ -297,7 +363,8 @@ router.get("/recap", async (req,res)=>{
       where:{
         wallet:{userId:req.user.id},
         exitedAt:{ gte:start, lt:tomorrow },
-        NOT:{ strategy:"paperTrader" }       // 🚫 exclude paper
+        // 🚫 exclude Paper in daily recap
+        NOT:{ strategy: { equals: "Paper Trader", mode: "insensitive" } }
       }
     });
 
@@ -332,9 +399,9 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
   try {
     /* 0️⃣ Ensure DB has every current on-chain holding */
     const didInject = await injectUntracked(req.user.id);
+
     /* 1️⃣ Which wallet?  activeWalletId unless ?walletLabel provided */
-    
-    let active = await prisma.user.findUnique({
+    const active = await prisma.user.findUnique({
       where : { id: req.user.id },
       select: { activeWalletId: true }
     });
@@ -349,10 +416,9 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
     const wallet = await prisma.wallet.findFirst({
       where : { userId: req.user.id, ...walletFilter },
     });
-    if (!wallet)
-      return res.status(404).json({ error: "No wallet found for user." });
+    if (!wallet) return res.status(404).json({ error: "No wallet found for user." });
 
-    /* 2️⃣ On-chain token balances */
+    /* 2️⃣ On-chain token balances (authoritative source of “new mints”) */
     const connWallet = { publicKey: new PublicKey(wallet.publicKey) };
     const tokenAccounts = await getTokenAccountsAndInfo(connWallet.publicKey);
 
@@ -361,54 +427,107 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
       where : { wallet: { userId: req.user.id } },
       orderBy: { timestamp: "asc" },
     });
-    
+
     // keep only rows that still have tokens left
-    const openRows = allRows.filter(r =>
-      BigInt(r.closedOutAmount ?? 0) < BigInt(r.outAmount ?? 0)
+    const openRows = allRows.filter(
+      (r) => BigInt(r.closedOutAmount ?? 0) < BigInt(r.outAmount ?? 0)
     );
 
-    /* 4️⃣ Prices */
+    /* 4️⃣ Prices (ONE batched multi_price call) */
     const solBalance = await getWalletBalance(connWallet);
-    const solPrice   = await getCachedPrice(SOL_MINT, { readOnly:true });
+    const solPrice   = await getCachedPrice(SOL_MINT, { readOnly: true });
 
-    // ── 4a) Batched token quotes (liquidity + freshness gate) ───────────────
-      const nowSec = Math.floor(Date.now() / 1e3);
+    const nowSec = Math.floor(Date.now() / 1e3);
 
-      // Mints currently on-chain (non-stable, non-dust)
-      const onchainMints = tokenAccounts
-        .filter(t => !STABLES.has(t.mint) && t.amount >= 1e-6)
-        .map(t => t.mint);
+    // Mints currently on-chain (non-stable, non-dust)
+    const onchainMints = tokenAccounts
+      .filter((t) => !STABLES.has(t.mint) && t.amount >= 1e-6)
+      .map((t) => t.mint);
 
-      // “Sold but logged” mints (in DB with remaining rows; not on-chain now)
-      const soldMints = Array.from(new Set(
-        openRows.map(r => r.mint)
-      )).filter(m => !STABLES.has(m) && !onchainMints.includes(m));
+    // “Sold but logged” mints (in DB with remaining rows; not on-chain now)
+    const soldMints = Array.from(
+      new Set(openRows.map((r) => r.mint))
+    ).filter((m) => !STABLES.has(m) && !onchainMints.includes(m));
 
-      // Unique list to quote
-      const mintsToQuote = Array.from(new Set([...onchainMints, ...soldMints]));
+    // Unique list to quote
+    const mintsToQuote = Array.from(new Set([...onchainMints, ...soldMints]));
 
-      // One batched hit to Birdeye multi_price?include_liquidity=true
-      const quotes = mintsToQuote.length
-        ? await getPricesWithLiquidityBatch_TRADES(req.user.id, mintsToQuote)
-        : {};
+    // ONE batched hit to Birdeye multi_price?include_liquidity=true
+    const quotes = mintsToQuote.length
+      ? await getPricesWithLiquidityBatch_TRADES(req.user.id, mintsToQuote)
+      : {};
 
-      // Gate helper
-      function priceFor(mint) {
-        const q = quotes[mint] || {};
-        const price = Number(q.price || 0);
-        const liq   = Number(q.liquidity || 0);
-        const ut    = Number(q.updateUnixTime || 0);
-        const fresh = ut && (nowSec - ut) <= MAX_PRICE_STALENESS_SEC;
-        return (fresh && liq >= MIN_LIQUIDITY_USD) ? price : 0;
+    // Gate helper (liquidity + staleness)
+    function priceFor(mint) {
+      const q = quotes[mint] || {};
+      const price = Number(q.price || 0);
+      const liq   = Number(q.liquidity || 0);
+      const ut    = Number(q.updateUnixTime || 0);
+      const fresh = ut && nowSec - ut <= MAX_PRICE_STALENESS_SEC;
+      return fresh && liq >= MIN_LIQUIDITY_USD ? price : 0;
+    }
+
+    /* 4b️⃣ Metadata (ONE batched wallet token_list scan + cache; NO per-mint fallback) */
+    // Build the set of mints we need metadata for (includes “sold but logged”)
+    const metaNeed = Array.from(new Set([...onchainMints, ...soldMints]));
+
+    const metaByMint = {};                 // mint -> { name, symbol, logo }
+    const nowMs      = Date.now();
+    const cold       = [];                 // misses to look up
+
+    // 1) Serve fresh cache hits immediately
+    for (const mint of metaNeed) {
+      const hit = _metaCache.get(mint);
+      if (hit && nowMs - hit.ts < META_TTL_MS) {
+        metaByMint[mint] = { name: hit.name, symbol: hit.symbol, logo: hit.logo };
+      } else {
+        cold.push(mint);
       }
+    }
 
-    // const settings     = loadSettings();
-    // const userSettings = settings[wallet.label] || {}; // tp/sl per wallet
+    // 2) ONE wallet token_list scan to satisfy many mints at once (if available)
+    let stillMissing = cold.slice();
+    try {
+      if (cold.length && typeof scanWalletTokenList === "function" && wallet.publicKey) {
+        const scan = await scanWalletTokenList(req.user.id, wallet.publicKey); // Map<mint, {name,symbol,logoURI,decimals}>
+        if (scan && scan.size) {
+          const nextMissing = [];
+          for (const mint of cold) {
+            const row = scan.get(mint);
+            if (row) {
+              const rec = {
+                ts    : nowMs,
+                name  : (row.name || "").replace(/[^\x20-\x7E]/g, "") || "Unknown",
+                symbol: row.symbol || "",
+                logo  : normalizeLogo(row.logoURI || row.logo_uri || row.logo || ""),
+              };
+              _metaCache.set(mint, rec);
+              metaByMint[mint] = { name: rec.name, symbol: rec.symbol, logo: rec.logo };
+            } else {
+              nextMissing.push(mint);
+            }
+          }
+          stillMissing = nextMissing;
+        }
+      }
+    } catch (_) {
+      // swallow; if scan fails, we'll leave unknowns and NOT do per-mint lookups
+    }
+
+    // 3) NO single-mint metadata fallback (avoid per-mint calls).
+    //    Leave any remaining mints as Unknown and fill in over time via cache on future scans.
+    for (const mint of stillMissing) {
+      if (!metaByMint[mint]) {
+        metaByMint[mint] = { name: "Unknown", symbol: "", logo: "" };
+      }
+    }
+
+    /* 5️⃣ TP/SL rules (unchanged) */
     const tpSlRules = await prisma.tpSlRule.findMany({
       where: { userId: req.user.id, walletId: wallet.id, status: "active" },
     });
     const userSettings = {};
-    tpSlRules.forEach(rule => {
+    tpSlRules.forEach((rule) => {
       userSettings[rule.mint] = {
         tp: rule.tp,
         sl: rule.sl,
@@ -416,60 +535,37 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
         entryPrice: rule.entryPrice,
       };
     });
-    /* 5️⃣ Assemble positions ------------------------------------ */
+
+    /* 6️⃣ Assemble positions ------------------------------------ */
     const positions = [];
 
     for (const { mint, name, amount } of tokenAccounts) {
-      const metadata   = await getTokenMetadata(req.user.id, mint);
-      const tokenName  = metadata?.name || name?.replace(/[^\x20-\x7E]/g, "") || "Unknown";
-      const symbol     = metadata?.symbol || null;
-      const birdeyeUrl = `https://birdeye.so/token/${mint}`;
-      let logoUri = null;
-
-      const rawUri = metadata.logo_uri;
-
-      if (rawUri.includes("fotofolio.xyz") && rawUri.includes("url=")) {
-        logoUri = decodeURIComponent(rawUri.split("url=")[1]);
-
-      } else if (rawUri.startsWith("ipfs://")) {
-        const ipfsHash = rawUri.replace("ipfs://", "");
-        logoUri = `https://ipfs.io/ipfs/${ipfsHash}`; // ✅ use ipfs.io
-
-      } else if (rawUri.includes("ipfs.io/ipfs/")) {
-        logoUri = rawUri; // already correct
-
-      } else if (rawUri.includes("/ipfs/")) {
-        const ipfsHash = rawUri.split("/ipfs/")[1];
-        logoUri = `https://ipfs.io/ipfs/${ipfsHash}`; // ✅ fallback
-
-      } else {
-        logoUri = rawUri; // normal https:// URL
-      }
       if (STABLES.has(mint) || amount < 1e-6) continue;
 
-      const matches   = openRows.filter(r => r.mint === mint);
-      // --- correct for units -------------------------------
-      const totalCostSOL = matches.reduce(
-        (s,r)=> s + Number(r.inAmount) / 1e9, 0);       // lamports → SOL
-      
-      const totalTokReal = matches.reduce(
-        (s,r)=> s + Number(r.outAmount) / 10**r.decimals, 0); // raw → tokens
-      
-      const weightedEntry = totalTokReal
-        ? +(totalCostSOL / totalTokReal).toFixed(9)      // SOL per token
-        : null;
-      
-      const totalCostUSD = matches.reduce(
-        (s,r)=> s + (Number(r.outAmount) / 10**r.decimals) * r.entryPriceUSD, 0);
-      
-      const entryPriceUSD = totalTokReal
-        ? +(totalCostUSD / totalTokReal).toFixed(6)
-        : null;
+      // 🔁 use batched+cached metadata
+      const m = metaByMint[mint] || {};
+      const tokenName  = m.name || name?.replace(/[^\x20-\x7E]/g, "") || "Unknown";
+      const symbol     = m.symbol || null;
+      const logoUri    = m.logo || null;
+      const birdeyeUrl = `https://birdeye.so/token/${mint}`;
 
-      const price   = priceFor(mint);
-      const valueUSD= +(amount * price).toFixed(2);
-      const tpSl    = userSettings[mint] || null;
-      console.log("🖼️ Logo for", tokenName, mint, "→", logoUri);
+      // Link DB rows for entry calc
+      const matches = openRows.filter((r) => r.mint === mint);
+
+      // Units
+      const totalCostSOL = matches.reduce((s, r) => s + Number(r.inAmount) / 1e9, 0); // lamports → SOL
+      const totalTokReal = matches.reduce((s, r) => s + Number(r.outAmount) / 10 ** r.decimals, 0);
+      const weightedEntry = totalTokReal ? +(totalCostSOL / totalTokReal).toFixed(9) : null;
+
+      const totalCostUSD  = matches.reduce(
+        (s, r) => s + (Number(r.outAmount) / 10 ** r.decimals) * r.entryPriceUSD,
+        0
+      );
+      const entryPriceUSD = totalTokReal ? +(totalCostUSD / totalTokReal).toFixed(6) : null;
+
+      const price    = priceFor(mint);               // from the ONE batched call
+      const valueUSD = +(amount * price).toFixed(2);
+      const tpSl     = userSettings[mint] || null;
 
       positions.push({
         mint,
@@ -479,86 +575,192 @@ router.get("/positions", requireInternalOrAuth, async (req, res) => {
         amount,
         price,
         valueUSD,
-        valueSOL : +(valueUSD/solPrice).toFixed(4),
-        entryPrice      : weightedEntry,
+        valueSOL: +(valueUSD / solPrice).toFixed(4),
+        entryPrice: weightedEntry,
         entryPriceUSD,
-        inAmount: +(totalCostSOL).toFixed(6),
-        strategy        : matches[0]?.strategy ?? "manual",
-        entries         : matches.length,
-        timeOpen        : matches[0] ? new Date(matches[0].timestamp).toLocaleString() : null,
-        tpSl : tpSl ? { tp:tpSl.tp, sl:tpSl.sl, enabled:tpSl.enabled!==false } : null,
+        inAmount: +totalCostSOL.toFixed(6),
+        strategy: matches[0]?.strategy ?? "manual",
+        entries: matches.length,
+        timeOpen: matches[0] ? new Date(matches[0].timestamp).toLocaleString() : null,
+        tpSl: tpSl ? { tp: tpSl.tp, sl: tpSl.sl, enabled: tpSl.enabled !== false } : null,
         url: birdeyeUrl,
       });
     }
 
-    /* 6️⃣ Tokens that are SOLD (row exists, balance zero) -------- */
-    const seen = new Set(positions.map(p=>p.mint));
+    /* 7️⃣ Tokens that are SOLD (row exists, balance zero) -------- */
+    const seen = new Set(positions.map((p) => p.mint));
     for (const r of openRows) {
       if (seen.has(r.mint) || STABLES.has(r.mint)) continue;
+      const m = metaByMint[r.mint] || {}; // prefer batched meta
       const price = priceFor(r.mint);
       positions.push({
-        mint : r.mint,
-        name : await getTokenName(r.mint) || "Unknown",
-        amount:0, price, valueUSD:0, valueSOL:0,
-        entryPrice:null, entryPriceUSD:null,
-        inAmount:0, strategy:r.strategy,
-        entries:0, timeOpen:null,
-        tpSl:null,
-        url:`https://birdeye.so/token/${r.mint}`
+        mint: r.mint,
+        name: m.name || "Unknown",   // ⚠️ no per-mint getTokenName
+        symbol: m.symbol || null,
+        logo: m.logo || null,
+        amount: 0,
+        price,
+        valueUSD: 0,
+        valueSOL: 0,
+        entryPrice: null,
+        entryPriceUSD: null,
+        inAmount: 0,
+        strategy: r.strategy,
+        entries: 0,
+        timeOpen: null,
+        tpSl: null,
+        url: `https://birdeye.so/token/${r.mint}`,
       });
     }
 
-    /* 7️⃣ SOL + USDC summary */
+    /* 8️⃣ SOL + USDC summary */
     const usdcAcc = tokenAccounts.find(
-      t=>t.mint==="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
-    const usdcVal = usdcAcc ? usdcAcc.amount*1 : 0;
-    const solVal  = solBalance*solPrice;
+      (t) => t.mint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    );
+    const usdcVal = usdcAcc ? usdcAcc.amount * 1 : 0;
+    const solVal  = solBalance * solPrice;
 
     res.json({
-      netWorth: +(solVal + usdcVal + positions.reduce((s,t)=>s+t.valueUSD,0)).toFixed(2),
+      netWorth: +(solVal + usdcVal + positions.reduce((s, t) => s + t.valueUSD, 0)).toFixed(2),
       sol: { amount: solBalance, price: solPrice, valueUSD: solVal },
       usdc: usdcAcc ? { amount: usdcAcc.amount, valueUSD: usdcVal } : null,
       positions,
-      refetchOpenTrades: didInject  // 👈 new field!
+      refetchOpenTrades: didInject, // 👈 tells UI to refresh trades if we injected new rows
     });
   } catch (err) {
     console.error("❌ /positions error:", err);
-    res.status(500).json({ error:"Failed to fetch token positions" });
+    res.status(500).json({ error: "Failed to fetch token positions" });
   }
 });
 
+
 /*─────────────────────────── 5. GET CURRENT OPEN TRADES ──────────────────*/
+/*─────────────────────────── helpers ───────────────────────────*/
+// ───────────────── helpers ─────────────────
+function toPlain(v) {
+  if (v === null || v === undefined) return v;
+  if (typeof v === "bigint") return v.toString();
+
+  // ✅ Preserve Date values for the UI (used by countdown)
+  if (v instanceof Date) return v.toISOString();
+
+  // Prisma Decimal (defensive): convert to number
+  if (typeof v === "object" && v?.constructor?.name === "Decimal") {
+    try { return Number(v); } catch { return v?.toString?.() ?? String(v); }
+  }
+
+  if (Array.isArray(v)) return v.map(toPlain);
+  if (typeof v === "object") {
+    const out = {};
+    for (const [k, val] of Object.entries(v)) out[k] = toPlain(val);
+    return out;
+  }
+  return v;
+}
+
 router.get("/open", async (req, res) => {
   try {
-    console.log(`➡️ API HIT: GET /trades/open for user ${req.user.id}`);
+    const userId = req.user?.id;
+    console.log(`➡️ API HIT: GET /trades/open for user ${userId}`);
+
     const { take, skip } = __getPage(req, { take: 100, cap: 500 });
 
-    // Fetch only OPEN rows from DB and paginate there.
+    // optional filters
+    const walletIdParam = req.query.walletId;
+    const walletLabel   = (req.query.walletLabel || "").toString().trim() || undefined;
+
+    let walletId;
+    if (walletIdParam != null) {
+      walletId = Number(walletIdParam);
+      if (!Number.isFinite(walletId)) {
+        return res.status(400).json({ error: "walletId must be a number" });
+      }
+    }
+
+    // Only true open BUY positions; ignore imports/unknown noise
+    const where = {
+      userId,
+      exitedAt: null,
+      type: "buy",
+      strategy: { notIn: ["import", "unknown"] },
+      ...(walletId ? { walletId } : {}),
+      ...(walletLabel ? { walletLabel } : {}),
+    };
+
     const rows = await prisma.trade.findMany({
-      where: { wallet: { userId: req.user.id }, exitedAt: null },
-      orderBy: { timestamp: "asc" },
+      where,
+      orderBy: { createdAt: "desc" }, // newest first
       take,
-      skip
+      skip,
     });
 
-    // Ensure only positions with a remaining amount are returned (defensive)
-    const openTrades = rows.filter(trade =>
-      BigInt(trade.outAmount || 0) > BigInt(trade.closedOutAmount || 0)
+    // keep rows with remaining amount
+    const openTrades = rows.filter(
+      (t) => BigInt(t.outAmount ?? 0n) > BigInt(t.closedOutAmount ?? 0n)
     );
 
-    // Convert BigInt to Number for JSON safety
-    const safeTrades = openTrades.map(trade => ({
-      ...trade,
-      inAmount: Number(trade.inAmount),
-      outAmount: Number(trade.outAmount),
-      closedOutAmount: Number(trade.closedOutAmount),
-    }));
+    // ── 1) Collect mints + remaining amounts (UI units) ────────────────────────
+    const mintsAll = [];
+    const remainingUiByMint = new Map(); // mint -> total UI remaining
+    for (const t of openTrades) {
+      const mint = t.mint;
+      if (!mint) continue;
+      mintsAll.push(mint);
 
-    console.log(`🎯 Found ${safeTrades.length} open trades for user ${req.user.id}`);
-    res.json(safeTrades);
+      const decimals = Number(t.decimals || 0);
+      const outRaw = BigInt(t.outAmount ?? 0n);
+      const closedRaw = BigInt(t.closedOutAmount ?? 0n);
+      const remRaw = outRaw - closedRaw;
+      const remUi = Number(remRaw) / Math.pow(10, decimals);
+      remainingUiByMint.set(mint, (remainingUiByMint.get(mint) || 0) + (Number.isFinite(remUi) ? remUi : 0));
+    }
+    const uniqMints = [...new Set(mintsAll.filter(Boolean))];
+
+    // ── 2) One batched price+liq request (no price cache here) ─────────────────
+    const quotes = await getTokenPrice.getPricesWithLiquidityBatch_TRADES(userId, uniqMints);
+
+    // ── 3) Apply Net Worth–style gates to decide "survivors" for metadata fetch
+    const nowSec = Math.floor(Date.now() / 1000);
+    const priceByMint = {};
+    const survivors = [];
+    for (const mint of uniqMints) {
+      const q = quotes[mint] || {};
+      const price = Number(q.price || 0);
+      const liq   = Number(q.liquidity || 0);
+      const upd   = Number(q.updateUnixTime || 0);
+      const fresh = upd > 0 ? (nowSec - upd) <= MAX_PRICE_STALENESS_SEC : false;
+
+      const remUi = remainingUiByMint.get(mint) || 0;
+      const value = price * remUi;
+
+      const illiquidSoft = liq > 0 && liq < LIQ_FLOOR_USD;
+      const belowDust    = value < DUST_USD;
+
+      const allow = !(belowDust || illiquidSoft || !fresh);
+      priceByMint[mint] = allow ? price : 0;
+      if (allow) survivors.push(mint);
+    }
+
+    // ── 4) Fetch metadata once (metadata only cached) ─────────────────────────
+    const metaMap = await fetchMetaForMints(userId, survivors);
+
+    // ── 5) Merge back into rows and return BigInt/Date-safe objects ───────────
+    const enriched = openTrades.map((t) => {
+      const meta = metaMap[t.mint] || _metaCache.get(t.mint) || {};
+      return toPlain({
+        ...t,
+        name     : meta.name   || t.tokenName || "Unknown",
+        symbol   : meta.symbol || "",
+        logo     : meta.logo   || "",
+        priceUSD : Number(priceByMint[t.mint] || 0),
+      });
+    });
+
+    console.log(`🎯 Found ${openTrades.length} open (enriched) for user ${userId}`);
+    return res.json(enriched);
   } catch (err) {
     console.error("🚨 GET /open error:", err);
-    res.status(500).json({ error: "Failed to fetch open trades." });
+    return res.status(500).json({ error: "Failed to fetch open trades." });
   }
 });
 
@@ -819,44 +1021,89 @@ router.post("/clear-dust", requireAuth, async (req, res) => {
   res.json({ message: "Dust trades cleared.", deleted, closed });
 });
 
+
+
 /*─────────────────────────── 9-b. BULK DELETE SELECTED MINTS ─────────────────*/
 router.delete("/open", requireAuth, async (req, res) => {
-  const { mints = [], walletId, forceDelete = false } = req.body || {};
+  try {
+    const { mints = [], walletId, forceDelete = false } = req.body || {};
 
-  if (!Array.isArray(mints) || mints.length === 0) {
-    return res.status(400).json({ error: "mints[] array required" });
-  }
-  if (!walletId) {
-    return res.status(400).json({ error: "walletId required" });
-  }
+    // Validate inputs
+    if (!Array.isArray(mints) || mints.length === 0) {
+      return res.status(400).json({ error: "mints[] array required" });
+    }
+    const uniqueMints = [...new Set(mints.filter(Boolean))];
 
-  const wallet = await prisma.wallet.findFirst({
-    where: { id: walletId, userId: req.user.id }
-  });
+    if (walletId == null) {
+      return res.status(400).json({ error: "walletId required" });
+    }
+    const wid = Number(walletId);
+    if (!Number.isFinite(wid)) {
+      return res.status(400).json({ error: "walletId must be a number" });
+    }
 
-  if (!wallet) {
-    return res.status(404).json({ error: "Wallet not found." });
-  }
+    // Wallet ownership check
+    const wallet = await prisma.wallet.findFirst({
+      where: { id: wid, userId: req.user.id },
+      select: { id: true },
+    });
+    if (!wallet) {
+      return res.status(404).json({ error: "Wallet not found" });
+    }
 
-  for (const mint of mints) {
+    // Hard delete: remove all open trades for the given mints
     if (forceDelete) {
-      await prisma.trade.deleteMany({
-        where: { walletId: wallet.id, mint, exitedAt: null }
+      const del = await prisma.trade.deleteMany({
+        where: {
+          walletId: wallet.id,
+          mint: { in: uniqueMints },
+          exitedAt: null, // only open rows
+        },
       });
-    } else {
-      await prisma.trade.updateMany({
-        where: { walletId: wallet.id, mint, exitedAt: null },
-        data: {
-          closedOutAmount: Prisma.field("outAmount"),
-          triggerType: "manualDelete",
-          exitedAt: new Date()
-        }
+      return res.json({
+        message: `${del.count} open trade(s) deleted`,
+        deletedCount: del.count,
       });
     }
-  }
 
-  res.json({ message: `${mints.length} mint(s) cleared from open trades.` });
+    // Soft close: set closedOutAmount = outAmount, add exitedAt + triggerType
+    // (Prisma can't set a column from another column in updateMany; do it per-row)
+    const rows = await prisma.trade.findMany({
+      where: {
+        walletId: wallet.id,
+        mint: { in: uniqueMints },
+        exitedAt: null, // only open rows
+      },
+      select: { id: true, outAmount: true },
+    });
+
+    if (rows.length === 0) {
+      return res.json({ message: "No matching open trades found.", updatedCount: 0 });
+    }
+
+    await prisma.$transaction(
+      rows.map((r) =>
+        prisma.trade.update({
+          where: { id: r.id },
+          data: {
+            closedOutAmount: r.outAmount, // BigInt → BigInt
+            triggerType: "manualDelete",
+            exitedAt: new Date(),
+          },
+        })
+      )
+    );
+
+    return res.json({
+      message: `${rows.length} open trade(s) closed`,
+      updatedCount: rows.length,
+    });
+  } catch (err) {
+    console.error("DELETE /trades/open failed:", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
 });
+
 
 
 
@@ -888,6 +1135,325 @@ router.post("/prices/batch", requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message || "Failed to fetch quotes" });
   }
 });
+
+
+
+// ✅ PATCH /api/trades/:id/smart-exit — update fields inside Trade.extras
+router.patch("/:id/smart-exit", requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: "id must be a number" });
+    }
+
+    // Only allow editing open trades owned by the user
+    const trade = await prisma.trade.findFirst({
+      where: { id, wallet: { userId: req.user.id }, exitedAt: null },
+      select: { id: true, extras: true },
+    });
+    if (!trade) {
+      return res.status(404).json({ error: "Open trade not found for user" });
+    }
+
+    const body = req.body || {};
+    const updates = {};
+
+    // Normalize + validate
+    if (body.smartExitMode != null) {
+      updates.smartExitMode = String(body.smartExitMode).toLowerCase(); // "time" | "liquidity" | "volume" | "off"
+    }
+    if (body.timeMaxHoldSec != null) {
+      const s = Number(body.timeMaxHoldSec);
+      if (!Number.isFinite(s) || s < 0) {
+        return res.status(400).json({ error: "timeMaxHoldSec must be >= 0" });
+      }
+      updates.timeMaxHoldSec = Math.floor(s);
+    }
+    if (body.smartLiqDropPct != null) {
+      const p = Number(body.smartLiqDropPct);
+      if (!Number.isFinite(p)) return res.status(400).json({ error: "smartLiqDropPct must be a number" });
+      updates.smartLiqDropPct = p;
+    }
+    if (body.smartVolThreshold != null) {
+      const v = Number(body.smartVolThreshold);
+      if (!Number.isFinite(v)) return res.status(400).json({ error: "smartVolThreshold must be a number" });
+      updates.smartVolThreshold = v;
+    }
+
+    // Merge, and drop null/empty + invalid “0 sec” time
+    const merged = { ...(trade.extras || {}), ...updates };
+    for (const k of Object.keys(merged)) {
+      const val = merged[k];
+      if (val == null || val === "") delete merged[k];
+      if (k === "timeMaxHoldSec" && (!Number.isFinite(Number(val)) || Number(val) <= 0)) {
+        delete merged[k];
+      }
+    }
+
+    const updated = await prisma.trade.update({
+      where: { id: trade.id },
+      data: { extras: merged },
+      select: { id: true, extras: true },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("PATCH /trades/:id/smart-exit failed:", err);
+    res.status(500).json({ error: err.message || "Internal error" });
+  }
+});
+
+// ✅ POST /api/trades/:id/smart-exit/cancel — turn it off & clear knobs
+router.post("/:id/smart-exit/cancel", requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: "id must be a number" });
+    }
+
+    const trade = await prisma.trade.findFirst({
+      where: { id, wallet: { userId: req.user.id }, exitedAt: null },
+      select: { id: true, extras: true },
+    });
+    if (!trade) {
+      return res.status(404).json({ error: "Open trade not found for user" });
+    }
+
+    const extras = { ...(trade.extras || {}) };
+    extras.smartExitMode = "off";
+    delete extras.timeMaxHoldSec;
+    delete extras.smartLiqDropPct;
+    delete extras.smartVolThreshold;
+    extras.smartExitCancelledAt = new Date().toISOString();
+
+    const updated = await prisma.trade.update({
+      where: { id: trade.id },
+      data: { extras },
+      select: { id: true, extras: true },
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("POST /trades/:id/smart-exit/cancel failed:", err);
+    res.status(500).json({ error: err.message || "Internal error" });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+// Fallback single-mint meta for last-resort misses (uses your existing helper)
+const getTokenMetadata = require("./services/strategies/paid_api/getTokenMetadata");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-memory metadata cache (mint → { data:{name,symbol,logoURI,decimals}, until, pinnedUntil })
+//  - base TTL: 24h
+//  - pin while mint is in trades: +7d (sliding)
+// GC every 60s
+// ─────────────────────────────────────────────────────────────────────────────
+const PIN_TTL_MS  = 7  * 24 * 60 * 60 * 1000;  // 7d
+const metaCache   = new Map(); // mint -> { data, until, pinnedUntil }
+
+function isFresh(rec, now = Date.now()) {
+  if (!rec) return false;
+  const exp = Math.max(rec.until || 0, rec.pinnedUntil || 0);
+  return now < exp;
+}
+
+function normalizeLogoURI(raw) {
+  const s = (raw || "").toString();
+  if (!s) return "";
+  if (s.includes("fotofolio.xyz") && s.includes("url=")) {
+    try { return decodeURIComponent(s.split("url=")[1]); } catch { return ""; }
+  }
+  if (s.startsWith("ipfs://")) {
+    const hash = s.replace("ipfs://", "");
+    return `https://ipfs.io/ipfs/${hash}`;
+  }
+  if (s.includes("/ipfs/") && !s.includes("ipfs.io/ipfs/")) {
+    const hash = s.split("/ipfs/")[1];
+    return `https://ipfs.io/ipfs/${hash}`;
+  }
+  return s;
+}
+
+function upsertCache(mint, data, { pin = false } = {}) {
+  const prev  = metaCache.get(mint) || {};
+  const now   = Date.now();
+  const until = now + META_TTL_MS;
+  const pinnedUntil = Math.max(prev.pinnedUntil || 0, pin ? (now + PIN_TTL_MS) : 0);
+  metaCache.set(mint, { data, until, pinnedUntil });
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [mint, rec] of metaCache) {
+    const exp = Math.max(rec.until || 0, rec.pinnedUntil || 0);
+    if (now >= exp) metaCache.delete(mint);
+  }
+}, 60_000);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coalesced wallet token_list scan (fast timeout ~1.5s). Returns Map<mint, data>
+// ─────────────────────────────────────────────────────────────────────────────
+const inFlightScans = new Map(); // key = walletPubkey
+
+async function scanWalletTokenList(userId, walletAddress) {
+  const key = walletAddress;
+  if (inFlightScans.has(key)) return inFlightScans.get(key);
+
+  const p = (async () => {
+    try {
+      // Try CU-aware wrapper first (if present)
+      let resp;
+      if (birdeyeCUCounter) {
+        resp = await birdeyeCUCounter({
+          url: "https://public-api.birdeye.so/defi/wallet/token_list",
+          method: "GET",
+          params: { address: walletAddress },
+          cuCost: (CU_TABLE && CU_TABLE["/defi/wallet/token_list"]) || 1,
+          userId,
+          timeoutMs: 1500,
+        });
+      } else {
+        // Axios fallback
+        const ax = await axios.get(
+          "https://public-api.birdeye.so/defi/wallet/token_list",
+          {
+            params: { address: walletAddress },
+            timeout: 1500,
+            headers: { "X-API-KEY": process.env.BIRDEYE_API_KEY || "" },
+          }
+        );
+        resp = ax?.data;
+      }
+
+      const items = resp?.data?.items || resp?.data || resp?.items || [];
+      const out   = new Map();
+
+      for (const it of items) {
+        const mint     = it?.address || it?.mint || it?.mintAddress || it?.token_address;
+        if (!mint) continue;
+        const name     = it?.name || it?.tokenName || "";
+        const symbol   = it?.symbol || it?.tokenSymbol || "";
+        const logoURI  = normalizeLogoURI(it?.logoURI || it?.logo_uri || it?.logo || "");
+        const decimals = (typeof it?.decimals === "number") ? it.decimals : null;
+        const data     = { name, symbol, logoURI, decimals };
+        out.set(mint, data);
+      }
+      return out;
+    } catch (_) {
+      return new Map();
+    } finally {
+      // let another scan happen after a short window
+      setTimeout(() => inFlightScans.delete(key), 1500);
+    }
+  })();
+
+  inFlightScans.set(key, p);
+  return p;
+}
+
+
+
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /wallets/token-meta  — batch metadata for mints
+// Body: { mints: string[], walletId?: number, walletLabel?: string, pin?: boolean }
+// ─────────────────────────────────────────────────────────────────────────────
+router.post("/token-meta", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    let { mints = [], walletId, walletLabel, pin = false } = req.body || {};
+    if (!Array.isArray(mints)) mints = [];
+    const uniq = [...new Set(mints.filter(Boolean))];
+    if (!uniq.length) return res.json([]);
+
+    // Resolve wallet: prefer explicit walletId → then walletLabel → then user's active → then any user wallet
+    let wallet = null;
+    if (walletId != null) {
+      const wid = Number(walletId);
+      if (!Number.isFinite(wid)) return res.status(400).json({ error: "walletId must be a number" });
+      wallet = await prisma.wallet.findFirst({ where: { id: wid, userId } });
+      if (!wallet) return res.status(404).json({ error: "Wallet not found." });
+    } else if (walletLabel) {
+      wallet = await prisma.wallet.findFirst({ where: { label: walletLabel, userId } });
+    } else {
+      const user = await prisma.user.findUnique({ where: { id: userId } });
+      if (user?.activeWalletId) {
+        wallet = await prisma.wallet.findFirst({ where: { id: user.activeWalletId, userId } });
+      }
+      if (!wallet) {
+        wallet = await prisma.wallet.findFirst({ where: { userId }, orderBy: { id: "asc" } });
+      }
+    }
+
+    const now = Date.now();
+    const out = [];
+    const misses = [];
+
+    // First: serve fresh cache hits immediately
+    for (const mint of uniq) {
+      const rec = metaCache.get(mint);
+      if (rec && isFresh(rec, now)) {
+        out.push({ mint, ...rec.data });
+      } else {
+        misses.push(mint);
+      }
+    }
+
+    // Second: one wallet scan to populate the cache for misses (if wallet known)
+    if (misses.length && wallet?.publicKey) {
+      const scan = await scanWalletTokenList(userId, wallet.publicKey);
+      for (const mint of misses.slice()) {
+        const data = scan.get(mint);
+        if (data) {
+          upsertCache(mint, data, { pin });
+          out.push({ mint, ...data });
+        }
+      }
+    }
+
+    // Third: fallback to single-mint metadata for anything still missing (limited, but usually few)
+    const stillMissing = misses.filter(m => !out.find(x => x.mint === m));
+    for (const mint of stillMissing) {
+      try {
+        const meta = await getTokenMetadata(userId, mint);
+        if (meta) {
+          const data = {
+            name   : meta?.name   || "",
+            symbol : meta?.symbol || "",
+            logoURI: normalizeLogoURI(meta?.logo_uri || meta?.logoURI || meta?.logo || "")
+          };
+          upsertCache(mint, data, { pin });
+          out.push({ mint, ...data });
+        } else {
+          out.push({ mint, name: "", symbol: "", logoURI: "" });
+        }
+      } catch {
+        out.push({ mint, name: "", symbol: "", logoURI: "" });
+      }
+    }
+
+    // Return only mints the client asked for, in the same order
+    const byMint = new Map(out.map(o => [o.mint, o]));
+    return res.json(uniq.map(m => byMint.get(m) || { mint: m, name: "", symbol: "", logoURI: "" }));
+  } catch (err) {
+    console.error("❌ POST /wallets/token-meta error:", err);
+    return res.status(500).json([]);
+  }
+});
+
+
 
 
 /* ------------------------------------------------------------------------------ */
